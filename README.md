@@ -1,66 +1,56 @@
-# stardust-numpy
+# stardust-numpy (`sdnp`)
 
-Educational NumPy reimplementation in pure Python—`ndarray`, ufuncs,
-indexing, broadcasting, and linear algebra, built for learning by reading
-the source.
+Educational NumPy-style array library in Rust, designed so a **PyO3 Python
+binding** can be added later (see `plan.md` Phase 8).
 
-## Overview
+- `Array<T>` with compile-time generics
+- Auto-promotion: `bool < i64 < f64 < Complex<f64>`
+- 0-D arrays allowed (`shape == []`, size 1); unlike the Python reference
+- No `str` / object / mixed-dtype arrays / runtime dtype API in the Rust core
+- Views share via `Arc`; writes use copy-on-write (not NumPy write-through)
 
-StarDust-Numpy is a from-scratch array library for learning how NumPy-style
-numerical computing works under the hood. The entire core is readable Python
-with module docstrings, numpydoc-style API docs, and 496 automated tests.
-
-**Supported dtypes:** `bool`, `int`, `float`, `complex`, `str`
-
-**Highlights:**
-
-- `ndarray` with views, broadcasting, fancy indexing, and reductions
-- Ufuncs, linear algebra, shape manipulation, sorting, and selection
-- R-style `repr` / `str` formatting
-- Integration tests for real-world workflows
-
-This is **not** a drop-in replacement for [NumPy](https://numpy.org). It
-covers a focused subset of the API for teaching and experimentation.
-
-## Requirements
-
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/) (recommended)
+Spec / behavioral reference: sibling Python project `../numpy` (with intentional differences).
 
 ## Setup
 
 ```bash
-git clone https://github.com/shyunpark4862/stardust-numpy.git
-cd stardust-numpy
-uv sync
+# Install Rust if needed: https://rustup.rs
+cargo test
 ```
 
-## Run tests
-
-```bash
-uv run pytest tests/ -q
-```
-
-## Quick example
-
-```python
-from numpy import array, dot, arange
-
-a = array([[1.0, 2.0], [3.0, 4.0]])
-b = arange(2, dtype=float)
-print(dot(a, b))   # array([5., 11.])
-print(a.T)
-print(a.mean(axis=0))
-```
-
-## Project layout
+## Layout
 
 ```
-src/numpy/     package source (ndarray, ufuncs, mixins, helpers)
-tests/         pytest suite
-main.py        formatting and edge-case demos
+src/
+  dtype.rs       Scalar + Promote + CastTo + AsBool
+  shape.rs       size / strides / contiguity / buffer_index
+  error.rs
+  array/         Array<T>, element get/set (CoW), views (transpose/reshape)
+  index/         IndexSpec, bounds helpers, gather / scatter
+  create.rs      zeros/ones/full/arange/eye
+  broadcast.rs   broadcast_shape / broadcast_to / …
+  ufunc/         kernels + ops + traits (internals pub(crate))
+  stride_iter.rs StrideIter (pub(crate); public API in Phase 7)
+  reduce/        sum/prod/min/max/mean/arg/cum/var/std/any/all
+  join.rs        Phase 5 (pub(crate) stub; reshape/transpose stay in array/view for now)
+  select.rs      Phase 5 (pub(crate) stub)
+  sort.rs        Phase 5 (pub(crate) stub)
+  linalg.rs      Phase 6 (pub(crate) stub)
+  format.rs      Phase 7 (pub(crate) stub)
 ```
 
-## License
+## What already works (Phase 0–4)
 
-MIT License — see source file headers and [LICENSE](LICENSE).
+- `Array::from_vec` / `from_slice` / `get` / `set` (CoW) / `item` / `to_vec` / `as_c_contiguous_slice`
+- `transpose` / `t` / `permute_axes` / `reshape` / `copy` / `broadcast_to` (broadcast views read-only)
+- indexing: `IndexSpec` + `gather` / `scatter` / `scatter_array` (basic → view; fancy/bool → copy; 음수·step·newaxis·ellipsis)
+- `zeros` / `ones` / `full` / `arange` (`i64`) / `eye` (+ broadcasting)
+- ufuncs: `add`/`subtract`/`multiply`/`divide`/`trunc_divide`/`remainder`/`power`/`negative`/`absolute`
+- comparisons + `logical_and`/`or`/`not` + `isnan`/`isinf`/`isfinite`
+- complex: `conj` / `real` / `imag`
+- reductions: `sum`/`prod`/`min`/`max`/`mean`/`argmin`/`argmax`/`cumsum`/`cumprod`/`var`/`std`/`any`/`all` (`axis`, `keepdims`)
+- `dtype::{Scalar, Promote, CastTo, AsBool}`
+
+Intentional differences vs NumPy: no operator overloading; `divide` follows Rust `/`; CoW on write; no `out`/`where`.
+
+Fill in modules phase-by-phase; Python bindings are Phase 8.

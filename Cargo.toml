@@ -1,0 +1,20 @@
+[package]
+name = "sdnp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Educational NumPy-style ndarray library in Rust (Array<T> + promote)"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+num-complex = "0.4"
+num-traits = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+approx = "0.5"
+
+[lib]
+name = "sdnp"
+path = "src/lib.rs"
