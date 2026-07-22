@@ -17,6 +17,7 @@ pub mod error;
 pub(crate) mod format;
 pub mod index;
 pub(crate) mod join;
+pub(crate) mod layout;
 pub(crate) mod linalg;
 pub mod reduce;
 pub(crate) mod select;

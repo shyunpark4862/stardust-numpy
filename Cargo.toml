@@ -14,7 +14,21 @@ thiserror = "2"
 
 [dev-dependencies]
 approx = "0.5"
+criterion = "0.5.1"
 
 [lib]
 name = "sdnp"
 path = "src/lib.rs"
+
+[[bench]]
+name = "paths"
+harness = false
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+incremental = false
+debug = false
+strip = "symbols"
+overflow-checks = false

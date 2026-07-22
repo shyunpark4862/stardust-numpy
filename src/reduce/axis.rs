@@ -216,15 +216,6 @@ impl ReducePlan {
             .all(|(i, &ax)| ax == start + i)
     }
 
-    /// The sole reduced axis, if exactly one axis is reduced.
-    #[inline]
-    pub fn single_reduced_axis(&self) -> Option<usize> {
-        match self.reduced.as_slice() {
-            &[axis] => Some(axis),
-            _ => None,
-        }
-    }
-
     /// Source strides along outer and reduced axes, respectively.
     pub fn outer_reduced_strides(
         &self,
@@ -290,9 +281,7 @@ mod tests {
         assert!(all.is_suffix_reduction(3));
         let mid = ReducePlan::new(&[2, 3, 4], Some(&[1]), false).unwrap();
         assert!(!mid.is_suffix_reduction(3));
-        assert_eq!(mid.single_reduced_axis(), Some(1));
         let skip = ReducePlan::new(&[2, 3, 4], Some(&[0, 2]), false).unwrap();
         assert!(!skip.is_suffix_reduction(3));
-        assert_eq!(skip.single_reduced_axis(), None);
     }
 }

@@ -80,3 +80,62 @@ fn noncontiguous_add() {
     let c = add(&t, &ones).unwrap();
     assert_eq!(c.get(&[0, 1]).unwrap(), 5);
 }
+
+#[test]
+fn row_broadcast_against_transposed_contiguous() {
+    // left transposed (non-contiguous), right row-broadcast (zero stride on
+    // the outer axis) — neither side is contiguous over the full shape, and
+    // their broadcast axes don't line up, so only a partial inner run
+    // should coalesce.
+    let base =
+        Array::from_slice(&(0_i64..12).collect::<Vec<_>>(), &[3, 4]).unwrap();
+    let t = base.transpose(); // shape [4,3], strides [1,4]
+    let row = Array::from_slice(&[10_i64, 20, 30], &[1, 3]).unwrap();
+    let sum = add(&t, &row).unwrap();
+    assert_eq!(sum.shape(), &[4, 3]);
+    for i in 0..4 {
+        for j in 0..3 {
+            let expected = t.get(&[i, j]).unwrap() + row.get(&[0, j]).unwrap();
+            assert_eq!(sum.get(&[i, j]).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn both_operands_non_contiguous_with_differing_broadcast_axes() {
+    let base =
+        Array::from_slice(&(0_i64..12).collect::<Vec<_>>(), &[3, 4]).unwrap();
+    let col = Array::from_slice(&[1_i64, 2, 3], &[3, 1]).unwrap();
+    let left = base.transpose(); // [4,3] broadcast target
+    let right = col.broadcast_to(&[3, 1]).unwrap().transpose(); // [1,3]
+    let result = add(&left, &right).unwrap();
+    assert_eq!(result.shape(), &[4, 3]);
+    for i in 0..4 {
+        for j in 0..3 {
+            let expected =
+                left.get(&[i, j]).unwrap() + col.get(&[j, 0]).unwrap();
+            assert_eq!(result.get(&[i, j]).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn negative_stride_operand_binary() {
+    let a = Array::from_slice(&[1_i64, 2, 3, 4], &[4]).unwrap();
+    let reversed =
+        sdnp::gather(&a, &[sdnp::IndexSpec::slice(None, None, Some(-1))])
+            .unwrap();
+    assert_eq!(reversed.strides(), &[-1]);
+    let ones = Array::from_slice(&[1_i64; 4], &[4]).unwrap();
+    let out = add(&reversed, &ones).unwrap();
+    assert_eq!(out.to_vec(), vec![5, 4, 3, 2]);
+}
+
+#[test]
+fn empty_broadcast_result() {
+    let a = Array::from_slice(&[] as &[i64], &[0, 3]).unwrap();
+    let b = Array::from_slice(&[1_i64, 2, 3], &[1, 3]).unwrap();
+    let out = add(&a, &b).unwrap();
+    assert_eq!(out.shape(), &[0, 3]);
+    assert_eq!(out.to_vec(), Vec::<i64>::new());
+}

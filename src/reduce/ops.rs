@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::reduce::axis::ReducePlan;
 use crate::reduce::kernels::{
     arg_extremum_axis, arg_extremum_flat, cumulate, map_owned_contiguous,
-    reduce_extremum, reduce_fold, reduce_fold_plan, reduce_var,
+    reduce_extremum, reduce_fold, reduce_sum, reduce_sum_plan, reduce_var,
 };
 use crate::reduce::traits::{
     ExtremumReduce, LogicalReduce, MeanReduce, ProdReduce, SumReduce, VarReduce,
@@ -17,7 +17,7 @@ pub fn sum<T: SumReduce>(
     axes: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<Array<T::Acc>> {
-    reduce_fold(a, axes, keepdims, T::identity(), T::accumulate)
+    reduce_sum(a, axes, keepdims, T::identity(), T::accumulate, T::combine)
 }
 
 /// Product of elements along `axes` (bool accumulates as `i64`).
@@ -64,7 +64,8 @@ pub fn mean<T: MeanReduce>(
         return Err(Error::InvalidArgument("mean of empty array".into()));
     }
     let count = plan.inner_n as f64;
-    let sums = reduce_fold_plan(a, &plan, T::identity(), T::accumulate)?;
+    let sums =
+        reduce_sum_plan(a, &plan, T::identity(), T::accumulate, T::combine)?;
     Ok(map_owned_contiguous(sums, |x| T::divide_by_count(x, count)))
 }
 

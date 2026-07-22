@@ -248,6 +248,103 @@ fn scatter_array_broadcast() -> Result<()> {
 }
 
 #[test]
+fn scatter_scalar_column_step() -> Result<()> {
+    // [:, ::2] on a 3x4 array: column stride 2, row gap between axes.
+    let mut a = Array::from_vec((0_i64..12).collect(), &[3, 4])?;
+    scatter(&mut a, &[full(), sl(None, None, Some(2))], 0)?;
+    assert_eq!(a.to_vec(), vec![0, 1, 0, 3, 0, 5, 0, 7, 0, 9, 0, 11]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_row_gap_slice() -> Result<()> {
+    // Select every other row out of a 4x3 array: rows have a stride-6 gap.
+    let mut a = Array::from_vec((0_i64..12).collect(), &[4, 3])?;
+    scatter(&mut a, &[sl(Some(0), None, Some(2)), full()], 99)?;
+    assert_eq!(a.to_vec(), vec![99, 99, 99, 3, 4, 5, 99, 99, 99, 9, 10, 11]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_multi_axis_strided_slice() -> Result<()> {
+    // Step on both axes of a 4x6 array.
+    let mut a = Array::from_vec((0_i64..24).collect(), &[4, 6])?;
+    scatter(
+        &mut a,
+        &[sl(Some(1), None, Some(2)), sl(Some(0), None, Some(3))],
+        0,
+    )?;
+    let expected: Vec<i64> = (0..24)
+        .enumerate()
+        .map(|(i, x)| {
+            let row = i / 6;
+            let col = i % 6;
+            if row % 2 == 1 && row >= 1 && col % 3 == 0 {
+                0
+            } else {
+                x
+            }
+        })
+        .collect();
+    assert_eq!(a.to_vec(), expected);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_negative_step() -> Result<()> {
+    let mut a = Array::from_slice(&[1_i64, 2, 3, 4, 5], &[5])?;
+    scatter(&mut a, &[sl(Some(3), None, Some(-2))], 0)?;
+    // indices 3, 1 (step -2 from 3) get zeroed.
+    assert_eq!(a.to_vec(), vec![1, 0, 3, 0, 5]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_empty_slice_is_noop() -> Result<()> {
+    let mut a = Array::from_slice(&[1_i64, 2, 3, 4], &[4])?;
+    scatter(&mut a, &[sl(Some(2), Some(2), None)], 0)?;
+    assert_eq!(a.to_vec(), vec![1, 2, 3, 4]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_zero_d_integer_selection() -> Result<()> {
+    let mut a = Array::from_slice(&[1_i64, 2, 3], &[3])?;
+    scatter(&mut a, &[ix(1)], 42)?;
+    assert_eq!(a.to_vec(), vec![1, 42, 3]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_newaxis_basic() -> Result<()> {
+    let mut a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
+    scatter(&mut a, &[IndexSpec::NewAxis, full(), full()], 0)?;
+    assert_eq!(a.to_vec(), vec![0; 6]);
+    Ok(())
+}
+
+#[test]
+fn scatter_array_row_gap_destination_strided_source() -> Result<()> {
+    let mut a = Array::from_vec((0_i64..12).collect(), &[4, 3])?;
+    // Source is itself a non-contiguous view (reversed columns).
+    let src_base = Array::from_slice(&[7_i64, 8, 9], &[3])?;
+    let src = gather(&src_base, &[sl(None, None, Some(-1))])?;
+    scatter_array(&mut a, &[sl(Some(0), None, Some(2)), full()], &src)?;
+    assert_eq!(a.to_vec(), vec![9, 8, 7, 3, 4, 5, 9, 8, 7, 9, 10, 11]);
+    Ok(())
+}
+
+#[test]
+fn scatter_scalar_nonzero_base_offset() -> Result<()> {
+    let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
+    let mut view = gather(&a, &[ix(1), full()])?;
+    assert_eq!(view.offset(), 3);
+    scatter(&mut view, &[sl(None, None, Some(2))], 0)?;
+    assert_eq!(view.to_vec(), vec![0, 5, 0]);
+    Ok(())
+}
+
+#[test]
 fn scatter_fancy_scalar() -> Result<()> {
     let mut a = Array::from_slice(&[10_i64, 20, 30, 40], &[4])?;
     scatter(&mut a, &[int_arr(&[0, 2])], 7)?;

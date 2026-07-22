@@ -10,8 +10,9 @@ use crate::index::prepare::{
     prepare_index, FancyLayout, PreparedEntry, PreparedIndex,
 };
 use crate::index::spec::IndexSpec;
+use crate::layout::CoalescedLayout;
 use crate::shape::{buffer_index, is_c_contiguous, size_of_shape};
-use crate::stride_iter::StrideIter;
+use crate::stride_iter::{StrideCursor, StrideIter};
 
 /// Select elements by `index`.
 ///
@@ -175,8 +176,36 @@ fn scatter_basic_scalar<T: Scalar>(
         return Ok(());
     }
 
-    for buf_idx in StrideIter::new(&meta.shape, &meta.strides, meta.offset) {
-        data[buf_idx] = value;
+    // General strided fallback: coalesce down to the fewest axes, then walk
+    // outer positions with a cursor and fill each innermost run with a
+    // fixed-stride loop instead of a per-element N-dimensional carry.
+    let layout = CoalescedLayout::new(&meta.shape, &[&meta.strides]);
+    let inner_len = layout.inner_len();
+    let outer_shape = layout.outer_shape();
+    let outer_n = layout.outer_len();
+    if inner_len == 0 || outer_n == 0 {
+        return Ok(());
+    }
+    let inner_stride = layout.inner_stride(0);
+    let mut outer = StrideCursor::new(
+        outer_shape,
+        [layout.outer_strides(0)],
+        [meta.offset as isize],
+    );
+    for outer_i in 0..outer_n {
+        let start = outer.buffer_index(0);
+        if inner_stride == 1 {
+            data[start..start + inner_len].fill(value);
+        } else {
+            let mut pos = start as isize;
+            for _ in 0..inner_len {
+                data[pos as usize] = value;
+                pos += inner_stride;
+            }
+        }
+        if outer_i + 1 < outer_n {
+            outer.advance();
+        }
     }
     Ok(())
 }
@@ -195,41 +224,42 @@ fn scatter_basic_array<T: Scalar>(
     let src_slice = aligned.as_c_contiguous_slice();
     let data = Arc::make_mut(&mut a.data);
 
-    match (dest_c_contiguous, src_slice) {
-        (true, Some(src)) => {
+    if dest_c_contiguous {
+        if let Some(src) = src_slice {
             let size = size_of_shape(&meta.shape);
             data[meta.offset..meta.offset + size].copy_from_slice(src);
+            return Ok(());
         }
-        (false, Some(src)) => {
-            for (buf_idx, &value) in
-                StrideIter::new(&meta.shape, &meta.strides, meta.offset)
-                    .zip(src.iter())
-            {
-                data[buf_idx] = value;
-            }
+    }
+
+    // General strided fallback: dest (write) and aligned source (read) are
+    // two operands over the same logical shape. Coalesce jointly so a run
+    // is only used when *both* operands can walk it with a fixed stride.
+    let layout =
+        CoalescedLayout::new(&meta.shape, &[&meta.strides, aligned.strides()]);
+    let inner_len = layout.inner_len();
+    let outer_shape = layout.outer_shape();
+    let outer_n = layout.outer_len();
+    if inner_len == 0 || outer_n == 0 {
+        return Ok(());
+    }
+    let dest_inner_stride = layout.inner_stride(0);
+    let src_inner_stride = layout.inner_stride(1);
+    let mut outer = StrideCursor::new(
+        outer_shape,
+        [layout.outer_strides(0), layout.outer_strides(1)],
+        [meta.offset as isize, aligned.offset() as isize],
+    );
+    for outer_i in 0..outer_n {
+        let mut dst = outer.buffer_index(0) as isize;
+        let mut src = outer.buffer_index(1) as isize;
+        for _ in 0..inner_len {
+            data[dst as usize] = aligned.data[src as usize];
+            dst += dest_inner_stride;
+            src += src_inner_stride;
         }
-        (true, None) => {
-            let size = size_of_shape(&meta.shape);
-            let dest = &mut data[meta.offset..meta.offset + size];
-            for (dst, src_idx) in dest.iter_mut().zip(StrideIter::new(
-                aligned.shape(),
-                aligned.strides(),
-                aligned.offset(),
-            )) {
-                *dst = aligned.data[src_idx];
-            }
-        }
-        (false, None) => {
-            let dest_it =
-                StrideIter::new(&meta.shape, &meta.strides, meta.offset);
-            let src_it = StrideIter::new(
-                aligned.shape(),
-                aligned.strides(),
-                aligned.offset(),
-            );
-            for (dst_idx, src_idx) in dest_it.zip(src_it) {
-                data[dst_idx] = aligned.data[src_idx];
-            }
+        if outer_i + 1 < outer_n {
+            outer.advance();
         }
     }
     Ok(())

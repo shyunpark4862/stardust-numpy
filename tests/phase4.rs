@@ -78,6 +78,91 @@ fn mean_var_std() {
         (std(&b, None, false).unwrap().item().unwrap() - 1.25_f64.sqrt()).abs()
             < 1e-12
     );
+
+    let c = Array::from_slice(&[1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        .unwrap();
+    assert_eq!(
+        sum(&c, Some(&[1]), false).unwrap().to_vec(),
+        vec![6.0, 15.0]
+    );
+    assert_eq!(
+        mean(&c, Some(&[1]), false).unwrap().to_vec(),
+        vec![2.0, 5.0]
+    );
+    for actual in var(&c, Some(&[1]), false).unwrap().to_vec() {
+        assert!((actual - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    let transposed = c.transpose();
+    for actual in var(&transposed, Some(&[1]), false).unwrap().to_vec() {
+        assert!((actual - 2.25).abs() < 1e-12);
+    }
+
+    let cube = Array::from_slice(
+        &(0..24).map(|x| x as f64).collect::<Vec<_>>(),
+        &[2, 3, 4],
+    )
+    .unwrap();
+    let general = var(&cube, Some(&[0, 2]), false).unwrap().to_vec();
+    for actual in general {
+        assert!((actual - 37.25).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn general_strided_reduction_on_permuted_array() {
+    // Permute so the reduced axes are neither a trailing block nor a single
+    // axis, and the underlying strides are genuinely non-contiguous.
+    let cube = Array::from_slice(
+        &(0..24).map(|x| x as i64).collect::<Vec<_>>(),
+        &[2, 3, 4],
+    )
+    .unwrap();
+    let permuted = cube.permute_axes(&[1, 0, 2]).unwrap(); // shape [3,2,4]
+    assert!(!permuted.is_c_contiguous());
+
+    // Reduce axes 0 and 2 (outer axis 1 survives) — matches direct
+    // computation from the original cube for cross-checking.
+    let s = sum(&permuted, Some(&[0, 2]), false).unwrap();
+    assert_eq!(s.shape(), &[2]);
+    let expected: Vec<i64> = (0..2)
+        .map(|i| {
+            (0..3)
+                .flat_map(|j| (0..4).map(move |k| (i, j, k)))
+                .map(|(i, j, k)| cube.get(&[i, j, k]).unwrap())
+                .sum()
+        })
+        .collect();
+    assert_eq!(s.to_vec(), expected);
+
+    let mn = min(&permuted, Some(&[0, 2]), false).unwrap();
+    let mx = max(&permuted, Some(&[0, 2]), false).unwrap();
+    assert_eq!(mn.to_vec(), vec![0, 12]);
+    assert_eq!(mx.to_vec(), vec![11, 23]);
+}
+
+#[test]
+fn general_strided_reduction_reversed_axis() {
+    // Negative-stride (reversed) axis mixed into a multi-axis reduction.
+    let a = Array::from_slice(
+        &(0..12).map(|x| x as i64).collect::<Vec<_>>(),
+        &[3, 4],
+    )
+    .unwrap();
+    let reversed_cols = sdnp::gather(
+        &a,
+        &[
+            sdnp::IndexSpec::full(),
+            sdnp::IndexSpec::slice(None, None, Some(-1)),
+        ],
+    )
+    .unwrap();
+    assert!(!reversed_cols.is_c_contiguous());
+    // Sum ignoring column order must match the un-reversed sum.
+    assert_eq!(
+        sum(&reversed_cols, Some(&[1]), false).unwrap().to_vec(),
+        sum(&a, Some(&[1]), false).unwrap().to_vec()
+    );
 }
 
 #[test]
@@ -93,12 +178,91 @@ fn argmin_argmax() {
 }
 
 #[test]
+fn flat_argmin_argmax_on_strided_layouts() {
+    // Contiguous [2,3] → transpose is shape [3,2], strides [1,3].
+    // Flat C-order: 3,2, 8,5, 1,9 → argmin=4, argmax=5.
+    let a = Array::from_slice(&[3_i64, 8, 1, 2, 5, 9], &[2, 3]).unwrap();
+    let t = a.transpose();
+    assert!(!t.is_c_contiguous());
+    assert_eq!(argmin(&t, None).unwrap().item().unwrap(), 4);
+    assert_eq!(argmax(&t, None).unwrap().item().unwrap(), 5);
+
+    // Column step [::, ::2]: shape [2,2], strides [3,2] — partially coalescible.
+    // Flat C-order: 3,1, 2,9 → argmin=1, argmax=3.
+    let cols = sdnp::gather(
+        &a,
+        &[
+            sdnp::IndexSpec::full(),
+            sdnp::IndexSpec::slice(None, None, Some(2)),
+        ],
+    )
+    .unwrap();
+    assert!(!cols.is_c_contiguous());
+    assert_eq!(argmin(&cols, None).unwrap().item().unwrap(), 1);
+    assert_eq!(argmax(&cols, None).unwrap().item().unwrap(), 3);
+
+    // Reverse rows: negative stride, flat C-order 2,5,9, 3,8,1 → argmin=5, argmax=2.
+    let rev = sdnp::gather(
+        &a,
+        &[
+            sdnp::IndexSpec::slice(None, None, Some(-1)),
+            sdnp::IndexSpec::full(),
+        ],
+    )
+    .unwrap();
+    assert!(!rev.is_c_contiguous());
+    assert_eq!(argmin(&rev, None).unwrap().item().unwrap(), 5);
+    assert_eq!(argmax(&rev, None).unwrap().item().unwrap(), 2);
+}
+
+#[test]
 fn cumsum_cumprod() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
     assert_eq!(cumsum(&a, Some(1)).unwrap().to_vec(), vec![1, 3, 3, 7]);
     assert_eq!(cumsum(&a, Some(0)).unwrap().to_vec(), vec![1, 2, 4, 6]);
     assert_eq!(cumsum(&a, None).unwrap().to_vec(), vec![1, 3, 6, 10]);
     assert_eq!(cumprod(&a, Some(1)).unwrap().to_vec(), vec![1, 2, 3, 12]);
+}
+
+#[test]
+fn flat_cumsum_cumprod_on_strided_layouts() {
+    // Contiguous [2,3] → transpose [3,2]: flat C-order 1,4, 2,5, 3,6.
+    let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
+    let t = a.transpose();
+    assert!(!t.is_c_contiguous());
+    assert_eq!(
+        cumsum(&t, None).unwrap().to_vec(),
+        vec![1, 5, 7, 12, 15, 21]
+    );
+    assert_eq!(
+        cumprod(&t, None).unwrap().to_vec(),
+        vec![1, 4, 8, 40, 120, 720]
+    );
+
+    // Column step: flat C-order 1,3, 4,6.
+    let cols = sdnp::gather(
+        &a,
+        &[
+            sdnp::IndexSpec::full(),
+            sdnp::IndexSpec::slice(None, None, Some(2)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(cumsum(&cols, None).unwrap().to_vec(), vec![1, 4, 8, 14]);
+
+    // Negative row step: flat C-order 4,5,6, 1,2,3.
+    let rev = sdnp::gather(
+        &a,
+        &[
+            sdnp::IndexSpec::slice(None, None, Some(-1)),
+            sdnp::IndexSpec::full(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        cumsum(&rev, None).unwrap().to_vec(),
+        vec![4, 9, 15, 16, 18, 21]
+    );
 }
 
 #[test]

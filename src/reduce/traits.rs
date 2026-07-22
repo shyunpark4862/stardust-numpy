@@ -14,6 +14,8 @@ pub trait SumReduce: Scalar {
     fn to_acc(self) -> Self::Acc;
     /// `acc + x` in the accumulator type.
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc;
+    /// Merge two partial accumulators.
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc;
 }
 
 /// Associative product fold.
@@ -46,6 +48,8 @@ pub trait MeanReduce: Scalar {
     fn to_acc(self) -> Self::Acc;
     /// `acc + x` (after promotion).
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc;
+    /// Merge two partial accumulators.
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc;
     /// Divide accumulator by the element count.
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc;
 }
@@ -75,6 +79,10 @@ macro_rules! sum_prod_same {
             #[inline]
             fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
                 acc + x
+            }
+            #[inline]
+            fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+                left + right
             }
         }
         impl ProdReduce for $t {
@@ -116,6 +124,10 @@ impl SumReduce for bool {
     #[inline]
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
         acc + CastTo::<i64>::cast_to(x)
+    }
+    #[inline]
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+        left + right
     }
 }
 
@@ -171,6 +183,10 @@ impl MeanReduce for bool {
         acc + CastTo::<f64>::cast_to(x)
     }
     #[inline]
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+        left + right
+    }
+    #[inline]
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc {
         acc / count
     }
@@ -189,6 +205,10 @@ impl MeanReduce for i64 {
     #[inline]
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
         acc + (x as f64)
+    }
+    #[inline]
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+        left + right
     }
     #[inline]
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc {
@@ -211,6 +231,10 @@ impl MeanReduce for f64 {
         acc + x
     }
     #[inline]
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+        left + right
+    }
+    #[inline]
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc {
         acc / count
     }
@@ -229,6 +253,10 @@ impl MeanReduce for Complex64 {
     #[inline]
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
         acc + x
+    }
+    #[inline]
+    fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
+        left + right
     }
     #[inline]
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc {
