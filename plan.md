@@ -130,7 +130,7 @@ stardust-numpy/          # Rust 코어 (crate: sdnp)
 | **2** | ufunc + 승격 (산술·비교·논리, NaN/Inf); `StrideIter` | **완료** |
 | **3** | 인덱싱: basic(음수·step) + **`IndexSpec` 기반** boolean/fancy gather·scatter (NumPy shape) | **완료** |
 | **4** | reductions / cum\* (+ var/std/any/all) | **완료** |
-| **5** | join(concatenate/stack 등) + select + sort + spaces/meshgrid; `transpose`/`reshape`/`permute_axes`는 `array/view`에 유지 | 대응 test\_\* |
+| **5** | join(concatenate/stack/vstack/hstack) + select(where/nonzero/clip) + sort + spaces/meshgrid; `transpose`/`reshape`/`permute_axes`는 `array/view`에 유지 | **완료** |
 | **6** | `dot`/`matmul`/trace + `tri`/`tril`/`triu`/`diag` | `test_linalg` |
 | **7** | 공개 iteration API + format + integration | 나머지 |
 | **8** | **PyO3 바인딩**: `PyArray`, dtype 디스패치, dunder, `Error→PyErr`, read-only buffer(선택) | `import sdnp` 스모크 + 주요 연산 |

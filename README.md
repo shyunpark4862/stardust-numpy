@@ -32,14 +32,14 @@ src/
   ufunc/         kernels + ops + traits (internals pub(crate))
   stride_iter.rs StrideIter (pub(crate); public API in Phase 7)
   reduce/        sum/prod/min/max/mean/arg/cum/var/std/any/all
-  join.rs        Phase 5 (pub(crate) stub; reshape/transpose stay in array/view for now)
-  select.rs      Phase 5 (pub(crate) stub)
-  sort.rs        Phase 5 (pub(crate) stub)
+  join.rs        concatenate / stack / vstack / hstack
+  select.rs      where_ / nonzero / clip
+  sort.rs        sort / argsort / unique
   linalg.rs      Phase 6 (pub(crate) stub)
   format.rs      Phase 7 (pub(crate) stub)
 ```
 
-## What already works (Phase 0–4)
+## What already works (Phase 0–5)
 
 - `Array::from_vec` / `from_slice` / `get` / `set` (CoW) / `item` / `to_vec` / `as_c_contiguous_slice`
 - `transpose` / `t` / `permute_axes` / `reshape` / `copy` / `broadcast_to` (broadcast views read-only)
@@ -49,6 +49,10 @@ src/
 - comparisons + `logical_and`/`or`/`not` + `isnan`/`isinf`/`isfinite`
 - complex: `conj` / `real` / `imag`
 - reductions: `sum`/`prod`/`min`/`max`/`mean`/`argmin`/`argmax`/`cumsum`/`cumprod`/`var`/`std`/`any`/`all` (`axis`, `keepdims`)
+- joining: `concatenate` / `stack` / `vstack` / `hstack`
+- selection: `where_` / `nonzero` / `clip`
+- sorting: `sort` / `sort_in_place` / `argsort` / `unique`
+- spaces: `linspace` / `logspace` / `geomspace` / `meshgrid`
 - `dtype::{Scalar, Promote, CastTo, AsBool}`
 
 Intentional differences vs NumPy: no operator overloading; `divide` follows Rust `/`; CoW on write; no `out`/`where`.

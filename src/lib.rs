@@ -16,27 +16,36 @@ pub mod dtype;
 pub mod error;
 pub(crate) mod format;
 pub mod index;
-pub(crate) mod join;
+pub mod join;
 pub(crate) mod layout;
 pub(crate) mod linalg;
 pub mod reduce;
-pub(crate) mod select;
+pub mod select;
 pub mod shape;
-pub(crate) mod sort;
+pub mod sort;
 pub(crate) mod stride_iter;
 pub mod ufunc;
 
 pub use array::Array;
 pub use broadcast::{broadcast_arrays, broadcast_shape, broadcast_shapes};
-pub use create::{arange, arange_stop, eye, eye_with, full, ones, zeros};
+pub use create::{
+    arange, arange_stop, eye, eye_with, full, geomspace, linspace, logspace,
+    meshgrid, ones, zeros, MeshgridIndexing,
+};
 pub use dtype::{AsBool, CastTo, Complex64, Promote, Scalar};
 pub use error::{Error, Result};
 pub use index::{gather, scatter, scatter_array, IndexSpec};
+pub use join::{concatenate, hstack, stack, vstack};
 pub use reduce::{
     all, any, argmax, argmin, cumprod, cumsum, max, mean, min, prod, std, sum,
     var,
 };
+pub use select::{clip, nonzero, where_};
 pub use shape::{c_order_strides, size_of_shape};
+pub use sort::{
+    argsort, sort, sort_in_place, unique, unique_with, UniqueOptions,
+    UniqueResult,
+};
 pub use ufunc::{
     absolute, add, conj, divide, equal, greater, greater_equal, imag, isfinite,
     isinf, isnan, less, less_equal, logical_and, logical_not, logical_or,

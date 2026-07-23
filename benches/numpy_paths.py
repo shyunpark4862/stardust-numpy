@@ -98,6 +98,9 @@ def main() -> None:
     ).reshape(SIDE, SIDE)
 
     mask = (np.arange(ELEMENTS) % 4 == 0).reshape(SIDE, SIDE)
+    condition = (np.arange(ELEMENTS) % 2 == 0).reshape(SIDE, SIDE)
+    grid_x = np.arange(SIDE, dtype=np.float64)
+    grid_y = np.arange(SIDE, dtype=np.float64) * 2.0
     fancy_len = ELEMENTS // 4
     positions = np.arange(fancy_len, dtype=np.int64)
     rows = positions % SIDE
@@ -154,8 +157,14 @@ def main() -> None:
         "add_contiguous_contiguous_f64": measure(
             lambda: add_c_order(left, right)
         ),
+        "subtract_contiguous_contiguous_f64": measure(
+            lambda: np.subtract(left, right)
+        ),
         "add_strided_strided_f64": measure(
             lambda: add_c_order(left_t, right_t)
+        ),
+        "subtract_strided_strided_f64": measure(
+            lambda: np.subtract(left_t, right_t)
         ),
         "negative_contiguous_f64": measure(lambda: np.negative(a_nonzero)),
         "absolute_contiguous_f64": measure(lambda: np.absolute(a_nonzero)),
@@ -166,6 +175,15 @@ def main() -> None:
         "divide_contiguous_f64": measure(
             lambda: np.divide(a_nonzero, denominator)
         ),
+        "trunc_divide_contiguous_f64": measure(
+            lambda: np.trunc(np.divide(a_nonzero, denominator))
+        ),
+        "remainder_contiguous_f64": measure(
+            lambda: np.remainder(a_nonzero, denominator)
+        ),
+        "power_contiguous_f64": measure(
+            lambda: np.power(a_nonzero, denominator)
+        ),
         "greater_contiguous_f64": measure(
             lambda: np.greater(a_nonzero, denominator)
         ),
@@ -173,6 +191,27 @@ def main() -> None:
             lambda: left.cumsum(axis=1)
         ),
         "cumsum_axis_first_strided_f64": measure(lambda: left.cumsum(axis=0)),
+        "concatenate_axis0_contiguous_f64": measure(
+            lambda: np.concatenate((left, right), axis=0)
+        ),
+        "concatenate_axis0_strided_f64": measure(
+            lambda: np.concatenate((left_t, right_t), axis=0)
+        ),
+        "where_contiguous_f64": measure(
+            lambda: np.where(condition, left, right)
+        ),
+        "where_strided_f64": measure(
+            lambda: np.where(condition.T, left_t, right_t)
+        ),
+        "sort_axis_last_contiguous_f64": measure(
+            lambda: np.sort(left, axis=-1, kind="stable")
+        ),
+        "sort_axis_last_strided_f64": measure(
+            lambda: np.sort(left_t, axis=-1, kind="stable")
+        ),
+        "meshgrid_1024x1024_view_f64": measure(
+            lambda: np.meshgrid(grid_x, grid_y, indexing="xy", copy=False)
+        ),
         "fancy_gather_multidim_f64": measure(lambda: left[rows, cols]),
         "gather_basic_half_view_f64": measure(lambda: a[: SIDE // 2, :]),
         "gather_reverse_view_f64": measure(lambda: a[::-1, :]),

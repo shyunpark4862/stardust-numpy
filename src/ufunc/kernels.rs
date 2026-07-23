@@ -82,52 +82,11 @@ where
     }
 
     let mut out = Vec::with_capacity(size_of_shape(shape));
-    map_binary_strided(left, right, shape, |x, y| out.push(f(x, y)));
+    map_binary_strided(left, right, shape, |x, y| {
+        out.push(f(x, y));
+        Ok(())
+    })?;
     Array::from_vec(out, shape)
-}
-
-/// Drive the non-fully-contiguous binary fallback: coalesce `left` and
-/// `right`'s strides jointly against the aligned `shape`, then walk outer
-/// positions with a two-lane cursor and a fixed-stride inner run. Subsumes
-/// the "one contiguous, one not" and "neither contiguous" cases — coalescing
-/// naturally recovers a contiguous inner run when one operand happens to
-/// allow it.
-fn map_binary_strided<A, B>(
-    left: &Array<A>,
-    right: &Array<B>,
-    shape: &[usize],
-    mut visit: impl FnMut(A, B),
-) where
-    A: Scalar,
-    B: Scalar,
-{
-    let layout =
-        CoalescedLayout::new(shape, &[left.strides(), right.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_shape = layout.outer_shape();
-    let outer_n = layout.outer_len();
-    if inner_len == 0 || outer_n == 0 {
-        return;
-    }
-    let left_inner_stride = layout.inner_stride(0);
-    let right_inner_stride = layout.inner_stride(1);
-    let mut outer = StrideCursor::new(
-        outer_shape,
-        [layout.outer_strides(0), layout.outer_strides(1)],
-        [left.offset() as isize, right.offset() as isize],
-    );
-    for outer_i in 0..outer_n {
-        let mut lhs = outer.buffer_index(0) as isize;
-        let mut rhs = outer.buffer_index(1) as isize;
-        for _ in 0..inner_len {
-            visit(left.data[lhs as usize], right.data[rhs as usize]);
-            lhs += left_inner_stride;
-            rhs += right_inner_stride;
-        }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
-    }
 }
 
 /// Broadcast `a` and `b`, then apply fallible `f` element-wise.
@@ -157,17 +116,16 @@ where
         }
         return Array::from_vec(out, shape);
     }
-
-    try_map_binary_strided(left, right, shape, |x, y| {
+    map_binary_strided(left, right, shape, |x, y| {
         out.push(f(x, y)?);
         Ok(())
     })?;
     Array::from_vec(out, shape)
 }
 
-/// Fallible counterpart of [`map_binary_strided`]: same joint coalescing and
-/// traversal, but propagates the first error instead of running to completion.
-fn try_map_binary_strided<A, B>(
+/// Coalesce `left` and `right`'s strides jointly against `shape`, then walk
+/// outer positions with a two-lane cursor and a fixed-stride inner run.
+fn map_binary_strided<A, B>(
     left: &Array<A>,
     right: &Array<B>,
     shape: &[usize],

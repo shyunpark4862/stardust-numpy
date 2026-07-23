@@ -1,4 +1,10 @@
 //! Per-dtype scalar traits for element-wise arithmetic and float classify.
+//!
+//! Division-like ops split by promoted output semantics:
+//! - [`ElemDiv`] / [`ElemTruncDiv`] / [`ElemRem`] / [`ElemPow`]: infallible
+//!   (`f64`, `Complex64`, and `bool` power) — IEEE-style `inf`/`nan`, fast path.
+//! - [`FallibleElemDiv`] / …: explicit [`Error`](crate::error::Error) for
+//!   `bool` and `i64` (`DivideByZero`, `InvalidArgument` on integer `power`).
 
 use num_complex::Complex;
 use num_traits::Float;
@@ -24,26 +30,50 @@ pub trait ElemMul: Scalar {
     fn elem_mul(self, rhs: Self) -> Self;
 }
 
-/// Element-wise Rust `/` (int truncate; float IEEE).
+/// Infallible element-wise `/` (`f64` / `Complex64`: IEEE `inf`/`nan`).
 pub trait ElemDiv: Scalar {
+    /// `self / rhs`.
+    fn elem_div(self, rhs: Self) -> Self;
+}
+
+/// Fallible element-wise `/` (`bool` / `i64`: [`Error::DivideByZero`]).
+pub trait FallibleElemDiv: Scalar {
     /// `self / rhs`.
     fn elem_div(self, rhs: Self) -> Result<Self>;
 }
 
-/// Quotient toward zero (`trunc_divide`).
+/// Infallible truncating quotient (`f64` / `Complex64`).
 pub trait ElemTruncDiv: Scalar {
-    /// Truncating quotient.
+    /// Truncating quotient toward zero.
+    fn elem_trunc_div(self, rhs: Self) -> Self;
+}
+
+/// Fallible truncating quotient (`bool` / `i64`).
+pub trait FallibleElemTruncDiv: Scalar {
+    /// Truncating quotient toward zero.
     fn elem_trunc_div(self, rhs: Self) -> Result<Self>;
 }
 
-/// Remainder (`%` semantics of the type).
+/// Infallible remainder (`f64` / `Complex64`).
 pub trait ElemRem: Scalar {
+    /// `self % rhs` (or complex analogue).
+    fn elem_rem(self, rhs: Self) -> Self;
+}
+
+/// Fallible remainder (`bool` / `i64`).
+pub trait FallibleElemRem: Scalar {
     /// `self % rhs`.
     fn elem_rem(self, rhs: Self) -> Result<Self>;
 }
 
-/// Power.
+/// Infallible power (`bool`, `f64`, `Complex64`).
 pub trait ElemPow: Scalar {
+    /// `self.pow(rhs)`-like.
+    fn elem_pow(self, rhs: Self) -> Self;
+}
+
+/// Fallible power (`i64`: negative or oversized exponent).
+pub trait FallibleElemPow: Scalar {
     /// `self.pow(rhs)`-like.
     fn elem_pow(self, rhs: Self) -> Result<Self>;
 }
@@ -121,7 +151,7 @@ impl ElemNeg for bool {
     }
 }
 
-impl ElemDiv for bool {
+impl FallibleElemDiv for bool {
     #[inline]
     fn elem_div(self, rhs: Self) -> Result<Self> {
         if !rhs {
@@ -130,13 +160,13 @@ impl ElemDiv for bool {
         Ok((i64::from(self) / i64::from(rhs)) != 0)
     }
 }
-impl ElemTruncDiv for bool {
+impl FallibleElemTruncDiv for bool {
     #[inline]
     fn elem_trunc_div(self, rhs: Self) -> Result<Self> {
-        self.elem_div(rhs)
+        FallibleElemDiv::elem_div(self, rhs)
     }
 }
-impl ElemRem for bool {
+impl FallibleElemRem for bool {
     #[inline]
     fn elem_rem(self, rhs: Self) -> Result<Self> {
         if !rhs {
@@ -147,12 +177,12 @@ impl ElemRem for bool {
 }
 impl ElemPow for bool {
     #[inline]
-    fn elem_pow(self, rhs: Self) -> Result<Self> {
-        Ok(i64::from(self).pow(u32::from(rhs)) != 0)
+    fn elem_pow(self, rhs: Self) -> Self {
+        i64::from(self).pow(u32::from(rhs)) != 0
     }
 }
 
-impl ElemDiv for i64 {
+impl FallibleElemDiv for i64 {
     #[inline]
     fn elem_div(self, rhs: Self) -> Result<Self> {
         if rhs == 0 {
@@ -161,13 +191,13 @@ impl ElemDiv for i64 {
         Ok(self / rhs)
     }
 }
-impl ElemTruncDiv for i64 {
+impl FallibleElemTruncDiv for i64 {
     #[inline]
     fn elem_trunc_div(self, rhs: Self) -> Result<Self> {
-        self.elem_div(rhs)
+        FallibleElemDiv::elem_div(self, rhs)
     }
 }
-impl ElemRem for i64 {
+impl FallibleElemRem for i64 {
     #[inline]
     fn elem_rem(self, rhs: Self) -> Result<Self> {
         if rhs == 0 {
@@ -176,7 +206,7 @@ impl ElemRem for i64 {
         Ok(self % rhs)
     }
 }
-impl ElemPow for i64 {
+impl FallibleElemPow for i64 {
     #[inline]
     fn elem_pow(self, rhs: Self) -> Result<Self> {
         if rhs < 0 {
@@ -195,74 +225,53 @@ impl ElemPow for i64 {
 
 impl ElemDiv for f64 {
     #[inline]
-    fn elem_div(self, rhs: Self) -> Result<Self> {
-        Ok(self / rhs)
+    fn elem_div(self, rhs: Self) -> Self {
+        self / rhs
     }
 }
 impl ElemTruncDiv for f64 {
     #[inline]
-    fn elem_trunc_div(self, rhs: Self) -> Result<Self> {
-        Ok((self / rhs).trunc())
+    fn elem_trunc_div(self, rhs: Self) -> Self {
+        (self / rhs).trunc()
     }
 }
 impl ElemRem for f64 {
     #[inline]
-    fn elem_rem(self, rhs: Self) -> Result<Self> {
-        Ok(self % rhs)
+    fn elem_rem(self, rhs: Self) -> Self {
+        self % rhs
     }
 }
 impl ElemPow for f64 {
     #[inline]
-    fn elem_pow(self, rhs: Self) -> Result<Self> {
-        Ok(self.powf(rhs))
+    fn elem_pow(self, rhs: Self) -> Self {
+        self.powf(rhs)
     }
 }
 
 impl ElemDiv for Complex64 {
     #[inline]
-    fn elem_div(self, rhs: Self) -> Result<Self> {
-        if rhs.re == 0.0 && rhs.im == 0.0 {
-            if self.re == 0.0 && self.im == 0.0 {
-                return Ok(Complex::new(f64::NAN, f64::NAN));
-            }
-            let inf = f64::INFINITY;
-            return Ok(Complex::new(
-                if self.re == 0.0 {
-                    0.0
-                } else {
-                    self.re.signum() * inf
-                },
-                if self.im == 0.0 {
-                    0.0
-                } else {
-                    self.im.signum() * inf
-                },
-            ));
-        }
-        Ok(self / rhs)
+    fn elem_div(self, rhs: Self) -> Self {
+        self / rhs
     }
 }
 impl ElemTruncDiv for Complex64 {
     #[inline]
-    fn elem_trunc_div(self, rhs: Self) -> Result<Self> {
-        let q = self.elem_div(rhs)?;
-        Ok(Complex::new(q.re.trunc(), q.im.trunc()))
+    fn elem_trunc_div(self, rhs: Self) -> Self {
+        let q = self / rhs;
+        Complex::new(q.re.trunc(), q.im.trunc())
     }
 }
 impl ElemRem for Complex64 {
     #[inline]
-    fn elem_rem(self, rhs: Self) -> Result<Self> {
-        if rhs.re == 0.0 && rhs.im == 0.0 {
-            return Ok(Complex::new(f64::NAN, f64::NAN));
-        }
-        let q = self.elem_trunc_div(rhs)?;
-        Ok(self - q * rhs)
+    fn elem_rem(self, rhs: Self) -> Self {
+        let q = self.elem_trunc_div(rhs);
+        self - q * rhs
     }
 }
 impl ElemPow for Complex64 {
     #[inline]
-    fn elem_pow(self, rhs: Self) -> Result<Self> {
-        Ok(self.powc(rhs))
+    fn elem_pow(self, rhs: Self) -> Self {
+        self.powc(rhs)
     }
 }
 

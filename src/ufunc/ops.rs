@@ -2,6 +2,10 @@
 //!
 //! Cross-type ops use [`Promote`] + [`CastTo`]. No `std::ops` overloads
 //! (broadcast errors stay in [`Result`]).
+//!
+//! After promotion, division-like ops dispatch by output type:
+//! - `f64` / `Complex64`: infallible IEEE semantics, [`map_binary`] fast path.
+//! - `bool` / `i64`: explicit element errors via [`try_map_binary`].
 
 use crate::array::Array;
 use crate::dtype::{AsBool, CastTo, Complex64, Promote, Scalar};
@@ -9,7 +13,8 @@ use crate::error::Result;
 use crate::ufunc::kernels::{map_binary, map_unary, try_map_binary};
 use crate::ufunc::traits::{
     ElemAbs, ElemAdd, ElemDiv, ElemMul, ElemNeg, ElemPow, ElemRem, ElemSub,
-    ElemTruncDiv, FloatClassify,
+    ElemTruncDiv, FallibleElemDiv, FallibleElemPow, FallibleElemRem,
+    FallibleElemTruncDiv, FloatClassify,
 };
 
 fn promote_binary<L, R, Out, F>(
@@ -42,6 +47,169 @@ where
     try_map_binary(a, b, |x, y| f(x.cast_to(), y.cast_to()))
 }
 
+/// Routes division-like ufuncs to infallible or fallible kernels by promoted output.
+pub trait DivDispatch: Scalar {
+    /// Element-wise division after operands are promoted to `Self`.
+    fn divide_promoted<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<Self>>
+    where
+        L: Promote<R, Output = Self> + CastTo<Self>,
+        R: CastTo<Self>,
+        Self: Sized;
+}
+
+/// Routes truncating division by promoted output type.
+pub trait TruncDivDispatch: Scalar {
+    /// Element-wise truncating division after promotion.
+    fn trunc_divide_promoted<L, R>(
+        a: &Array<L>,
+        b: &Array<R>,
+    ) -> Result<Array<Self>>
+    where
+        L: Promote<R, Output = Self> + CastTo<Self>,
+        R: CastTo<Self>,
+        Self: Sized;
+}
+
+/// Routes remainder by promoted output type.
+pub trait RemDispatch: Scalar {
+    /// Element-wise remainder after promotion.
+    fn remainder_promoted<L, R>(
+        a: &Array<L>,
+        b: &Array<R>,
+    ) -> Result<Array<Self>>
+    where
+        L: Promote<R, Output = Self> + CastTo<Self>,
+        R: CastTo<Self>,
+        Self: Sized;
+}
+
+/// Routes power by promoted output type.
+pub trait PowDispatch: Scalar {
+    /// Element-wise power after promotion.
+    fn power_promoted<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<Self>>
+    where
+        L: Promote<R, Output = Self> + CastTo<Self>,
+        R: CastTo<Self>,
+        Self: Sized;
+}
+
+macro_rules! impl_infallible_div_dispatch {
+    ($t:ty) => {
+        impl DivDispatch for $t {
+            fn divide_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                promote_binary(a, b, ElemDiv::elem_div)
+            }
+        }
+        impl TruncDivDispatch for $t {
+            fn trunc_divide_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                promote_binary(a, b, ElemTruncDiv::elem_trunc_div)
+            }
+        }
+        impl RemDispatch for $t {
+            fn remainder_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                promote_binary(a, b, ElemRem::elem_rem)
+            }
+        }
+    };
+}
+
+macro_rules! impl_infallible_pow_dispatch {
+    ($t:ty) => {
+        impl PowDispatch for $t {
+            fn power_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                promote_binary(a, b, ElemPow::elem_pow)
+            }
+        }
+    };
+}
+
+macro_rules! impl_fallible_div_dispatch {
+    ($t:ty) => {
+        impl DivDispatch for $t {
+            fn divide_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                try_promote_binary(a, b, FallibleElemDiv::elem_div)
+            }
+        }
+        impl TruncDivDispatch for $t {
+            fn trunc_divide_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                try_promote_binary(a, b, FallibleElemTruncDiv::elem_trunc_div)
+            }
+        }
+        impl RemDispatch for $t {
+            fn remainder_promoted<L, R>(
+                a: &Array<L>,
+                b: &Array<R>,
+            ) -> Result<Array<Self>>
+            where
+                L: Promote<R, Output = Self> + CastTo<Self>,
+                R: CastTo<Self>,
+            {
+                try_promote_binary(a, b, FallibleElemRem::elem_rem)
+            }
+        }
+    };
+}
+
+impl_infallible_div_dispatch!(f64);
+impl_infallible_div_dispatch!(Complex64);
+impl_infallible_pow_dispatch!(bool);
+impl_infallible_pow_dispatch!(f64);
+impl_infallible_pow_dispatch!(Complex64);
+impl_fallible_div_dispatch!(bool);
+impl_fallible_div_dispatch!(i64);
+
+impl PowDispatch for i64 {
+    fn power_promoted<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<i64>>
+    where
+        L: Promote<R, Output = i64> + CastTo<i64>,
+        R: CastTo<i64>,
+    {
+        try_promote_binary(a, b, FallibleElemPow::elem_pow)
+    }
+}
+
 /// Element-wise addition with promotion.
 pub fn add<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<L::Output>>
 where
@@ -72,17 +240,18 @@ where
     promote_binary(a, b, ElemMul::elem_mul)
 }
 
-/// Element-wise division using Rust `/` after promotion.
+/// Element-wise division after promotion.
 ///
-/// `i64` truncates toward zero; `f64` is IEEE true division.
-/// Integer division by zero returns [`Error::DivideByZero`](crate::error::Error::DivideByZero).
+/// `i64` truncates toward zero; `f64` / `Complex64` follow IEEE (`inf`/`nan`).
+/// `bool` / `i64` division by zero returns
+/// [`Error::DivideByZero`](crate::error::Error::DivideByZero).
 pub fn divide<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<L::Output>>
 where
     L: Promote<R> + CastTo<L::Output>,
     R: CastTo<L::Output>,
-    L::Output: ElemDiv,
+    L::Output: DivDispatch,
 {
-    try_promote_binary(a, b, ElemDiv::elem_div)
+    L::Output::divide_promoted(a, b)
 }
 
 /// Truncating quotient (toward zero) after promotion.
@@ -95,9 +264,9 @@ pub fn trunc_divide<L, R>(
 where
     L: Promote<R> + CastTo<L::Output>,
     R: CastTo<L::Output>,
-    L::Output: ElemTruncDiv,
+    L::Output: TruncDivDispatch,
 {
-    try_promote_binary(a, b, ElemTruncDiv::elem_trunc_div)
+    L::Output::trunc_divide_promoted(a, b)
 }
 
 /// Element-wise remainder after promotion.
@@ -105,19 +274,23 @@ pub fn remainder<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<L::Output>>
 where
     L: Promote<R> + CastTo<L::Output>,
     R: CastTo<L::Output>,
-    L::Output: ElemRem,
+    L::Output: RemDispatch,
 {
-    try_promote_binary(a, b, ElemRem::elem_rem)
+    L::Output::remainder_promoted(a, b)
 }
 
 /// Element-wise power after promotion.
+///
+/// `f64` / `Complex64`: IEEE-style (`nan` for invalid real powers).
+/// `i64`: negative or oversized exponent →
+/// [`Error::InvalidArgument`](crate::error::Error::InvalidArgument).
 pub fn power<L, R>(a: &Array<L>, b: &Array<R>) -> Result<Array<L::Output>>
 where
     L: Promote<R> + CastTo<L::Output>,
     R: CastTo<L::Output>,
-    L::Output: ElemPow,
+    L::Output: PowDispatch,
 {
-    try_promote_binary(a, b, ElemPow::elem_pow)
+    L::Output::power_promoted(a, b)
 }
 
 /// Element-wise negation.
@@ -267,6 +440,44 @@ mod tests {
         let a = Array::from_slice(&[1_i64], &[1]).unwrap();
         let b = Array::from_slice(&[0_i64], &[1]).unwrap();
         assert_eq!(divide(&a, &b).unwrap_err(), Error::DivideByZero);
+    }
+
+    #[test]
+    fn divide_f64_by_zero_is_infinite() {
+        let a = Array::from_slice(&[1.0_f64, -2.0, 0.0], &[3]).unwrap();
+        let b = Array::from_slice(&[0.0_f64, 0.0, 0.0], &[3]).unwrap();
+        let c = divide(&a, &b).unwrap();
+        assert!(c.get(&[0]).unwrap().is_infinite());
+        assert!(c.get(&[0]).unwrap().is_sign_positive());
+        assert!(c.get(&[1]).unwrap().is_infinite());
+        assert!(c.get(&[1]).unwrap().is_sign_negative());
+        assert!(c.get(&[2]).unwrap().is_nan());
+    }
+
+    #[test]
+    fn divide_i64_f64_promotes_to_f64_infinite() {
+        let a = Array::from_slice(&[1_i64], &[1]).unwrap();
+        let b = Array::from_slice(&[0.0_f64], &[1]).unwrap();
+        let c = divide(&a, &b).unwrap();
+        assert!(c.get(&[0]).unwrap().is_infinite());
+    }
+
+    #[test]
+    fn power_i64_negative_exponent_errors() {
+        let a = Array::from_slice(&[2_i64], &[1]).unwrap();
+        let b = Array::from_slice(&[-1_i64], &[1]).unwrap();
+        assert!(matches!(
+            power(&a, &b).unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn power_f64_invalid_is_nan() {
+        let a = Array::from_slice(&[-1.0_f64], &[1]).unwrap();
+        let b = Array::from_slice(&[0.5_f64], &[1]).unwrap();
+        let c = power(&a, &b).unwrap();
+        assert!(c.get(&[0]).unwrap().is_nan());
     }
 
     #[test]
