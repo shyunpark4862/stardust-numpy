@@ -18,6 +18,28 @@ Spec / behavioral reference: sibling Python project `../numpy` (with intentional
 cargo test
 ```
 
+## Benchmarks
+
+```bash
+# Rust: all paths or one Criterion substring
+cargo bench --bench paths
+cargo bench --bench paths -- concatenate_axis0_strided
+
+# NumPy: project-local Python 3 environment
+uv venv --python python3 .venv
+uv pip install --python .venv/bin/python numpy
+.venv/bin/python benches/numpy_paths.py
+
+# NumPy: list, exact path, or substring selection
+.venv/bin/python benches/numpy_paths.py --list
+.venv/bin/python benches/numpy_paths.py concatenate_axis0_strided_f64
+.venv/bin/python benches/numpy_paths.py --match concatenate --match where
+```
+
+Materializing comparison paths produce C-contiguous outputs on both sides.
+With no Python path filter, the script keeps its JSON output format and runs
+the full suite.
+
 ## Layout
 
 ```

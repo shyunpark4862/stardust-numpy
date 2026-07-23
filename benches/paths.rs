@@ -4,22 +4,29 @@ use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, Criterion,
 };
 use sdnp::{
-    absolute, add, any, argmax, broadcast_arrays, concatenate, cumprod, cumsum,
-    divide, eye, full, gather, greater, isnan, max as reduce_max, mean,
-    meshgrid, min as reduce_min, multiply, negative, ones, power, prod,
-    remainder, scatter, scatter_array, sort as sort_array, std as reduce_std,
-    subtract, sum, trunc_divide, var, where_, zeros, Array, IndexSpec,
-    MeshgridIndexing,
+    absolute, add, all, any, argmax, argmin, argsort, broadcast_arrays, clip,
+    concatenate, cumprod, cumsum, divide, eye, full, gather, greater, isnan,
+    linspace, max as reduce_max, mean, meshgrid, min as reduce_min, multiply,
+    negative, nonzero, ones, power, prod, remainder, scatter, scatter_array,
+    sort as sort_array, stack, std as reduce_std, subtract, sum, trunc_divide,
+    unique, var, where_, zeros, Array, IndexSpec, MeshgridIndexing,
 };
 
+const SMALL_SIDE: usize = 32;
+const MEDIUM_SIDE: usize = 256;
 const SIDE: usize = 1024;
 const ELEMENTS: usize = SIDE * SIDE;
 
-fn matrix(seed: usize) -> Array<f64> {
-    let data = (0..ELEMENTS)
+fn shaped_f64(shape: &[usize], seed: usize) -> Array<f64> {
+    let len = shape.iter().product();
+    let data = (0..len)
         .map(|i| ((i + seed) % 4096) as f64 * 0.25)
         .collect();
-    Array::from_vec(data, &[SIDE, SIDE]).unwrap()
+    Array::from_vec(data, shape).unwrap()
+}
+
+fn matrix(seed: usize) -> Array<f64> {
+    shaped_f64(&[SIDE, SIDE], seed)
 }
 
 fn bench_creation(c: &mut Criterion) {
@@ -95,6 +102,9 @@ fn bench_reductions(c: &mut Criterion) {
             black_box(sum(black_box(&a), Some(&axis_first), false).unwrap())
         })
     });
+    c.bench_function("sum_total_contiguous_f64", |b| {
+        b.iter(|| black_box(sum(black_box(&a), None, false).unwrap()))
+    });
 
     let cube_data = (0..ELEMENTS).map(|i| (i % 2048) as f64 * 0.5).collect();
     let cube = Array::from_vec(cube_data, &[64, 128, 128]).unwrap();
@@ -151,6 +161,14 @@ fn bench_reductions(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("max_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(black_box(&a_nonzero), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
     c.bench_function("mean_axis_last_f64", |b| {
         b.iter(|| {
             black_box(
@@ -169,10 +187,20 @@ fn bench_reductions(c: &mut Criterion) {
     c.bench_function("argmax_axis_last_f64", |b| {
         b.iter(|| black_box(argmax(black_box(&a_nonzero), Some(1)).unwrap()))
     });
+    c.bench_function("argmin_axis_last_f64", |b| {
+        b.iter(|| black_box(argmin(black_box(&a_nonzero), Some(1)).unwrap()))
+    });
     c.bench_function("any_axis_last_f64", |b| {
         b.iter(|| {
             black_box(
                 any(black_box(&a_nonzero), Some(&axis_last), false).unwrap(),
+            )
+        })
+    });
+    c.bench_function("all_axis_last_f64", |b| {
+        b.iter(|| {
+            black_box(
+                all(black_box(&a_nonzero), Some(&axis_last), false).unwrap(),
             )
         })
     });
@@ -186,6 +214,14 @@ fn bench_reductions(c: &mut Criterion) {
 fn bench_elementwise(c: &mut Criterion) {
     let left = matrix(0);
     let right = matrix(17);
+    let small_left = shaped_f64(&[SMALL_SIDE, SMALL_SIDE], 0);
+    let small_right = shaped_f64(&[SMALL_SIDE, SMALL_SIDE], 17);
+    let medium_left = shaped_f64(&[MEDIUM_SIDE, MEDIUM_SIDE], 0);
+    let medium_right = shaped_f64(&[MEDIUM_SIDE, MEDIUM_SIDE], 17);
+    let one_d_left = shaped_f64(&[ELEMENTS], 0);
+    let one_d_right = shaped_f64(&[ELEMENTS], 17);
+    let three_d_left = shaped_f64(&[64, 128, 128], 0);
+    let three_d_right = shaped_f64(&[64, 128, 128], 17);
     let a = matrix(1);
     let denominator = Array::from_vec(
         (0..ELEMENTS)
@@ -199,9 +235,54 @@ fn bench_elementwise(c: &mut Criterion) {
         &[1, SIDE],
     )
     .unwrap();
+    let column = Array::from_vec(
+        (0..SIDE).map(|i| (i + 1) as f64).collect(),
+        &[SIDE, 1],
+    )
+    .unwrap();
+    let scalar = Array::from_vec(vec![2.0_f64], &[1, 1]).unwrap();
+    let integer_left = Array::from_vec(
+        (0..ELEMENTS).map(|i| (i % 4096) as i64).collect(),
+        &[SIDE, SIDE],
+    )
+    .unwrap();
+    let integer_denominator = Array::from_vec(
+        (0..ELEMENTS).map(|i| (i % 31 + 1) as i64).collect(),
+        &[SIDE, SIDE],
+    )
+    .unwrap();
 
+    c.bench_function("add_contiguous_contiguous_32x32_f64", |b| {
+        b.iter(|| {
+            black_box(
+                add(black_box(&small_left), black_box(&small_right)).unwrap(),
+            )
+        })
+    });
+    c.bench_function("add_contiguous_contiguous_256x256_f64", |b| {
+        b.iter(|| {
+            black_box(
+                add(black_box(&medium_left), black_box(&medium_right)).unwrap(),
+            )
+        })
+    });
     c.bench_function("add_contiguous_contiguous_f64", |b| {
         b.iter(|| black_box(add(black_box(&left), black_box(&right)).unwrap()))
+    });
+    c.bench_function("add_contiguous_contiguous_1m_1d_f64", |b| {
+        b.iter(|| {
+            black_box(
+                add(black_box(&one_d_left), black_box(&one_d_right)).unwrap(),
+            )
+        })
+    });
+    c.bench_function("add_contiguous_contiguous_64x128x128_f64", |b| {
+        b.iter(|| {
+            black_box(
+                add(black_box(&three_d_left), black_box(&three_d_right))
+                    .unwrap(),
+            )
+        })
     });
     c.bench_function("subtract_contiguous_contiguous_f64", |b| {
         b.iter(|| {
@@ -214,6 +295,11 @@ fn bench_elementwise(c: &mut Criterion) {
     c.bench_function("add_strided_strided_f64", |b| {
         b.iter(|| {
             black_box(add(black_box(&left_t), black_box(&right_t)).unwrap())
+        })
+    });
+    c.bench_function("add_contiguous_strided_f64", |b| {
+        b.iter(|| {
+            black_box(add(black_box(&left), black_box(&right_t)).unwrap())
         })
     });
     c.bench_function("subtract_strided_strided_f64", |b| {
@@ -234,6 +320,32 @@ fn bench_elementwise(c: &mut Criterion) {
     });
     c.bench_function("multiply_row_broadcast_f64", |b| {
         b.iter(|| black_box(multiply(black_box(&a), black_box(&row)).unwrap()))
+    });
+    c.bench_function("multiply_column_broadcast_f64", |b| {
+        b.iter(|| {
+            black_box(multiply(black_box(&a), black_box(&column)).unwrap())
+        })
+    });
+    c.bench_function("multiply_scalar_broadcast_f64", |b| {
+        b.iter(|| {
+            black_box(multiply(black_box(&a), black_box(&scalar)).unwrap())
+        })
+    });
+    c.bench_function("add_i64_f64_contiguous", |b| {
+        b.iter(|| {
+            black_box(add(black_box(&integer_left), black_box(&a)).unwrap())
+        })
+    });
+    c.bench_function("divide_i64_contiguous", |b| {
+        b.iter(|| {
+            black_box(
+                divide(
+                    black_box(&integer_left),
+                    black_box(&integer_denominator),
+                )
+                .unwrap(),
+            )
+        })
     });
     c.bench_function("divide_contiguous_f64", |b| {
         b.iter(|| {
@@ -268,6 +380,13 @@ fn bench_elementwise(c: &mut Criterion) {
 
 fn bench_cumulative(c: &mut Criterion) {
     let a = matrix(0);
+    let product_input = Array::from_vec(
+        (0..ELEMENTS)
+            .map(|i| 1.0 + (i % 7) as f64 * 0.000_001)
+            .collect(),
+        &[SIDE, SIDE],
+    )
+    .unwrap();
 
     c.bench_function("cumsum_axis_last_contiguous_f64", |b| {
         b.iter(|| black_box(cumsum(black_box(&a), Some(1)).unwrap()))
@@ -275,6 +394,11 @@ fn bench_cumulative(c: &mut Criterion) {
 
     c.bench_function("cumsum_axis_first_strided_f64", |b| {
         b.iter(|| black_box(cumsum(black_box(&a), Some(0)).unwrap()))
+    });
+    c.bench_function("cumprod_axis_first_strided_f64", |b| {
+        b.iter(|| {
+            black_box(cumprod(black_box(&product_input), Some(0)).unwrap())
+        })
     });
 }
 
@@ -289,6 +413,7 @@ fn bench_phase5(c: &mut Criterion) {
     )
     .unwrap();
     let condition_t = condition.transpose();
+    let scalar = Array::from_vec(vec![3.5_f64], &[1, 1]).unwrap();
     let x = Array::from_vec((0..SIDE).map(|i| i as f64).collect(), &[SIDE])
         .unwrap();
     let y =
@@ -308,6 +433,26 @@ fn bench_phase5(c: &mut Criterion) {
                 concatenate(&[black_box(&left_t), black_box(&right_t)], 0)
                     .unwrap(),
             )
+        })
+    });
+    c.bench_function("concatenate_axis1_contiguous_f64", |b| {
+        b.iter(|| {
+            black_box(
+                concatenate(&[black_box(&left), black_box(&right)], 1).unwrap(),
+            )
+        })
+    });
+    c.bench_function("concatenate_axis1_strided_f64", |b| {
+        b.iter(|| {
+            black_box(
+                concatenate(&[black_box(&left_t), black_box(&right_t)], 1)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("stack_axis0_contiguous_f64", |b| {
+        b.iter(|| {
+            black_box(stack(&[black_box(&left), black_box(&right)], 0).unwrap())
         })
     });
     c.bench_function("where_contiguous_f64", |b| {
@@ -334,11 +479,45 @@ fn bench_phase5(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("where_scalar_broadcast_f64", |b| {
+        b.iter(|| {
+            black_box(
+                where_(
+                    black_box(&condition),
+                    black_box(&scalar),
+                    black_box(&right),
+                )
+                .unwrap(),
+            )
+        })
+    });
+    c.bench_function("clip_contiguous_f64", |b| {
+        b.iter(|| {
+            black_box(clip(black_box(&left), Some(128.0), Some(896.0)).unwrap())
+        })
+    });
+    c.bench_function("nonzero_bool_contiguous", |b| {
+        b.iter(|| black_box(nonzero(black_box(&condition)).unwrap()))
+    });
     c.bench_function("sort_axis_last_contiguous_f64", |b| {
         b.iter(|| black_box(sort_array(black_box(&left), Some(-1)).unwrap()))
     });
     c.bench_function("sort_axis_last_strided_f64", |b| {
         b.iter(|| black_box(sort_array(black_box(&left_t), Some(-1)).unwrap()))
+    });
+    c.bench_function("argsort_axis_last_contiguous_f64", |b| {
+        b.iter(|| black_box(argsort(black_box(&left), Some(-1)).unwrap()))
+    });
+    c.bench_function("unique_flatten_f64", |b| {
+        b.iter(|| black_box(unique(black_box(&left)).unwrap()))
+    });
+    c.bench_function("linspace_1m_f64", |b| {
+        b.iter(|| {
+            black_box(
+                linspace(black_box(0.0), black_box(1.0), ELEMENTS, true)
+                    .unwrap(),
+            )
+        })
     });
     c.bench_function("meshgrid_1024x1024_view_f64", |b| {
         b.iter(|| {
@@ -412,6 +591,9 @@ fn bench_indexing(c: &mut Criterion) {
     let unshared_values =
         Array::from_vec(vec![3.5_f64; ELEMENTS / 2], &[SIDE / 2, SIDE])
             .unwrap();
+    let strided_values =
+        Array::from_vec(vec![3.5_f64; ELEMENTS / 2], &[SIDE, SIDE / 2])
+            .unwrap();
 
     let mut group = c.benchmark_group("scatter_array_f64");
     group.bench_function("unshared_rhs", |b| {
@@ -450,6 +632,21 @@ fn bench_indexing(c: &mut Criterion) {
     });
     group.finish();
 
+    c.bench_function("scatter_array_strided_basic_f64", |b| {
+        b.iter_batched(
+            || a.copy(),
+            |mut destination| {
+                scatter_array(
+                    black_box(&mut destination),
+                    black_box(&strided_target),
+                    black_box(&strided_values),
+                )
+                .unwrap();
+                black_box(destination)
+            },
+            BatchSize::LargeInput,
+        )
+    });
     c.bench_function("scatter_scalar_strided_f64", |b| {
         b.iter_batched(
             || a.copy(),
