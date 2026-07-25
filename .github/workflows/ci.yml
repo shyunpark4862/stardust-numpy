@@ -77,10 +77,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "Benchmark report unchanged"
           else
-            git commit -m "$(cat <<'EOF'
-chore: update BENCHMARK.md from CI benchmarks [skip ci]
-
-EOF
-)"
+            git commit -m "chore: update BENCHMARK.md from CI benchmarks [skip ci]"
             git push
           fi
