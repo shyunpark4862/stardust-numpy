@@ -11,7 +11,7 @@ use crate::index::prepare::{
 };
 use crate::index::spec::IndexSpec;
 use crate::run::{RunKind, RunPlan};
-use crate::shape::{buffer_index, is_c_contiguous, size_of_shape};
+use crate::shape::{is_c_contiguous, offset_at, size_of_shape};
 use crate::stride_iter::StrideIter;
 
 /// Select elements by `index`.
@@ -125,7 +125,7 @@ fn basic_view_meta<T: Scalar>(
                 strides.push(a.strides()[source_axis] * *step);
                 source_axis += 1;
             }
-            PreparedEntry::Fancy(_) => {
+            PreparedEntry::IntegerArray(_) => {
                 return Err(Error::InvalidArgument(
                     "internal error: fancy entry on basic path".into(),
                 ));
@@ -151,7 +151,7 @@ fn gather_basic<T: Scalar>(
     prepared: &PreparedIndex,
 ) -> Result<Array<T>> {
     let meta = basic_view_meta(a, prepared)?;
-    Array::from_arc_raw_parts(
+    Array::from_shared_parts(
         Arc::clone(&a.data),
         meta.shape,
         meta.strides,
@@ -178,7 +178,7 @@ fn scatter_basic_scalar<T: Scalar>(
 
     let plan = RunPlan::new(&meta.shape, [&meta.strides]);
     plan.for_each([meta.offset as isize], |run| {
-        if run.kinds[0] == RunKind::Contiguous {
+        if run.kinds[0] == RunKind::UnitStride {
             data[run.bases[0]..run.bases[0] + run.len].fill(value);
         } else {
             let mut pos = run.bases[0] as isize;
@@ -216,13 +216,13 @@ fn scatter_basic_array<T: Scalar>(
     let plan = RunPlan::new(&meta.shape, [&meta.strides, aligned.strides()]);
     plan.for_each([meta.offset as isize, aligned.offset() as isize], |run| {
         match (run.kinds[0], run.kinds[1]) {
-            (RunKind::Contiguous, RunKind::Contiguous) => {
+            (RunKind::UnitStride, RunKind::UnitStride) => {
                 let source =
                     &aligned.data[run.bases[1]..run.bases[1] + run.len];
                 data[run.bases[0]..run.bases[0] + run.len]
                     .copy_from_slice(source);
             }
-            (RunKind::Contiguous, RunKind::Repeated) => {
+            (RunKind::UnitStride, RunKind::Repeated) => {
                 data[run.bases[0]..run.bases[0] + run.len]
                     .fill(aligned.data[run.bases[1]]);
             }
@@ -395,7 +395,7 @@ impl FancyOffsetIter<'_> {
                         * self.source_strides[source_axis];
                     source_axis += 1;
                 }
-                PreparedEntry::Fancy(fancy) => {
+                PreparedEntry::IntegerArray(fancy) => {
                     let idx = read_fancy_usize(fancy, fancy_coords);
                     offset += idx as isize * self.source_strides[source_axis];
                     source_axis += 1;
@@ -413,6 +413,6 @@ impl FancyOffsetIter<'_> {
 
 fn read_fancy_usize(arr: &Array<i64>, indices: &[usize]) -> usize {
     debug_assert_eq!(indices.len(), arr.ndim());
-    let buf = buffer_index(indices, arr.strides(), arr.offset());
+    let buf = offset_at(indices, arr.strides(), arr.offset());
     arr.data[buf] as usize
 }

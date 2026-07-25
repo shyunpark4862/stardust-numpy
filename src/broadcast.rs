@@ -91,7 +91,7 @@ impl<T: Scalar> Array<T> {
             }
         }
 
-        Self::from_arc_raw_parts(
+        Self::from_shared_parts(
             Arc::clone(&self.data),
             shape.to_vec(),
             new_strides,

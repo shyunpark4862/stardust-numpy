@@ -1,65 +1,34 @@
-//! Axis normalization and reduction geometry helpers.
+//! Reduction-axis geometry helpers.
 
+use crate::axis::normalize_axis_list;
 use crate::error::{Error, Result};
 use crate::shape::size_of_shape;
 
-/// Normalize a single axis index into `0..ndim`.
-pub(crate) fn normalize_axis(axis: isize, ndim: usize) -> Result<usize> {
-    if ndim == 0 {
-        return Err(Error::InvalidArgument(
-            "axis is invalid for a 0-D array".into(),
-        ));
-    }
-    let mut ax = axis;
-    if ax < 0 {
-        ax += ndim as isize;
-    }
-    if ax < 0 || ax as usize >= ndim {
-        return Err(Error::InvalidArgument(format!(
-            "axis {axis} is out of bounds for array of dimension {ndim}"
-        )));
-    }
-    Ok(ax as usize)
-}
-
 /// Normalize one or more axes; rejects duplicates. Returns sorted unique axes.
-pub(crate) fn normalize_axes(
-    axes: &[isize],
-    ndim: usize,
-) -> Result<Vec<usize>> {
+fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Result<Vec<usize>> {
     if axes.is_empty() {
         return Err(Error::InvalidArgument(
             "axes tuple must be non-empty".into(),
         ));
     }
-    let mut out = Vec::with_capacity(axes.len());
-    for &ax in axes {
-        out.push(normalize_axis(ax, ndim)?);
-    }
+    let mut out = normalize_axis_list(axes, ndim)?;
     out.sort_unstable();
-    for w in out.windows(2) {
-        if w[0] == w[1] {
-            return Err(Error::InvalidArgument(
-                "duplicate value in 'axis'".into(),
-            ));
-        }
-    }
     Ok(out)
 }
 
-/// Axes to reduce: `None` → all axes; otherwise [`normalize_axes`].
+/// Axes to reduce: `None` → all axes; otherwise normalized and sorted.
 pub(crate) fn resolve_reduced_axes(
     ndim: usize,
     axes: Option<&[isize]>,
 ) -> Result<Vec<usize>> {
     match axes {
         None => Ok((0..ndim).collect()),
-        Some(axes) => normalize_axes(axes, ndim),
+        Some(axes) => normalize_reduction_axes(axes, ndim),
     }
 }
 
 /// Shape after removing `reduced` axes (ascending).
-pub(crate) fn outer_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
+pub(crate) fn kept_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(shape.len().saturating_sub(reduced.len()));
     let mut r = 0usize;
     for (axis, &dim) in shape.iter().enumerate() {
@@ -73,7 +42,7 @@ pub(crate) fn outer_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
 }
 
 /// Complementary axis list (ascending) for non-reduced axes.
-pub(crate) fn outer_axes(ndim: usize, reduced: &[usize]) -> Vec<usize> {
+pub(crate) fn kept_axes(ndim: usize, reduced: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(ndim.saturating_sub(reduced.len()));
     let mut r = 0usize;
     for axis in 0..ndim {
@@ -109,39 +78,40 @@ pub(crate) fn output_shape(
     if keepdims {
         keepdims_shape(shape, reduced)
     } else {
-        outer_shape(shape, reduced)
+        kept_shape(shape, reduced)
     }
 }
 
 /// Shared geometry for operations that traverse one axis while preserving
-/// independent outer slots.
+/// independent output slots.
 #[derive(Clone, Debug)]
 pub(crate) struct AxisTraversalPlan {
     pub axis: usize,
     pub axis_len: usize,
-    pub outer_axes: Vec<usize>,
-    pub outer_shape: Vec<usize>,
-    pub outer_n: usize,
+    pub kept_axes: Vec<usize>,
+    pub kept_shape: Vec<usize>,
+    pub output_len: usize,
 }
 
 impl AxisTraversalPlan {
     pub fn new(shape: &[usize], axis: usize) -> Self {
         debug_assert!(axis < shape.len());
-        let reduced = [axis];
-        let axes = outer_axes(shape.len(), &reduced);
-        let outer = outer_shape(shape, &reduced);
+        let axis_len = shape[axis];
+        let reduced_axes = [axis];
+        let axes = kept_axes(shape.len(), &reduced_axes);
+        let kept_shape = kept_shape(shape, &reduced_axes);
         Self {
             axis,
-            axis_len: shape[axis],
-            outer_n: size_of_shape(&outer),
-            outer_axes: axes,
-            outer_shape: outer,
+            axis_len,
+            output_len: size_of_shape(&kept_shape),
+            kept_axes: axes,
+            kept_shape,
         }
     }
 
     /// Strides for the non-traversed axes in outer C-order.
-    pub fn outer_strides(&self, strides: &[isize]) -> Vec<isize> {
-        self.outer_axes.iter().map(|&axis| strides[axis]).collect()
+    pub fn kept_strides(&self, strides: &[isize]) -> Vec<isize> {
+        self.kept_axes.iter().map(|&axis| strides[axis]).collect()
     }
 
     /// Whether the traversed axis is the last logical axis.
@@ -154,17 +124,17 @@ impl AxisTraversalPlan {
 /// Shared geometry for axis reductions (computed once per call).
 #[derive(Clone, Debug)]
 pub(crate) struct ReducePlan {
-    pub reduced: Vec<usize>,
-    pub outer_axes: Vec<usize>,
-    pub out_shape: Vec<usize>,
-    pub outer_shape: Vec<usize>,
+    pub reduced_axes: Vec<usize>,
+    pub kept_axes: Vec<usize>,
+    pub output_shape: Vec<usize>,
+    pub kept_shape: Vec<usize>,
     pub reduced_shape: Vec<usize>,
-    /// Number of independent reduction slots (product of outer dims).
+    /// Number of independent reduction outputs (product of kept dimensions).
     /// `0` means an empty result (no slots to fill).
-    pub outer_n: usize,
+    pub output_len: usize,
     /// Elements folded per slot (product of reduced dims).
     /// `0` means the reduced block is empty.
-    pub inner_n: usize,
+    pub reduction_len: usize,
 }
 
 /// Physical traversal selected from reduction geometry and input layout.
@@ -188,26 +158,26 @@ impl ReducePlan {
         axes: Option<&[isize]>,
         keepdims: bool,
     ) -> Result<Self> {
-        let reduced = resolve_reduced_axes(shape.len(), axes)?;
-        let outer_ax = outer_axes(shape.len(), &reduced);
-        let outer = outer_shape(shape, &reduced);
-        let red_shape = reduced_shape(shape, &reduced);
-        let out = output_shape(shape, &reduced, keepdims);
+        let reduced_axes = resolve_reduced_axes(shape.len(), axes)?;
+        let kept_axes = kept_axes(shape.len(), &reduced_axes);
+        let kept_shape = kept_shape(shape, &reduced_axes);
+        let reduced_shape = reduced_shape(shape, &reduced_axes);
+        let output_shape = output_shape(shape, &reduced_axes, keepdims);
         Ok(Self {
-            reduced,
-            outer_axes: outer_ax,
-            out_shape: out,
-            outer_n: size_of_shape(&outer),
-            inner_n: size_of_shape(&red_shape),
-            outer_shape: outer,
-            reduced_shape: red_shape,
+            reduced_axes,
+            kept_axes,
+            output_shape,
+            output_len: size_of_shape(&kept_shape),
+            reduction_len: size_of_shape(&reduced_shape),
+            kept_shape,
+            reduced_shape,
         })
     }
 
-    /// True when the reduced block has no elements (`inner_n == 0`).
+    /// True when the reduced block has no elements (`reduction_len == 0`).
     #[inline]
-    pub fn inner_is_empty(&self) -> bool {
-        self.inner_n == 0
+    pub fn reduction_is_empty(&self) -> bool {
+        self.reduction_len == 0
     }
 
     /// True when reduced axes form a trailing contiguous block
@@ -217,7 +187,7 @@ impl ReducePlan {
     /// [`Array::as_c_contiguous_slice`](crate::array::Array::as_c_contiguous_slice).
     #[inline]
     pub fn is_suffix_reduction(&self, ndim: usize) -> bool {
-        let k = self.reduced.len();
+        let k = self.reduced_axes.len();
         if k == 0 {
             return true;
         }
@@ -225,7 +195,7 @@ impl ReducePlan {
             return false;
         }
         let start = ndim - k;
-        self.reduced
+        self.reduced_axes
             .iter()
             .enumerate()
             .all(|(i, &ax)| ax == start + i)
@@ -234,7 +204,7 @@ impl ReducePlan {
     /// True when reduced axes form a leading block (`[0, …, k-1]`).
     #[inline]
     pub fn is_prefix_reduction(&self) -> bool {
-        self.reduced
+        self.reduced_axes
             .iter()
             .enumerate()
             .all(|(axis, &reduced)| axis == reduced)
@@ -255,21 +225,21 @@ impl ReducePlan {
         }
         if self.is_prefix_reduction() {
             return TraversalSchedule::PrefixContiguous {
-                reduced_len: self.inner_n,
-                output_len: self.outer_n,
+                reduced_len: self.reduction_len,
+                output_len: self.output_len,
             };
         }
         TraversalSchedule::GeneralStrided
     }
 
     /// Source strides along outer and reduced axes, respectively.
-    pub fn outer_reduced_strides(
+    pub fn kept_reduced_strides(
         &self,
         strides: &[isize],
     ) -> (Vec<isize>, Vec<isize>) {
-        let outer = self.outer_axes.iter().map(|&ax| strides[ax]).collect();
-        let reduced = self.reduced.iter().map(|&ax| strides[ax]).collect();
-        (outer, reduced)
+        let kept = self.kept_axes.iter().map(|&ax| strides[ax]).collect();
+        let reduced = self.reduced_axes.iter().map(|&ax| strides[ax]).collect();
+        (kept, reduced)
     }
 }
 
@@ -279,19 +249,19 @@ mod tests {
 
     #[test]
     fn normalize_negative_and_dup() {
-        assert_eq!(normalize_axes(&[-1, 0], 3).unwrap(), vec![0, 2]);
-        assert!(normalize_axes(&[0, 0], 2).is_err());
-        assert!(normalize_axes(&[3], 2).is_err());
+        assert_eq!(normalize_reduction_axes(&[-1, 0], 3).unwrap(), vec![0, 2]);
+        assert!(normalize_reduction_axes(&[0, 0], 2).is_err());
+        assert!(normalize_reduction_axes(&[3], 2).is_err());
     }
 
     #[test]
     fn plan_shapes() {
         let p = ReducePlan::new(&[2, 3, 4], Some(&[0, 2]), false).unwrap();
-        assert_eq!(p.out_shape, vec![3]);
-        assert_eq!(p.outer_shape, vec![3]);
+        assert_eq!(p.output_shape, vec![3]);
+        assert_eq!(p.kept_shape, vec![3]);
         assert_eq!(p.reduced_shape, vec![2, 4]);
-        assert_eq!(p.inner_n, 8);
-        assert!(!p.inner_is_empty());
+        assert_eq!(p.reduction_len, 8);
+        assert!(!p.reduction_is_empty());
     }
 
     #[test]
@@ -299,24 +269,24 @@ mod tests {
         let p = AxisTraversalPlan::new(&[2, 3, 4], 1);
         assert_eq!(p.axis, 1);
         assert_eq!(p.axis_len, 3);
-        assert_eq!(p.outer_axes, vec![0, 2]);
-        assert_eq!(p.outer_shape, vec![2, 4]);
-        assert_eq!(p.outer_n, 8);
-        assert_eq!(p.outer_strides(&[12, 4, 1]), vec![12, 1]);
+        assert_eq!(p.kept_axes, vec![0, 2]);
+        assert_eq!(p.kept_shape, vec![2, 4]);
+        assert_eq!(p.output_len, 8);
+        assert_eq!(p.kept_strides(&[12, 4, 1]), vec![12, 1]);
         assert!(!p.is_last_axis(3));
     }
 
     #[test]
     fn empty_outer_vs_inner() {
         let outer_empty = ReducePlan::new(&[0, 3], Some(&[1]), false).unwrap();
-        assert_eq!(outer_empty.outer_n, 0);
-        assert_eq!(outer_empty.inner_n, 3);
-        assert!(!outer_empty.inner_is_empty());
+        assert_eq!(outer_empty.output_len, 0);
+        assert_eq!(outer_empty.reduction_len, 3);
+        assert!(!outer_empty.reduction_is_empty());
 
         let inner_empty = ReducePlan::new(&[0, 3], Some(&[0]), false).unwrap();
-        assert_eq!(inner_empty.outer_n, 3);
-        assert_eq!(inner_empty.inner_n, 0);
-        assert!(inner_empty.inner_is_empty());
+        assert_eq!(inner_empty.output_len, 3);
+        assert_eq!(inner_empty.reduction_len, 0);
+        assert!(inner_empty.reduction_is_empty());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::stride_iter::StrideCursor;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunKind {
     /// Consecutive elements (`stride == 1`).
-    Contiguous,
+    UnitStride,
     /// One element reused throughout the run (`stride == 0`).
     Repeated,
     /// Any other fixed stride.
@@ -20,14 +20,14 @@ impl RunKind {
     #[inline]
     fn from_stride(stride: isize) -> Self {
         match stride {
-            1 => Self::Contiguous,
+            1 => Self::UnitStride,
             0 => Self::Repeated,
             _ => Self::Strided,
         }
     }
 }
 
-/// One fixed-stride inner run for `N` jointly coalesced operands.
+/// One fixed-stride run for `N` jointly coalesced operands.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Run<const N: usize> {
     /// Buffer offsets at the start of the run.
@@ -40,59 +40,60 @@ pub(crate) struct Run<const N: usize> {
     pub(crate) kinds: [RunKind; N],
 }
 
-/// Reusable outer traversal and inner-run description for `N` operands.
+/// Reusable run-grid traversal and linear-run description for `N` operands.
 #[derive(Clone, Debug)]
 pub(crate) struct RunPlan<const N: usize> {
-    outer_shape: Vec<usize>,
-    outer_strides: [Vec<isize>; N],
-    outer_len: usize,
-    inner_len: usize,
-    inner_strides: [isize; N],
-    inner_kinds: [RunKind; N],
+    run_grid_shape: Vec<usize>,
+    run_grid_strides: [Vec<isize>; N],
+    run_count: usize,
+    run_len: usize,
+    operand_strides: [isize; N],
+    operand_kinds: [RunKind; N],
 }
 
 impl<const N: usize> RunPlan<N> {
     /// Jointly coalesce operands over one logical shape.
     pub(crate) fn new(shape: &[usize], strides: [&[isize]; N]) -> Self {
         let layout = CoalescedLayout::new(shape, &strides);
-        let outer_shape = layout.outer_shape().to_vec();
-        let outer_strides =
-            array::from_fn(|operand| layout.outer_strides(operand).to_vec());
-        let inner_strides =
-            array::from_fn(|operand| layout.inner_stride(operand));
-        let inner_kinds = inner_strides.map(RunKind::from_stride);
+        let run_grid_shape = layout.run_grid_shape().to_vec();
+        let run_grid_strides =
+            array::from_fn(|operand| layout.run_grid_strides(operand).to_vec());
+        let operand_strides =
+            array::from_fn(|operand| layout.operand_stride(operand));
+        let operand_kinds = operand_strides.map(RunKind::from_stride);
         Self {
-            outer_len: layout.outer_len(),
-            inner_len: layout.inner_len(),
-            outer_shape,
-            outer_strides,
-            inner_strides,
-            inner_kinds,
+            run_count: layout.run_count(),
+            run_len: layout.run_len(),
+            run_grid_shape,
+            run_grid_strides,
+            operand_strides,
+            operand_kinds,
         }
     }
 
-    /// Number of outer runs.
+    /// Number of runs.
     #[inline]
-    pub(crate) fn outer_len(&self) -> usize {
-        self.outer_len
+    pub(crate) fn run_count(&self) -> usize {
+        self.run_count
     }
 
-    /// Number of elements in each inner run.
+    /// Number of elements in each run.
     #[inline]
-    pub(crate) fn inner_len(&self) -> usize {
-        self.inner_len
+    pub(crate) fn run_len(&self) -> usize {
+        self.run_len
     }
 
-    /// Fixed inner stride for one operand.
+    /// Fixed per-element stride for one operand.
     #[inline]
-    pub(crate) fn inner_stride(&self, operand: usize) -> isize {
-        self.inner_strides[operand]
+    pub(crate) fn operand_stride(&self, operand: usize) -> isize {
+        self.operand_strides[operand]
     }
 
-    /// Create an outer cursor at the supplied operand offsets.
+    /// Create a run-grid cursor at the supplied operand offsets.
     pub(crate) fn cursor(&self, offsets: [isize; N]) -> StrideCursor<'_, N> {
-        let stride_refs = array::from_fn(|i| self.outer_strides[i].as_slice());
-        StrideCursor::new(&self.outer_shape, stride_refs, offsets)
+        let stride_refs =
+            array::from_fn(|i| self.run_grid_strides[i].as_slice());
+        StrideCursor::new(&self.run_grid_shape, stride_refs, offsets)
     }
 
     /// Visit every prepared run from the supplied operand offsets.
@@ -101,20 +102,20 @@ impl<const N: usize> RunPlan<N> {
         offsets: [isize; N],
         mut visit: impl FnMut(Run<N>),
     ) {
-        if self.inner_len == 0 || self.outer_len == 0 {
+        if self.run_len == 0 || self.run_count == 0 {
             return;
         }
-        let mut outer = self.cursor(offsets);
-        for outer_index in 0..self.outer_len {
-            let bases = array::from_fn(|i| outer.buffer_index(i));
+        let mut run_grid = self.cursor(offsets);
+        for run_index in 0..self.run_count {
+            let bases = array::from_fn(|i| run_grid.operand_offset(i));
             visit(Run {
                 bases,
-                len: self.inner_len,
-                strides: self.inner_strides,
-                kinds: self.inner_kinds,
+                len: self.run_len,
+                strides: self.operand_strides,
+                kinds: self.operand_kinds,
             });
-            if outer_index + 1 < self.outer_len {
-                outer.advance();
+            if run_index + 1 < self.run_count {
+                run_grid.advance();
             }
         }
     }
@@ -125,20 +126,20 @@ impl<const N: usize> RunPlan<N> {
         offsets: [isize; N],
         mut visit: impl FnMut(Run<N>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E> {
-        if self.inner_len == 0 || self.outer_len == 0 {
+        if self.run_len == 0 || self.run_count == 0 {
             return Ok(());
         }
-        let mut outer = self.cursor(offsets);
-        for outer_index in 0..self.outer_len {
-            let bases = array::from_fn(|i| outer.buffer_index(i));
+        let mut run_grid = self.cursor(offsets);
+        for run_index in 0..self.run_count {
+            let bases = array::from_fn(|i| run_grid.operand_offset(i));
             visit(Run {
                 bases,
-                len: self.inner_len,
-                strides: self.inner_strides,
-                kinds: self.inner_kinds,
+                len: self.run_len,
+                strides: self.operand_strides,
+                kinds: self.operand_kinds,
             })?;
-            if outer_index + 1 < self.outer_len {
-                outer.advance();
+            if run_index + 1 < self.run_count {
+                run_grid.advance();
             }
         }
         Ok(())
@@ -170,7 +171,7 @@ pub(crate) fn collect_unary<A: Copy, Out>(
     offset: usize,
     map: impl FnMut(A) -> Out,
 ) -> Vec<Out> {
-    let mut out = Vec::with_capacity(plan.outer_len * plan.inner_len);
+    let mut out = Vec::with_capacity(plan.run_count * plan.run_len);
     extend_unary(plan, data, offset, &mut out, map);
     out
 }
@@ -184,7 +185,7 @@ pub(crate) fn extend_unary<A: Copy, Out>(
     mut map: impl FnMut(A) -> Out,
 ) {
     plan.for_each([offset as isize], |run| match run.kinds[0] {
-        RunKind::Contiguous => {
+        RunKind::UnitStride => {
             out.extend(
                 data[run.bases[0]..run.bases[0] + run.len]
                     .iter()
@@ -214,10 +215,10 @@ pub(crate) fn collect_binary<A: Copy, B: Copy, Out>(
     offsets: [usize; 2],
     mut map: impl FnMut(A, B) -> Out,
 ) -> Vec<Out> {
-    let mut out = Vec::with_capacity(plan.outer_len * plan.inner_len);
+    let mut out = Vec::with_capacity(plan.run_count * plan.run_len);
     plan.for_each(offsets.map(|offset| offset as isize), |run| {
         match (run.kinds[0], run.kinds[1]) {
-            (RunKind::Contiguous, RunKind::Contiguous) => {
+            (RunKind::UnitStride, RunKind::UnitStride) => {
                 let xs = &left[run.bases[0]..run.bases[0] + run.len];
                 let ys = &right[run.bases[1]..run.bases[1] + run.len];
                 out.extend(
@@ -227,7 +228,7 @@ pub(crate) fn collect_binary<A: Copy, B: Copy, Out>(
                         .map(|(x, y)| map(x, y)),
                 );
             }
-            (RunKind::Contiguous, RunKind::Repeated) => {
+            (RunKind::UnitStride, RunKind::Repeated) => {
                 let y = right[run.bases[1]];
                 out.extend(
                     left[run.bases[0]..run.bases[0] + run.len]
@@ -236,7 +237,7 @@ pub(crate) fn collect_binary<A: Copy, B: Copy, Out>(
                         .map(|x| map(x, y)),
                 );
             }
-            (RunKind::Repeated, RunKind::Contiguous) => {
+            (RunKind::Repeated, RunKind::UnitStride) => {
                 let x = left[run.bases[0]];
                 out.extend(
                     right[run.bases[1]..run.bases[1] + run.len]
@@ -272,7 +273,7 @@ pub(crate) fn try_collect_binary<A: Copy, B: Copy, Out, E>(
     offsets: [usize; 2],
     mut map: impl FnMut(A, B) -> std::result::Result<Out, E>,
 ) -> std::result::Result<Vec<Out>, E> {
-    let mut out = Vec::with_capacity(plan.outer_len * plan.inner_len);
+    let mut out = Vec::with_capacity(plan.run_count * plan.run_len);
     plan.try_for_each(offsets.map(|offset| offset as isize), |run| {
         let mut lhs = run.bases[0] as isize;
         let mut rhs = run.bases[1] as isize;
@@ -295,10 +296,10 @@ pub(crate) fn collect_ternary<A: Copy, B: Copy, C: Copy, Out>(
     offsets: [usize; 3],
     mut map: impl FnMut(A, B, C) -> Out,
 ) -> Vec<Out> {
-    let mut out = Vec::with_capacity(plan.outer_len * plan.inner_len);
+    let mut out = Vec::with_capacity(plan.run_count * plan.run_len);
     plan.for_each(offsets.map(|offset| offset as isize), |run| {
         match (run.kinds[0], run.kinds[1], run.kinds[2]) {
-            (RunKind::Contiguous, RunKind::Contiguous, RunKind::Contiguous) => {
+            (RunKind::UnitStride, RunKind::UnitStride, RunKind::UnitStride) => {
                 let first = &first[run.bases[0]..run.bases[0] + run.len];
                 let second = &second[run.bases[1]..run.bases[1] + run.len];
                 let third = &third[run.bases[2]..run.bases[2] + run.len];
@@ -311,7 +312,7 @@ pub(crate) fn collect_ternary<A: Copy, B: Copy, C: Copy, Out>(
                         .map(|((a, b), c)| map(a, b, c)),
                 );
             }
-            (RunKind::Contiguous, RunKind::Repeated, RunKind::Contiguous) => {
+            (RunKind::UnitStride, RunKind::Repeated, RunKind::UnitStride) => {
                 let repeated = second[run.bases[1]];
                 let first = &first[run.bases[0]..run.bases[0] + run.len];
                 let third = &third[run.bases[2]..run.bases[2] + run.len];
@@ -323,7 +324,7 @@ pub(crate) fn collect_ternary<A: Copy, B: Copy, C: Copy, Out>(
                         .map(|(a, c)| map(a, repeated, c)),
                 );
             }
-            (RunKind::Contiguous, RunKind::Contiguous, RunKind::Repeated) => {
+            (RunKind::UnitStride, RunKind::UnitStride, RunKind::Repeated) => {
                 let repeated = third[run.bases[2]];
                 let first = &first[run.bases[0]..run.bases[0] + run.len];
                 let second = &second[run.bases[1]..run.bases[1] + run.len];
@@ -335,7 +336,7 @@ pub(crate) fn collect_ternary<A: Copy, B: Copy, C: Copy, Out>(
                         .map(|(a, b)| map(a, b, repeated)),
                 );
             }
-            (RunKind::Contiguous, RunKind::Repeated, RunKind::Repeated) => {
+            (RunKind::UnitStride, RunKind::Repeated, RunKind::Repeated) => {
                 let second = second[run.bases[1]];
                 let third = third[run.bases[2]];
                 out.extend(
@@ -398,13 +399,13 @@ mod tests {
     #[test]
     fn classifies_inner_runs() {
         let contiguous = RunPlan::new(&[2, 3], [&[3, 1]]);
-        assert_eq!(contiguous.inner_kinds[0], RunKind::Contiguous);
+        assert_eq!(contiguous.operand_kinds[0], RunKind::UnitStride);
 
         let repeated = RunPlan::new(&[2, 3], [&[0, 0]]);
-        assert_eq!(repeated.inner_kinds[0], RunKind::Repeated);
+        assert_eq!(repeated.operand_kinds[0], RunKind::Repeated);
 
         let strided = RunPlan::new(&[2, 3], [&[1, 2]]);
-        assert_eq!(strided.inner_kinds[0], RunKind::Strided);
+        assert_eq!(strided.operand_kinds[0], RunKind::Strided);
     }
 
     #[test]

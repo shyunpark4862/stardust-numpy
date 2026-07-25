@@ -5,12 +5,12 @@ use std::sync::Arc;
 use crate::array::Array;
 use crate::dtype::Scalar;
 use crate::error::Result;
-use crate::shape::{buffer_index, c_order_strides};
+use crate::shape::{c_order_strides, offset_at};
 
 impl<T: Scalar> Array<T> {
     /// Read one element by multi-index.
     pub fn get(&self, indices: &[usize]) -> Result<T> {
-        let buf_idx = self.checked_buffer_index(indices)?;
+        let buf_idx = self.checked_offset(indices)?;
         Ok(self.data[buf_idx])
     }
 
@@ -25,9 +25,9 @@ impl<T: Scalar> Array<T> {
         if !self.writable {
             return Err(crate::error::Error::ReadOnly);
         }
-        self.checked_buffer_index(indices)?;
+        self.checked_offset(indices)?;
         self.ensure_unique_storage_for_write();
-        let buf_idx = buffer_index(indices, &self.strides, self.offset);
+        let buf_idx = offset_at(indices, &self.strides, self.offset);
         Arc::make_mut(&mut self.data)[buf_idx] = value;
         Ok(())
     }
@@ -56,7 +56,7 @@ impl<T: Scalar> Array<T> {
         self.offset = 0;
     }
 
-    fn checked_buffer_index(&self, indices: &[usize]) -> Result<usize> {
+    fn checked_offset(&self, indices: &[usize]) -> Result<usize> {
         if indices.len() != self.ndim() {
             return Err(crate::error::Error::InvalidArgument(format!(
                 "expected {} indices, got {}",
@@ -67,12 +67,12 @@ impl<T: Scalar> Array<T> {
         for (&i, &dim) in indices.iter().zip(self.shape.iter()) {
             if i >= dim {
                 return Err(crate::error::Error::IndexOutOfBounds {
-                    index: i as isize,
+                    index: i as i64,
                     axis_len: dim,
                 });
             }
         }
-        Ok(buffer_index(indices, &self.strides, self.offset))
+        Ok(offset_at(indices, &self.strides, self.offset))
     }
 }
 

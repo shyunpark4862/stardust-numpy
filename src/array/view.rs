@@ -3,9 +3,29 @@
 use std::sync::Arc;
 
 use crate::array::Array;
+use crate::axis::{normalize_axis_list, normalize_insert_axis};
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
 use crate::shape::{c_order_strides, size_of_shape};
+
+/// Insert a size-one axis without copying the backing buffer.
+pub(crate) fn insert_axis_view<T: Scalar>(
+    array: &Array<T>,
+    axis: isize,
+) -> Result<Array<T>> {
+    let axis = normalize_insert_axis(axis, array.ndim())?;
+    let mut shape = array.shape().to_vec();
+    let mut strides = array.strides().to_vec();
+    shape.insert(axis, 1);
+    strides.insert(axis, 0);
+    Array::from_shared_parts(
+        Arc::clone(&array.data),
+        shape,
+        strides,
+        array.offset(),
+        array.is_writable(),
+    )
+}
 
 impl<T: Scalar> Array<T> {
     /// Return a view with axes reversed (matrix transpose for 2-D).
@@ -18,7 +38,7 @@ impl<T: Scalar> Array<T> {
         }
         let shape: Vec<usize> = self.shape.iter().rev().copied().collect();
         let strides: Vec<isize> = self.strides.iter().rev().copied().collect();
-        Self::from_arc_raw_parts(
+        Self::from_shared_parts(
             Arc::clone(&self.data),
             shape,
             strides,
@@ -36,8 +56,9 @@ impl<T: Scalar> Array<T> {
 
     /// Return a view with axes permuted by `axes`.
     ///
-    /// `axes` must be a permutation of `0..ndim`.
-    pub fn permute_axes(&self, axes: &[usize]) -> Result<Array<T>> {
+    /// `axes` must be a permutation of `0..ndim`; negative axes count from
+    /// the end.
+    pub fn permute_axes(&self, axes: &[isize]) -> Result<Array<T>> {
         if axes.len() != self.ndim() {
             return Err(Error::InvalidArgument(format!(
                 "axes length {} does not match ndim {}",
@@ -45,19 +66,19 @@ impl<T: Scalar> Array<T> {
                 self.ndim()
             )));
         }
-        let mut seen = vec![false; self.ndim()];
-        for &ax in axes {
-            if ax >= self.ndim() || seen[ax] {
-                return Err(Error::InvalidArgument(
-                    "axes must be a permutation of 0..ndim-1".into(),
-                ));
-            }
-            seen[ax] = true;
-        }
+        let axes =
+            normalize_axis_list(axes, self.ndim()).map_err(
+                |error| match error {
+                    Error::InvalidArgument(_) => Error::InvalidArgument(
+                        "axes must be a permutation of 0..ndim-1".into(),
+                    ),
+                    other => other,
+                },
+            )?;
         let shape: Vec<usize> = axes.iter().map(|&a| self.shape[a]).collect();
         let strides: Vec<isize> =
             axes.iter().map(|&a| self.strides[a]).collect();
-        Self::from_arc_raw_parts(
+        Self::from_shared_parts(
             Arc::clone(&self.data),
             shape,
             strides,
@@ -75,7 +96,7 @@ impl<T: Scalar> Array<T> {
         let new_shape = resolve_reshape(shape, self.size())?;
         if self.is_c_contiguous() {
             let strides = c_order_strides(&new_shape);
-            Self::from_arc_raw_parts(
+            Self::from_shared_parts(
                 Arc::clone(&self.data),
                 new_shape,
                 strides,
@@ -90,7 +111,7 @@ impl<T: Scalar> Array<T> {
 
     /// Cheap view alias: same buffer, shape, strides, and offset.
     pub fn view(&self) -> Array<T> {
-        Self::from_arc_raw_parts(
+        Self::from_shared_parts(
             Arc::clone(&self.data),
             self.shape.clone(),
             self.strides.clone(),
@@ -196,5 +217,9 @@ mod tests {
         let b = a.permute_axes(&[1, 0]).unwrap();
         assert_eq!(b.shape(), a.transpose().shape());
         assert_eq!(b.get(&[2, 0]).unwrap(), a.get(&[0, 2]).unwrap());
+
+        let negative = a.permute_axes(&[-1, -2]).unwrap();
+        assert_eq!(negative.shape(), b.shape());
+        assert!(a.permute_axes(&[0, -2]).is_err());
     }
 }

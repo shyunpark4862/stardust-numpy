@@ -21,7 +21,7 @@ N차원 strided layout을 operand stride 배열들과 함께 정규화한다.
 2. **인접 축 병합** — 모든 operand가 `outer_stride == inner_stride × len`이면 한 run으로 merge.
 3. **마지막 축 = inner run** — `inner_len`, `inner_stride` per operand. 그 위는 outer traversal.
 
-`RunPlan`, reduction `ReducedRuns`, ufunc collect, indexing scatter 등이 이 결과를 소비한다.
+`RunPlan`, reduction `ReducedAxisRuns`, ufunc collect, indexing scatter 등이 이 결과를 소비한다.
 
 #### 1.2 `RunPlan` + `RunKind` — prepared run dispatch
 
@@ -46,7 +46,7 @@ N차원 strided layout을 operand stride 배열들과 함께 정규화한다.
 - **`StrideCursor<N>`:** multi-index + lane별 buffer offset. `advance()` carry, `reset()` 재사용. cumsum 등 input/output offset 동시 진행(`N>1`).
 - **`StrideIter`:** `StrideCursor<1>` 래퍼, `ExactSizeIterator`. indexing prepare, fancy scatter, `nonzero` 등 단순 1-operand walk.
 
-Reduction general path는 **`RunPlan` outer + `ReducedRuns` inner**로 migration 중이며, `StrideCursor`는 reduced-axis cursor 재사용에 쓰인다.
+Reduction general path는 **`RunPlan` outer + `ReducedAxisRuns` inner**로 migration 중이며, `StrideCursor`는 reduced-axis cursor 재사용에 쓰인다.
 
 #### 1.4 C-contiguity 판정 (singleton 축 무시)
 
@@ -159,19 +159,19 @@ non-contiguous operand는 coalesced run walk. broadcast×contiguous, contiguous�
 
 **파일:** `src/reduce/axis.rs`
 
-axis normalize, `outer_n`, `inner_n`, `outer_shape`, `reduced_shape`, `out_shape`를 한 번 계산. `mean` 등에서 plan 재사용.
+axis normalize, `output_len`, `reduction_len`, `kept_shape`, `reduced_shape`, `output_shape`를 한 번 계산. `mean` 등에서 plan 재사용.
 
 #### 5.2 `TraversalSchedule` — layout-aware 물리 순회 선택
 
-**파일:** `src/reduce/axis.rs`, `src/reduce/kernels.rs`
+**파일:** `src/reduce/axis.rs`, `src/reduce/kernels/`
 
 C-contiguous + reduced axis block 위치에 따라:
 
 | 스케줄 | 조건 | 순회 |
 |--------|------|------|
-| `SuffixContiguous` | trailing reduced block | `chunks_exact(inner_n)` per output slot |
-| `PrefixContiguous` | leading reduced block | `chunks_exact(outer_n)` row scan, all slots 동시 갱신 |
-| `GeneralStrided` | 그 외 / non-contiguous | `ReducedRuns` + `RunPlan` |
+| `SuffixContiguous` | trailing reduced block | `chunks_exact(reduction_len)` per output slot |
+| `PrefixContiguous` | leading reduced block | `chunks_exact(output_len)` row scan, all slots 동시 갱신 |
+| `GeneralStrided` | 그 외 / non-contiguous | `ReducedAxisRuns` + `RunPlan` |
 
 `reduction_path`가 연산 semantics와 무관하게 schedule만으로 suffix/prefix/general kernel 선택.
 
@@ -182,7 +182,7 @@ C-contiguous + reduced axis block 위치에 따라:
 **Prefix (`fold_prefix_contiguous`):** first-axis reduction — memory-order row가 output-major:
 
 ```rust
-for row in slice.chunks_exact(plan.outer_n) {
+for row in slice.chunks_exact(plan.output_len) {
     for (acc, &value) in out.iter_mut().zip(row) {
         *acc = accumulate(*acc, value);
     }
@@ -193,7 +193,7 @@ for row in slice.chunks_exact(plan.outer_n) {
 
 #### 5.4 8-lane partial accumulator (ILP)
 
-**파일:** `src/reduce/kernels.rs`
+**파일:** `src/reduce/kernels/`
 
 loop-carried dependency 제거:
 
@@ -207,21 +207,21 @@ for block in chunk.chunks_exact(8) {
 // partial tree merge → remainder scalar
 ```
 
-**사용처:** `reduce_sum_plan`, f64 min/max suffix, `converted_sum_chunk`, `squared_deviation_sum_chunk`, `merge_eight_f64`.
+**사용처:** `reduce_sum_with_plan`, f64 min/max suffix, `converted_sum_chunk`, `squared_deviation_sum_chunk`, `merge_eight_f64`.
 
-#### 5.5 `ReducedRuns` — general strided reduction coalescing
+#### 5.5 `ReducedAxisRuns` — general strided reduction coalescing
 
-reduced-axis shape/strides → `RunPlan<1>` coalesce → `(outer_n, inner_len, inner_stride)`. outer는 `RunPlan::for_each_element`, inner는 `pos += inner_stride`. `StrideCursor`로 reduced outer cursor 재사용.
+reduced-axis shape/strides → `RunPlan<1>` coalesce → `(run_count, run_len, operand_stride)`. run grid는 `RunPlan::for_each_element`, linear run은 `pos += operand_stride`. `StrideCursor`는 reduced-axis run-grid cursor로 재사용.
 
 **API:** `fold_strided_general`, `var_strided_general`, `extremum_strided_general`.
 
 #### 5.6 extremum 단일 coalesced run fast path
 
-`extremum_strided_general`에서 `reduced.outer_n == 1`이면 run-counting wrapper 없이 flat inner loop — NaN branch 많은 min/max에서 overhead 제거.
+`extremum_strided_general`에서 `reduced.run_count == 1`이면 run-counting wrapper 없이 flat inner loop — NaN branch 많은 min/max에서 overhead 제거.
 
 #### 5.7 dtype별 min/max 전용 kernel
 
-**파일:** `src/reduce/kernels.rs`, `src/reduce/traits.rs`
+**파일:** `src/reduce/kernels/`, `src/reduce/traits.rs`
 
 | dtype | kernel | 핵심 |
 |-------|--------|------|
@@ -246,17 +246,17 @@ reduced-axis shape/strides → `RunPlan<1>` coalesce → `(outer_n, inner_len, i
 - **Prefix contiguous:** row scan mean 누적 → 동일 순서 variance pass (`var_prefix_contiguous`).
 - **General strided:** outer/reduced run walk two-pass (`var_strided_general`).
 
-`std`는 `var` 후 `map_owned_contiguous`로 `sqrt`.
+`std`는 `var` 후 `transform_owned_c_order`로 `sqrt`.
 
-#### 5.10 `map_owned_contiguous` — in-place post-process
+#### 5.10 `transform_owned_c_order` — in-place post-process
 
 fresh C-contiguous reduction output에 `Arc::make_mut` 후 in-place map. `mean`(count로 나누기), `std`(sqrt)에서 재할당 방지.
 
 #### 5.11 `AxisTraversalPlan` — 단일 축 연산 geometry
 
-**파일:** `src/reduce/axis.rs`, `src/reduce/kernels.rs`
+**파일:** `src/reduce/axis.rs`, `src/reduce/kernels/`
 
-`argmin`/`argmax`/`cumsum`/`cumprod`용 outer shape/strides 사전 계산. last axis + contiguous → row chunk scan.
+`argmin`/`argmax`/`cumsum`/`cumprod`용 kept shape/strides 사전 계산. last axis + contiguous → row chunk scan.
 
 #### 5.12 Cumulative scan dual-path
 
@@ -278,7 +278,7 @@ fresh C-contiguous reduction output에 `Arc::make_mut` 후 in-place map. `mean`(
 
 **파일:** `src/index/ops.rs`
 
-slice / newaxis / integer indexing → `basic_view_meta`로 offset·shape·strides 계산 → `from_arc_raw_parts`. 복사 없음.
+slice / newaxis / integer indexing → `basic_view_meta`로 offset·shape·strides 계산 → `from_shared_parts`. 복사 없음.
 
 #### 6.2 Fancy gather — preallocated copy loop
 
@@ -301,7 +301,7 @@ mask contiguous → linear scan + multi-index advance. else `StrideIter::for_eac
 | 조건 | 동작 |
 |------|------|
 | dest C-contiguous | `slice.fill` / `copy_from_slice` |
-| `RunKind::Contiguous` inner run | subslice bulk `fill` / `copy_from_slice` |
+| `RunKind::UnitStride` inner run | subslice bulk `fill` / `copy_from_slice` |
 | broadcast source | single-value `fill` |
 
 scalar scatter (`scatter_basic_scalar`)와 array scatter (`scatter_basic_array`) 모두 적용.
@@ -401,7 +401,7 @@ opposite-sign large bounds에서 `start*(1-f)+stop*f` form으로 overflow 방지
 |-----------|------------------------|
 | View·복사 | zero-copy view, broadcast stride 0, contiguous copy |
 | Ufunc | flat zip vs RunPlan + RunKind |
-| Reduction | TraversalSchedule, 8-lane, typed min/max, ReducedRuns, two-pass var |
+| Reduction | TraversalSchedule, 8-lane, typed min/max, ReducedAxisRuns, two-pass var |
 | Cumulative | row contiguous vs strided RunPlan<2> |
 | Join | `extend_from_slice` vs `extend_unary` |
 | Selection | ternary collect, ufunc inheritance |

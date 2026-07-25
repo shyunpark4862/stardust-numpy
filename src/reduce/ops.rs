@@ -4,8 +4,8 @@ use crate::array::Array;
 use crate::error::{Error, Result};
 use crate::reduce::axis::ReducePlan;
 use crate::reduce::kernels::{
-    arg_extremum_axis, arg_extremum_flat, cumulate, map_owned_contiguous,
-    reduce_fold, reduce_sum, reduce_sum_plan, reduce_var,
+    arg_extremum_axis, arg_extremum_flat, cumulate, reduce_fold, reduce_sum,
+    reduce_sum_with_plan, reduce_var, transform_owned_c_order,
 };
 use crate::reduce::traits::{
     ExtremumReduce, LogicalReduce, MeanReduce, ProdReduce, SumReduce, VarReduce,
@@ -49,24 +49,31 @@ pub fn max<T: ExtremumReduce>(
 
 /// Arithmetic mean along `axes`.
 ///
-/// - `outer_n == 0` → empty result
-/// - `inner_n == 0` → error
+/// - `output_len == 0` → empty result
+/// - `reduction_len == 0` → error
 pub fn mean<T: MeanReduce>(
     a: &Array<T>,
     axes: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<Array<T::Acc>> {
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
-    if plan.outer_n == 0 {
-        return Array::from_vec(Vec::new(), &plan.out_shape);
+    if plan.output_len == 0 {
+        return Array::from_vec(Vec::new(), &plan.output_shape);
     }
-    if plan.inner_is_empty() {
+    if plan.reduction_is_empty() {
         return Err(Error::InvalidArgument("mean of empty array".into()));
     }
-    let count = plan.inner_n as f64;
-    let sums =
-        reduce_sum_plan(a, &plan, T::identity(), T::accumulate, T::combine)?;
-    Ok(map_owned_contiguous(sums, |x| T::divide_by_count(x, count)))
+    let count = plan.reduction_len as f64;
+    let sums = reduce_sum_with_plan(
+        a,
+        &plan,
+        T::identity(),
+        T::accumulate,
+        T::combine,
+    )?;
+    Ok(transform_owned_c_order(sums, |x| {
+        T::divide_by_count(x, count)
+    }))
 }
 
 /// Argmin: flat C-order index if `axis is None`, else index along `axis`.
@@ -127,7 +134,7 @@ pub fn std<T: VarReduce>(
     keepdims: bool,
 ) -> Result<Array<f64>> {
     let v = var(a, axes, keepdims)?;
-    Ok(map_owned_contiguous(v, f64::sqrt))
+    Ok(transform_owned_c_order(v, f64::sqrt))
 }
 
 /// Logical OR reduction.

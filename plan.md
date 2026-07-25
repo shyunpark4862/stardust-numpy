@@ -131,16 +131,16 @@ stardust-numpy/          # Rust 코어 (crate: sdnp)
 | **3** | 인덱싱: basic(음수·step) + **`IndexSpec` 기반** boolean/fancy gather·scatter (NumPy shape) | **완료** |
 | **4** | reductions / cum\* (+ var/std/any/all) | **완료** |
 | **5** | join(concatenate/stack/vstack/hstack) + select(where/nonzero/clip) + sort + spaces/meshgrid; `transpose`/`reshape`/`permute_axes`는 `array/view`에 유지 | **완료** |
-| **6** | `dot`/`matmul`/trace + `tri`/`tril`/`triu`/`diag` | `test_linalg` |
+| **6** | `dot`/`matmul`/trace + `tri`/`tril`/`triu`/`diag` | `tests/phase6.rs` |
 | **7** | 공개 iteration API + format + integration | 나머지 |
 | **8** | **PyO3 바인딩**: `PyArray`, dtype 디스패치, dunder, `Error→PyErr`, read-only buffer(선택) | `import sdnp` 스모크 + 주요 연산 |
 
 **의존 원칙**: Phase 0–2가 뼈대. 바인딩(Phase 8)은 코어 API가 안정된 뒤.
 
-**Phase 1에서 미룬 생성 API**:
+**남은 생성·행렬 API**:
 
-- Phase 5: `linspace` / `logspace` / `geomspace` / `meshgrid`
-- Phase 6: `tri` / `tril` / `triu` / `diag`
+- Phase 5 완료: `linspace` / `logspace` / `geomspace` / `meshgrid`
+- Phase 6 예정: `tri` / `tril` / `triu` / `diag`
 
 ## PyO3를 전제로 한 코어 설계 지침 (Phase 3+)
 
@@ -152,13 +152,13 @@ stardust-numpy/          # Rust 코어 (crate: sdnp)
 ## 테스트 전략
 
 - Python pytest를 행동 스펙으로 사용
-- Phase마다 해당 테스트만 Rust로 이식
+- Phase마다 `tests/phaseN.rs` 통합 테스트와 `src/**` 단위 테스트를 함께 유지
 - 의도적 차이(0-D, CoW, divide=Rust `/`, 고정폭 dtype)는 문서화
 - `cargo test` = CI 기준; Phase 8 이후 추가로 `pytest` (바인딩)
 
 ## 리스크 / 나중에 한꺼번에 볼 것
 
-- 공개 API 입력 검증 강화 (`buffer_index`의 `debug_assert` 등)
+- 공개 API 입력 검증 강화 (`offset_at`의 `debug_assert` 등)
 - 공유된 non-trivial view 쓰기 시 logical C-order materialize — **반영 완료**
 - **TODO:** `usize` 오버플로 일관 처리
 - broadcast 뷰 읽기 전용 — **반영 완료**

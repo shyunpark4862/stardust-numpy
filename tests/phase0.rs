@@ -1,4 +1,4 @@
-//! Smoke tests for Phase 0 core.
+//! Phase 0: core arrays, element access, copy-on-write, and basic views.
 
 use sdnp::{c_order_strides, gather, Array, IndexSpec};
 

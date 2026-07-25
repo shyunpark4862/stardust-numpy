@@ -10,8 +10,10 @@
 #![deny(missing_docs)]
 
 pub mod array;
+mod axis;
 pub mod broadcast;
 pub mod create;
+mod diagonal;
 pub mod dtype;
 pub mod error;
 pub(crate) mod format;

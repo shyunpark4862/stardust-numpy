@@ -24,17 +24,17 @@ pub(crate) fn slice_length(
 ///
 /// This is an **element** index along an axis of length `axis_len`
 /// (not an axis number in `0..ndim`).
-pub(crate) fn normalize_index(index: i64, axis_len: usize) -> Result<usize> {
+pub(crate) fn normalize_element_index(
+    index: i64,
+    axis_len: usize,
+) -> Result<usize> {
     let len = axis_len as i64;
     let mut idx = index;
     if idx < 0 {
         idx += len;
     }
     if idx < 0 || idx >= len {
-        return Err(Error::IndexOutOfBounds {
-            index: idx as isize,
-            axis_len,
-        });
+        return Err(Error::IndexOutOfBounds { index, axis_len });
     }
     Ok(idx as usize)
 }
@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn normalize_negative() {
-        assert_eq!(normalize_index(-1, 3).unwrap(), 2);
-        assert!(normalize_index(3, 3).is_err());
+        assert_eq!(normalize_element_index(-1, 3).unwrap(), 2);
+        assert!(normalize_element_index(3, 3).is_err());
     }
 
     #[test]

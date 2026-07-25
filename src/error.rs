@@ -39,9 +39,18 @@ pub enum Error {
     #[error("index {index} out of bounds for axis of length {axis_len}")]
     IndexOutOfBounds {
         /// Requested index.
-        index: isize,
+        index: i64,
         /// Axis length.
         axis_len: usize,
+    },
+
+    /// Axis number out of bounds for an array rank.
+    #[error("axis {axis} is out of bounds for array of dimension {ndim}")]
+    AxisOutOfBounds {
+        /// Requested, possibly-negative axis.
+        axis: isize,
+        /// Number of array dimensions.
+        ndim: usize,
     },
 
     /// Attempted write to a read-only array (e.g. a broadcast view).

@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering;
 
+use crate::axis::normalize_axis;
 use crate::dtype::{Complex64, Scalar};
 use crate::error::{Error, Result};
 use crate::Array;
@@ -128,21 +129,6 @@ pub fn argsort<T: SortElement>(
     };
     let indices = indices.into_iter().map(|i| i as i64).collect();
     Array::from_vec(indices, &shape)
-}
-
-fn normalize_axis(axis: isize, ndim: usize) -> Result<usize> {
-    if ndim == 0 {
-        return Err(Error::InvalidArgument(
-            "axis is invalid for a 0-D array".into(),
-        ));
-    }
-    let normalized = if axis < 0 { axis + ndim as isize } else { axis };
-    if normalized < 0 || normalized as usize >= ndim {
-        return Err(Error::InvalidArgument(format!(
-            "axis {axis} is out of bounds for array of dimension {ndim}"
-        )));
-    }
-    Ok(normalized as usize)
 }
 
 fn sort_values_along_axis<T: SortElement>(

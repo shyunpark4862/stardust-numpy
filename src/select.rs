@@ -79,8 +79,8 @@ pub fn nonzero<T: AsBool>(a: &Array<T>) -> Result<Vec<Array<i64>>> {
     let mut coordinates = vec![Vec::new(); a.ndim()];
 
     StrideIter::new(a.shape(), a.strides(), a.offset()).for_each(
-        |buffer_index, indices| {
-            if a.as_buffer()[buffer_index].as_bool() {
+        |buffer_offset, indices| {
+            if a.as_buffer()[buffer_offset].as_bool() {
                 for (axis, &index) in indices.iter().enumerate() {
                     coordinates[axis].push(index as i64);
                 }

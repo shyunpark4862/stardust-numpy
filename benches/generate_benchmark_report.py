@@ -154,8 +154,8 @@ def build_report(
 
     return f"""# SDNP Paths 벤치마크 리포트
 
-> 자동 생성: `{rust_log.relative_to(ROOT)}` + `{numpy_json.relative_to(ROOT)}`  
-> 생성일: {today}  
+> 자동 생성: `{rust_log.relative_to(ROOT)}` + `{numpy_json.relative_to(ROOT)}`
+> 생성일: {today}
 > 재생성: `python benches/generate_benchmark_report.py --skip-run`
 
 ## 측정 환경

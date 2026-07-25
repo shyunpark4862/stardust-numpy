@@ -3,3 +3,6 @@
 Cargo.lock
 **/*.rs.bk
 .DS_Store
+__pycache__/
+benches/.bench-rust.log
+benches/.bench-numpy.json

@@ -4,7 +4,7 @@ use crate::array::Array;
 use crate::broadcast::broadcast_shapes;
 use crate::error::{Error, Result};
 use crate::index::bounds::{
-    advance_multi_index, normalize_index, resolve_slice, slice_length,
+    advance_multi_index, normalize_element_index, resolve_slice, slice_length,
 };
 use crate::index::spec::IndexSpec;
 
@@ -26,7 +26,7 @@ pub(crate) enum PreparedEntry {
     NewAxis,
     /// Integer fancy index for one source axis (broadcast; values already in
     /// `0..axis_len`).
-    Fancy(Array<i64>),
+    IntegerArray(Array<i64>),
 }
 
 /// Cached layout of a fancy-indexed gather/scatter result.
@@ -66,7 +66,7 @@ pub(crate) fn prepare_index(
     let fancy_shapes: Vec<&[usize]> = entries
         .iter()
         .filter_map(|e| match e {
-            PreparedEntry::Fancy(arr) => Some(arr.shape()),
+            PreparedEntry::IntegerArray(arr) => Some(arr.shape()),
             _ => None,
         })
         .collect();
@@ -80,7 +80,7 @@ pub(crate) fn prepare_index(
 
     let fancy_shape = broadcast_shapes(&fancy_shapes)?;
     for entry in &mut entries {
-        if let PreparedEntry::Fancy(arr) = entry {
+        if let PreparedEntry::IntegerArray(arr) = entry {
             *arr = arr.broadcast_to(&fancy_shape)?;
         }
     }
@@ -239,7 +239,7 @@ fn resolve_entries(
                 out.push(PreparedEntry::NewAxis);
             }
             IndexSpec::Index(i) => {
-                let idx = normalize_index(*i, shape[source_axis])?;
+                let idx = normalize_element_index(*i, shape[source_axis])?;
                 out.push(PreparedEntry::Index(idx));
                 source_axis += 1;
             }
@@ -257,7 +257,7 @@ fn resolve_entries(
             IndexSpec::IntegerArray(arr) => {
                 let normalized =
                     normalize_fancy_array(arr, shape[source_axis])?;
-                out.push(PreparedEntry::Fancy(normalized));
+                out.push(PreparedEntry::IntegerArray(normalized));
                 source_axis += 1;
             }
             IndexSpec::BoolArray(_) | IndexSpec::Ellipsis => {
@@ -286,13 +286,15 @@ fn normalize_fancy_array(
     let mut out = Vec::with_capacity(arr.size());
     if let Some(xs) = arr.as_c_contiguous_slice() {
         for &raw in xs {
-            out.push(normalize_index(raw, axis_len)? as i64);
+            out.push(normalize_element_index(raw, axis_len)? as i64);
         }
     } else {
         use crate::stride_iter::StrideIter;
         for buf_idx in StrideIter::new(arr.shape(), arr.strides(), arr.offset())
         {
-            out.push(normalize_index(arr.data[buf_idx], axis_len)? as i64);
+            out.push(
+                normalize_element_index(arr.data[buf_idx], axis_len)? as i64
+            );
         }
     }
     Array::from_vec(out, arr.shape())
@@ -342,7 +344,7 @@ fn fancy_slots_adjacent(entries: &[PreparedEntry]) -> bool {
     let mut first = None;
     let mut last = None;
     for (slot, entry) in entries.iter().enumerate() {
-        if matches!(entry, PreparedEntry::Fancy(_)) {
+        if matches!(entry, PreparedEntry::IntegerArray(_)) {
             if first.is_none() {
                 first = Some(slot);
             }
@@ -352,7 +354,8 @@ fn fancy_slots_adjacent(entries: &[PreparedEntry]) -> bool {
     let (Some(first), Some(last)) = (first, last) else {
         return true;
     };
-    (first..=last).all(|slot| matches!(entries[slot], PreparedEntry::Fancy(_)))
+    (first..=last)
+        .all(|slot| matches!(entries[slot], PreparedEntry::IntegerArray(_)))
 }
 
 fn build_fancy_layout(
@@ -361,7 +364,7 @@ fn build_fancy_layout(
 ) -> FancyLayout {
     let first_fancy = entries
         .iter()
-        .position(|e| matches!(e, PreparedEntry::Fancy(_)))
+        .position(|e| matches!(e, PreparedEntry::IntegerArray(_)))
         .expect("build_fancy_layout requires at least one Fancy entry");
     let adjacent = fancy_slots_adjacent(entries);
     let fancy_axis_len = fancy_shape.len();
@@ -386,7 +389,7 @@ fn build_fancy_layout(
                 dims.push(*len);
                 slots.push(slot);
             }
-            PreparedEntry::Index(_) | PreparedEntry::Fancy(_) => {}
+            PreparedEntry::Index(_) | PreparedEntry::IntegerArray(_) => {}
         }
     }
 

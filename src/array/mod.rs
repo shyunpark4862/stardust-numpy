@@ -3,11 +3,15 @@
 mod element;
 mod view;
 
+pub(crate) use view::insert_axis_view;
+
 use std::sync::Arc;
 
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
-use crate::shape::{c_order_strides, is_c_contiguous, size_of_shape};
+use crate::shape::{
+    c_order_strides, checked_size_of_shape, is_c_contiguous, size_of_shape,
+};
 
 /// N-dimensional array with element type `T`.
 ///
@@ -36,7 +40,7 @@ impl<T: Scalar> Array<T> {
     ///
     /// `shape == []` creates a 0-D array; `data` must then have length 1.
     pub fn from_vec(data: Vec<T>, shape: &[usize]) -> Result<Self> {
-        let size = size_of_shape(shape);
+        let size = checked_size_of_shape(shape)?;
         if data.len() != size {
             return Err(Error::BufferSizeMismatch {
                 buffer_len: data.len(),
@@ -65,7 +69,7 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Internal: build a (possibly shared) view with explicit layout.
-    pub(crate) fn from_arc_raw_parts(
+    pub(crate) fn from_shared_parts(
         data: Arc<Vec<T>>,
         shape: Vec<usize>,
         strides: Vec<isize>,
@@ -242,7 +246,7 @@ mod tests {
 
     #[test]
     fn to_vec_handles_negative_stride_and_nonzero_offset() {
-        let a = Array::from_arc_raw_parts(
+        let a = Array::from_shared_parts(
             Arc::new(vec![0_i64, 1, 2, 3, 4, 5, 6, 7]),
             vec![2, 2],
             vec![3, -1],

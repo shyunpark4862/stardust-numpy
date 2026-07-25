@@ -3,13 +3,14 @@
 use num_traits::{One, Zero};
 
 use crate::array::Array;
+use crate::diagonal::diagonal_geometry;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
-use crate::shape::size_of_shape;
+use crate::shape::checked_size_of_shape;
 
 /// Return a C-contiguous array filled with `value`.
 pub fn full<T: Scalar>(shape: &[usize], value: T) -> Result<Array<T>> {
-    let size = size_of_shape(shape);
+    let size = checked_size_of_shape(shape)?;
     Array::from_vec(vec![value; size], shape)
 }
 
@@ -266,12 +267,12 @@ pub fn eye_with<T: Scalar + Zero + One>(
     m: usize,
     k: isize,
 ) -> Result<Array<T>> {
-    let mut data = vec![T::zero(); n * m];
-    for i in 0..n {
-        let j = i as isize + k;
-        if j >= 0 && (j as usize) < m {
-            data[i * m + j as usize] = T::one();
-        }
+    let mut data = vec![T::zero(); checked_size_of_shape(&[n, m])?];
+    let diagonal = diagonal_geometry(n, m, k);
+    for index in 0..diagonal.len {
+        let row = diagonal.row_start + index;
+        let column = diagonal.column_start + index;
+        data[row * m + column] = T::one();
     }
     Array::from_vec(data, &[n, m])
 }

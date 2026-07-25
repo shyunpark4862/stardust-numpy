@@ -4,9 +4,9 @@
 //! operand stride arrays (all already aligned to that shape) and reduces
 //! them to the smallest equivalent axis list: singleton axes are dropped,
 //! and adjacent axes are merged into one whenever *every* operand can
-//! express them as a single linear run (`outer_stride == inner_stride *
-//! inner_len`). The last remaining axis is then treated as a fixed-stride
-//! "inner run"; everything above it is the "outer" traversal.
+//! express them as a single linear run (`leading_stride == trailing_stride *
+//! trailing_len`). The last remaining axis is then treated as a fixed-stride
+//! run; everything above it is the run grid.
 //!
 //! This does not know about scatter, ufunc, or reduction semantics — it only
 //! answers "how few axes does this layout need, and what is the innermost
@@ -20,11 +20,11 @@ use crate::shape::size_of_shape;
 /// A shape plus per-operand strides, coalesced to the fewest axes that still
 /// describe the same traversal for every operand.
 ///
-/// The final axis (if any) is the innermost linear run: stepping through it
-/// by [`Self::inner_stride`] for [`Self::inner_len`] steps reaches every
+/// The final axis (if any) is the linear run: stepping through it
+/// by [`Self::operand_stride`] for [`Self::run_len`] steps reaches every
 /// element that axis represents, for every operand, without revisiting or
 /// skipping any. A fully mergeable layout coalesces down to exactly one
-/// axis, so [`Self::outer_len`] is `1` and the whole traversal is one run.
+/// axis, so [`Self::run_count`] is `1` and the whole traversal is one run.
 #[derive(Debug, Clone)]
 pub(crate) struct CoalescedLayout {
     shape: Vec<usize>,
@@ -114,22 +114,22 @@ impl CoalescedLayout {
         }
     }
 
-    /// Length of the innermost linear run (`1` for a fully-merged / 0-D /
+    /// Length of each linear run (`1` for a fully-merged / 0-D /
     /// all-singleton layout — a single logical element).
     #[inline]
-    pub(crate) fn inner_len(&self) -> usize {
+    pub(crate) fn run_len(&self) -> usize {
         self.shape.last().copied().unwrap_or(1)
     }
 
     /// Fixed per-step stride of the innermost run, for one operand.
     #[inline]
-    pub(crate) fn inner_stride(&self, operand: usize) -> isize {
+    pub(crate) fn operand_stride(&self, operand: usize) -> isize {
         self.strides[operand].last().copied().unwrap_or(0)
     }
 
-    /// Shape of the axes outside the innermost run (possibly empty).
+    /// Shape of the grid that selects linear runs (possibly empty).
     #[inline]
-    pub(crate) fn outer_shape(&self) -> &[usize] {
+    pub(crate) fn run_grid_shape(&self) -> &[usize] {
         let n = self.shape.len();
         if n == 0 {
             &[]
@@ -138,9 +138,9 @@ impl CoalescedLayout {
         }
     }
 
-    /// Strides of the axes outside the innermost run, for one operand.
+    /// Strides across the run grid, for one operand.
     #[inline]
-    pub(crate) fn outer_strides(&self, operand: usize) -> &[isize] {
+    pub(crate) fn run_grid_strides(&self, operand: usize) -> &[isize] {
         let s = &self.strides[operand];
         let n = s.len();
         if n == 0 {
@@ -150,10 +150,10 @@ impl CoalescedLayout {
         }
     }
 
-    /// Number of inner runs to visit (product of [`Self::outer_shape`]).
+    /// Number of runs to visit (product of [`Self::run_grid_shape`]).
     #[inline]
-    pub(crate) fn outer_len(&self) -> usize {
-        size_of_shape(self.outer_shape())
+    pub(crate) fn run_count(&self) -> usize {
+        size_of_shape(self.run_grid_shape())
     }
 }
 
@@ -170,28 +170,28 @@ mod tests {
         offset: usize,
     ) -> Vec<usize> {
         let layout = CoalescedLayout::new(shape, &[strides]);
-        let inner_len = layout.inner_len();
-        let outer_shape = layout.outer_shape();
-        let outer_n = layout.outer_len();
-        let inner_stride = layout.inner_stride(0);
+        let run_len = layout.run_len();
+        let run_grid_shape = layout.run_grid_shape();
+        let run_count = layout.run_count();
+        let operand_stride = layout.operand_stride(0);
 
         let mut out = Vec::new();
-        if inner_len == 0 || outer_n == 0 {
+        if run_len == 0 || run_count == 0 {
             return out;
         }
-        let mut outer = StrideCursor::new(
-            outer_shape,
-            [layout.outer_strides(0)],
+        let mut run_grid = StrideCursor::new(
+            run_grid_shape,
+            [layout.run_grid_strides(0)],
             [offset as isize],
         );
-        for outer_i in 0..outer_n {
-            let mut pos = outer.buffer_index(0) as isize;
-            for _ in 0..inner_len {
+        for run_index in 0..run_count {
+            let mut pos = run_grid.operand_offset(0) as isize;
+            for _ in 0..run_len {
                 out.push(pos as usize);
-                pos += inner_stride;
+                pos += operand_stride;
             }
-            if outer_i + 1 < outer_n {
-                outer.advance();
+            if run_index + 1 < run_count {
+                run_grid.advance();
             }
         }
         out
@@ -218,9 +218,9 @@ mod tests {
         assert_matches_stride_iter(&shape, &strides, 0);
         // Fully mergeable: one axis, one run.
         let layout = CoalescedLayout::new(&shape, &[&strides]);
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 20);
-        assert_eq!(layout.inner_stride(0), 1);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 20);
+        assert_eq!(layout.operand_stride(0), 1);
     }
 
     #[test]
@@ -258,16 +258,16 @@ mod tests {
     fn matches_stride_iter_singleton_axes() {
         assert_matches_stride_iter(&[1, 5, 1], &[100, 1, 7], 0);
         let layout = CoalescedLayout::new(&[1, 5, 1], &[&[100, 1, 7]]);
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 5);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 5);
     }
 
     #[test]
     fn zero_d_is_one_element() {
         let layout = CoalescedLayout::new(&[], &[&[]]);
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 1);
-        assert_eq!(layout.inner_stride(0), 0);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 1);
+        assert_eq!(layout.operand_stride(0), 0);
         assert_matches_stride_iter(&[], &[], 0);
     }
 
@@ -276,7 +276,7 @@ mod tests {
         assert_matches_stride_iter(&[0, 3], &[3, 1], 0);
         assert_matches_stride_iter(&[3, 0], &[3, 1], 0);
         let layout = CoalescedLayout::new(&[3, 0], &[&[3, 1]]);
-        assert_eq!(layout.outer_len() * layout.inner_len(), 0);
+        assert_eq!(layout.run_count() * layout.run_len(), 0);
     }
 
     #[test]
@@ -284,10 +284,10 @@ mod tests {
         // shape=[1024,512] strides=[2048,2]: rows have a gap, so the outer
         // axis cannot merge into the inner one.
         let layout = CoalescedLayout::new(&[1024, 512], &[&[2048isize, 2]]);
-        assert_eq!(layout.outer_shape(), &[1024]);
-        assert_eq!(layout.outer_strides(0), &[2048]);
-        assert_eq!(layout.inner_len(), 512);
-        assert_eq!(layout.inner_stride(0), 2);
+        assert_eq!(layout.run_grid_shape(), &[1024]);
+        assert_eq!(layout.run_grid_strides(0), &[2048]);
+        assert_eq!(layout.run_len(), 512);
+        assert_eq!(layout.operand_stride(0), 2);
         assert_matches_stride_iter(&[1024, 512], &[2048, 2], 0);
     }
 
@@ -296,9 +296,9 @@ mod tests {
         // shape=[1024,512] strides=[1024,2]: rows are back-to-back, so this
         // merges into one run of len 524288, stride 2.
         let layout = CoalescedLayout::new(&[1024, 512], &[&[1024isize, 2]]);
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 524288);
-        assert_eq!(layout.inner_stride(0), 2);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 524288);
+        assert_eq!(layout.operand_stride(0), 2);
         assert_matches_stride_iter(&[1024, 512], &[1024, 2], 0);
     }
 
@@ -310,10 +310,10 @@ mod tests {
         let layout = CoalescedLayout::new(&shape, &[&a, &b]);
         // Both operands individually merge (5*2=10, 1*5=5), and the merge
         // decision is taken jointly, so both collapse to one run.
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 20);
-        assert_eq!(layout.inner_stride(0), 2);
-        assert_eq!(layout.inner_stride(1), 1);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 20);
+        assert_eq!(layout.operand_stride(0), 2);
+        assert_eq!(layout.operand_stride(1), 1);
     }
 
     #[test]
@@ -324,10 +324,10 @@ mod tests {
         let lhs = [10isize, 2];
         let rhs = [0isize, 0];
         let layout = CoalescedLayout::new(&shape, &[&lhs, &rhs]);
-        assert_eq!(layout.outer_len(), 1);
-        assert_eq!(layout.inner_len(), 20);
-        assert_eq!(layout.inner_stride(0), 2);
-        assert_eq!(layout.inner_stride(1), 0);
+        assert_eq!(layout.run_count(), 1);
+        assert_eq!(layout.run_len(), 20);
+        assert_eq!(layout.operand_stride(0), 2);
+        assert_eq!(layout.operand_stride(1), 0);
     }
 
     #[test]
@@ -338,11 +338,11 @@ mod tests {
         let lhs = [10isize, 2];
         let rhs = [0isize, 1];
         let layout = CoalescedLayout::new(&shape, &[&lhs, &rhs]);
-        assert_eq!(layout.outer_shape(), &[4]);
-        assert_eq!(layout.inner_len(), 5);
-        assert_eq!(layout.outer_strides(0), &[10]);
-        assert_eq!(layout.outer_strides(1), &[0]);
-        assert_eq!(layout.inner_stride(0), 2);
-        assert_eq!(layout.inner_stride(1), 1);
+        assert_eq!(layout.run_grid_shape(), &[4]);
+        assert_eq!(layout.run_len(), 5);
+        assert_eq!(layout.run_grid_strides(0), &[10]);
+        assert_eq!(layout.run_grid_strides(1), &[0]);
+        assert_eq!(layout.operand_stride(0), 2);
+        assert_eq!(layout.operand_stride(1), 1);
     }
 }

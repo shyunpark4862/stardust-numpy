@@ -10,7 +10,7 @@ fn sl(start: Option<i64>, stop: Option<i64>, step: Option<i64>) -> IndexSpec {
     IndexSpec::slice(start, stop, step)
 }
 
-fn full() -> IndexSpec {
+fn full_slice() -> IndexSpec {
     IndexSpec::full()
 }
 
@@ -92,7 +92,7 @@ fn newaxis_and_ellipsis() -> Result<()> {
     assert_eq!(b.shape(), &[2]);
     assert_eq!(b.to_vec(), vec![2, 5]);
 
-    let c = gather(&a, &[IndexSpec::NewAxis, full(), full()])?;
+    let c = gather(&a, &[IndexSpec::NewAxis, full_slice(), full_slice()])?;
     assert_eq!(c.shape(), &[1, 2, 3]);
     Ok(())
 }
@@ -162,7 +162,7 @@ fn fancy_pairwise_2d() -> Result<()> {
 #[test]
 fn fancy_with_slice_column() -> Result<()> {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
-    let b = gather(&a, &[full(), int_arr(&[2, 0])])?;
+    let b = gather(&a, &[full_slice(), int_arr(&[2, 0])])?;
     assert_eq!(b.shape(), &[2, 2]);
     assert_eq!(b.get(&[0, 0])?, 3);
     assert_eq!(b.get(&[0, 1])?, 1);
@@ -176,7 +176,7 @@ fn separated_fancy_prepends_shape() -> Result<()> {
     // a[[0,1], :, [0,1]] on (2,2,2) — non-contiguous fancy → fancy shape first
     let data: Vec<i64> = (0..8).collect();
     let a = Array::from_vec(data, &[2, 2, 2])?;
-    let b = gather(&a, &[int_arr(&[0, 1]), full(), int_arr(&[0, 1])])?;
+    let b = gather(&a, &[int_arr(&[0, 1]), full_slice(), int_arr(&[0, 1])])?;
     assert_eq!(b.shape(), &[2, 2]);
     // result[f, mid] = a[rows[f], mid, cols[f]]
     assert_eq!(b.get(&[0, 0])?, 0); // a[0,0,0]
@@ -192,7 +192,15 @@ fn separated_fancy_with_leading_slice() -> Result<()> {
     // result layout: fancy | before | after → (2, 2, 2)
     let data: Vec<i64> = (0..16).collect();
     let a = Array::from_vec(data, &[2, 2, 2, 2])?;
-    let b = gather(&a, &[full(), int_arr(&[0, 1]), full(), int_arr(&[0, 1])])?;
+    let b = gather(
+        &a,
+        &[
+            full_slice(),
+            int_arr(&[0, 1]),
+            full_slice(),
+            int_arr(&[0, 1]),
+        ],
+    )?;
     assert_eq!(b.shape(), &[2, 2, 2]);
     // result[f, i, k] = a[i, rows[f], k, cols[f]]
     assert_eq!(b.get(&[0, 0, 0])?, 0); // a[0,0,0,0]
@@ -206,7 +214,7 @@ fn separated_fancy_with_leading_slice() -> Result<()> {
 #[test]
 fn scatter_scalar_slice() -> Result<()> {
     let mut a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
-    scatter(&mut a, &[full(), ix(1)], 99)?;
+    scatter(&mut a, &[full_slice(), ix(1)], 99)?;
     assert_eq!(a.to_vec(), vec![1, 99, 3, 4, 99, 6]);
     Ok(())
 }
@@ -218,7 +226,7 @@ fn scatter_on_shared_view_materializes_logical_storage() -> Result<()> {
     assert_eq!(view.to_vec(), vec![20, 40, 60]);
     assert!(view.shares_buffer_with(&a));
 
-    scatter(&mut view, &[full()], 7)?;
+    scatter(&mut view, &[full_slice()], 7)?;
 
     assert_eq!(a.to_vec(), vec![10, 20, 30, 40, 50, 60]);
     assert_eq!(view.to_vec(), vec![7, 7, 7]);
@@ -242,7 +250,7 @@ fn scatter_array_slice() -> Result<()> {
 fn scatter_array_broadcast() -> Result<()> {
     let mut a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
     let vals = Array::from_slice(&[99_i64], &[1])?;
-    scatter_array(&mut a, &[full(), ix(1)], &vals)?;
+    scatter_array(&mut a, &[full_slice(), ix(1)], &vals)?;
     assert_eq!(a.to_vec(), vec![1, 99, 3, 4, 99, 6]);
     Ok(())
 }
@@ -251,7 +259,7 @@ fn scatter_array_broadcast() -> Result<()> {
 fn scatter_scalar_column_step() -> Result<()> {
     // [:, ::2] on a 3x4 array: column stride 2, row gap between axes.
     let mut a = Array::from_vec((0_i64..12).collect(), &[3, 4])?;
-    scatter(&mut a, &[full(), sl(None, None, Some(2))], 0)?;
+    scatter(&mut a, &[full_slice(), sl(None, None, Some(2))], 0)?;
     assert_eq!(a.to_vec(), vec![0, 1, 0, 3, 0, 5, 0, 7, 0, 9, 0, 11]);
     Ok(())
 }
@@ -260,7 +268,7 @@ fn scatter_scalar_column_step() -> Result<()> {
 fn scatter_scalar_row_gap_slice() -> Result<()> {
     // Select every other row out of a 4x3 array: rows have a stride-6 gap.
     let mut a = Array::from_vec((0_i64..12).collect(), &[4, 3])?;
-    scatter(&mut a, &[sl(Some(0), None, Some(2)), full()], 99)?;
+    scatter(&mut a, &[sl(Some(0), None, Some(2)), full_slice()], 99)?;
     assert_eq!(a.to_vec(), vec![99, 99, 99, 3, 4, 5, 99, 99, 99, 9, 10, 11]);
     Ok(())
 }
@@ -318,7 +326,7 @@ fn scatter_scalar_zero_d_integer_selection() -> Result<()> {
 #[test]
 fn scatter_scalar_newaxis_basic() -> Result<()> {
     let mut a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
-    scatter(&mut a, &[IndexSpec::NewAxis, full(), full()], 0)?;
+    scatter(&mut a, &[IndexSpec::NewAxis, full_slice(), full_slice()], 0)?;
     assert_eq!(a.to_vec(), vec![0; 6]);
     Ok(())
 }
@@ -329,7 +337,7 @@ fn scatter_array_row_gap_destination_strided_source() -> Result<()> {
     // Source is itself a non-contiguous view (reversed columns).
     let src_base = Array::from_slice(&[7_i64, 8, 9], &[3])?;
     let src = gather(&src_base, &[sl(None, None, Some(-1))])?;
-    scatter_array(&mut a, &[sl(Some(0), None, Some(2)), full()], &src)?;
+    scatter_array(&mut a, &[sl(Some(0), None, Some(2)), full_slice()], &src)?;
     assert_eq!(a.to_vec(), vec![9, 8, 7, 3, 4, 5, 9, 8, 7, 9, 10, 11]);
     Ok(())
 }
@@ -337,7 +345,7 @@ fn scatter_array_row_gap_destination_strided_source() -> Result<()> {
 #[test]
 fn scatter_scalar_nonzero_base_offset() -> Result<()> {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
-    let mut view = gather(&a, &[ix(1), full()])?;
+    let mut view = gather(&a, &[ix(1), full_slice()])?;
     assert_eq!(view.offset(), 3);
     scatter(&mut view, &[sl(None, None, Some(2))], 0)?;
     assert_eq!(view.to_vec(), vec![0, 5, 0]);

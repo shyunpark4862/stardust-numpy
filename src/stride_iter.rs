@@ -6,8 +6,9 @@ use crate::shape::size_of_shape;
 
 /// Reusable C-order cursor over one shape and one or more strided layouts.
 ///
-/// All lanes share the same logical multi-index while maintaining independent
-/// buffer offsets. `N = 1` is used by normal strided traversal; `N = 2` lets
+/// All operands share the same logical multi-index while maintaining
+/// independent buffer offsets. `N = 1` is used by normal strided traversal;
+/// `N = 2` lets
 /// cumulative kernels advance input and output offsets in lockstep.
 #[derive(Debug, Clone)]
 pub(crate) struct StrideCursor<'a, const N: usize> {
@@ -18,7 +19,7 @@ pub(crate) struct StrideCursor<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> StrideCursor<'a, N> {
-    /// Create a cursor at the supplied lane offsets.
+    /// Create a cursor at the supplied operand offsets.
     pub(crate) fn new(
         shape: &'a [usize],
         strides: [&'a [isize]; N],
@@ -33,12 +34,12 @@ impl<'a, const N: usize> StrideCursor<'a, N> {
         }
     }
 
-    /// Current buffer index for one lane.
+    /// Current backing-buffer offset for one operand.
     #[inline]
-    pub(crate) fn buffer_index(&self, lane: usize) -> usize {
-        debug_assert!(lane < N);
-        debug_assert!(self.offsets[lane] >= 0);
-        self.offsets[lane] as usize
+    pub(crate) fn operand_offset(&self, operand: usize) -> usize {
+        debug_assert!(operand < N);
+        debug_assert!(self.offsets[operand] >= 0);
+        self.offsets[operand] as usize
     }
 
     /// Current logical multi-index.
@@ -47,13 +48,13 @@ impl<'a, const N: usize> StrideCursor<'a, N> {
         &self.indices
     }
 
-    /// Reset logical coordinates and replace all lane offsets.
+    /// Reset logical coordinates and replace all operand offsets.
     pub(crate) fn reset(&mut self, offsets: [isize; N]) {
         self.indices.fill(0);
         self.offsets = offsets;
     }
 
-    /// Advance all lanes to the next logical C-order coordinate.
+    /// Advance all operands to the next logical C-order coordinate.
     pub(crate) fn advance(&mut self) {
         if self.shape.is_empty() {
             return;
@@ -61,15 +62,15 @@ impl<'a, const N: usize> StrideCursor<'a, N> {
         for axis in (0..self.shape.len()).rev() {
             if self.indices[axis] + 1 < self.shape[axis] {
                 self.indices[axis] += 1;
-                for lane in 0..N {
-                    self.offsets[lane] += self.strides[lane][axis];
+                for operand in 0..N {
+                    self.offsets[operand] += self.strides[operand][axis];
                 }
                 return;
             }
 
             let undo = self.shape[axis].saturating_sub(1) as isize;
-            for lane in 0..N {
-                self.offsets[lane] -= self.strides[lane][axis] * undo;
+            for operand in 0..N {
+                self.offsets[operand] -= self.strides[operand][axis] * undo;
             }
             self.indices[axis] = 0;
         }
@@ -105,10 +106,10 @@ impl<'a> StrideIter<'a> {
         }
     }
 
-    /// Visit each logical element as `(buffer_index, multi_index)`.
+    /// Visit each logical element as `(buffer_offset, multi_index)`.
     pub(crate) fn for_each(mut self, mut f: impl FnMut(usize, &[usize])) {
         while self.remaining > 0 {
-            f(self.cursor.buffer_index(0), self.cursor.indices());
+            f(self.cursor.operand_offset(0), self.cursor.indices());
             self.remaining -= 1;
             if self.remaining > 0 {
                 self.cursor.advance();
@@ -124,7 +125,7 @@ impl Iterator for StrideIter<'_> {
         if self.remaining == 0 {
             return None;
         }
-        let item = self.cursor.buffer_index(0);
+        let item = self.cursor.operand_offset(0);
         self.remaining -= 1;
         if self.remaining > 0 {
             self.cursor.advance();

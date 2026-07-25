@@ -234,9 +234,8 @@ mod tests {
         use std::sync::Arc;
         // Buffer [0,1,2, 10,20,30,40,50,60] — logical 2x3 block at offset 3
         let data = Arc::new(vec![0_i64, 1, 2, 10, 20, 30, 40, 50, 60]);
-        let a =
-            Array::from_arc_raw_parts(data, vec![2, 3], vec![3, 1], 3, true)
-                .unwrap();
+        let a = Array::from_shared_parts(data, vec![2, 3], vec![3, 1], 3, true)
+            .unwrap();
         assert!(a.is_c_contiguous());
         assert_eq!(a.offset(), 3);
         assert_eq!(

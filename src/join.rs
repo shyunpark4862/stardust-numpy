@@ -1,26 +1,11 @@
 //! Array joining and dimension-insertion operations.
 
-use std::sync::Arc;
-
-use crate::array::Array;
+use crate::array::{insert_axis_view, Array};
+use crate::axis::{normalize_axis, normalize_insert_axis};
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
 use crate::run::{extend_unary, RunPlan};
-
-fn insert_axis_view<T: Scalar>(a: &Array<T>, axis: isize) -> Result<Array<T>> {
-    let axis = normalize_insert_axis(axis, a.ndim())?;
-    let mut shape = a.shape().to_vec();
-    let mut strides = a.strides().to_vec();
-    shape.insert(axis, 1);
-    strides.insert(axis, 0);
-    Array::from_arc_raw_parts(
-        Arc::clone(&a.data),
-        shape,
-        strides,
-        a.offset(),
-        a.is_writable(),
-    )
-}
+use crate::shape::checked_size_of_shape;
 
 /// Join arrays along an existing `axis`.
 ///
@@ -39,7 +24,7 @@ pub fn concatenate<T: Scalar>(
     }
     let axis = normalize_axis(axis, first.ndim())?;
 
-    let mut out_shape = first.shape().to_vec();
+    let mut output_shape = first.shape().to_vec();
     let mut axis_len = 0usize;
     for (index, array) in arrays.iter().enumerate() {
         if array.ndim() != first.ndim() {
@@ -69,19 +54,19 @@ pub fn concatenate<T: Scalar>(
                 )
             })?;
     }
-    out_shape[axis] = axis_len;
+    output_shape[axis] = axis_len;
 
-    let capacity = checked_shape_size(&out_shape)?;
-    let outer_len = checked_shape_size(&first.shape()[..axis])?;
+    let capacity = checked_size_of_shape(&output_shape)?;
+    let leading_count = checked_size_of_shape(&first.shape()[..axis])?;
     let mut output = Vec::with_capacity(capacity);
 
-    for outer_index in 0..outer_len {
+    for leading_index in 0..leading_count {
         for array in arrays {
-            append_axis_slab(&mut output, array, axis, outer_index)?;
+            append_axis_slab(&mut output, array, axis, leading_index)?;
         }
     }
     debug_assert_eq!(output.len(), capacity);
-    Array::from_vec(output, &out_shape)
+    Array::from_vec(output, &output_shape)
 }
 
 /// Join arrays along a newly inserted `axis`.
@@ -153,62 +138,39 @@ fn require_arrays<'a, T: Scalar>(
     })
 }
 
-fn normalize_axis(axis: isize, ndim: usize) -> Result<usize> {
-    let normalized = if axis < 0 { axis + ndim as isize } else { axis };
-    if normalized < 0 || normalized as usize >= ndim {
-        return Err(Error::InvalidArgument(format!(
-            "axis {axis} is out of bounds for array of dimension {ndim}"
-        )));
-    }
-    Ok(normalized as usize)
-}
-
-fn normalize_insert_axis(axis: isize, ndim: usize) -> Result<usize> {
-    let result_ndim = ndim.checked_add(1).ok_or_else(|| {
-        Error::InvalidArgument("array rank overflows usize".into())
-    })?;
-    normalize_axis(axis, result_ndim)
-}
-
-fn checked_shape_size(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1usize, |size, &dimension| {
-        size.checked_mul(dimension).ok_or_else(|| {
-            Error::InvalidArgument("array shape size overflows usize".into())
-        })
-    })
-}
-
 fn append_axis_slab<T: Scalar>(
     output: &mut Vec<T>,
     array: &Array<T>,
     axis: usize,
-    outer_index: usize,
+    leading_index: usize,
 ) -> Result<()> {
-    let inner_len = checked_shape_size(&array.shape()[axis + 1..])?;
+    let trailing_len = checked_size_of_shape(&array.shape()[axis + 1..])?;
     let slab_len =
-        array.shape()[axis].checked_mul(inner_len).ok_or_else(|| {
-            Error::InvalidArgument("array slab size overflows usize".into())
-        })?;
+        array.shape()[axis]
+            .checked_mul(trailing_len)
+            .ok_or_else(|| {
+                Error::InvalidArgument("array slab size overflows usize".into())
+            })?;
     if slab_len == 0 {
         return Ok(());
     }
 
     if let Some(slice) = array.as_c_contiguous_slice() {
-        let start = outer_index.checked_mul(slab_len).ok_or_else(|| {
+        let start = leading_index.checked_mul(slab_len).ok_or_else(|| {
             Error::InvalidArgument("array offset overflows usize".into())
         })?;
         output.extend_from_slice(&slice[start..start + slab_len]);
         return Ok(());
     }
 
-    let prefix_shape = &array.shape()[..axis];
-    let prefix_strides = &array.strides()[..axis];
-    let mut remainder = outer_index;
+    let leading_shape = &array.shape()[..axis];
+    let leading_strides = &array.strides()[..axis];
+    let mut remainder = leading_index;
     let mut base = array.offset() as isize;
     for dimension in (0..axis).rev() {
-        let coordinate = remainder % prefix_shape[dimension];
-        remainder /= prefix_shape[dimension];
-        base += coordinate as isize * prefix_strides[dimension];
+        let coordinate = remainder % leading_shape[dimension];
+        remainder /= leading_shape[dimension];
+        base += coordinate as isize * leading_strides[dimension];
     }
     debug_assert!(base >= 0);
     let slab_shape = &array.shape()[axis..];
@@ -240,6 +202,7 @@ fn promote_at_least_2d<T: Scalar>(array: &Array<T>) -> Result<Array<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn concatenate_noncontiguous_on_middle_axis() {
@@ -253,7 +216,7 @@ mod tests {
 
     #[test]
     fn concatenate_strided_views_with_nonzero_offset() {
-        let view = Array::from_arc_raw_parts(
+        let view = Array::from_shared_parts(
             Arc::new(vec![0_i64, 1, 2, 3, 4, 5, 6, 7]),
             vec![2, 2],
             vec![3, -1],

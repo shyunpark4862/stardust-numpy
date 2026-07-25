@@ -5,12 +5,26 @@
 //!
 //! Axis index / slice resolution lives in [`crate::index`] (`bounds`).
 
+use crate::error::{Error, Result};
+
 /// Number of elements in a shape (product of dimensions).
 ///
 /// The empty product is `1`, so a 0-D shape has size 1.
 #[inline]
 pub fn size_of_shape(shape: &[usize]) -> usize {
     shape.iter().copied().product()
+}
+
+/// Checked number of elements in a shape.
+///
+/// Allocation boundaries use this helper to report shape overflow instead
+/// of wrapping a `usize` product.
+pub(crate) fn checked_size_of_shape(shape: &[usize]) -> Result<usize> {
+    shape.iter().try_fold(1usize, |size, &dimension| {
+        size.checked_mul(dimension).ok_or_else(|| {
+            Error::InvalidArgument("array shape size overflows usize".into())
+        })
+    })
 }
 
 /// C-order (row-major) strides in **element** units.
@@ -55,9 +69,9 @@ pub(crate) fn is_c_contiguous(shape: &[usize], strides: &[isize]) -> bool {
     true
 }
 
-/// Convert multi-dimensional indices to a buffer index using strides.
+/// Convert multi-dimensional indices to a backing-buffer offset.
 #[inline]
-pub(crate) fn buffer_index(
+pub(crate) fn offset_at(
     indices: &[usize],
     strides: &[isize],
     offset: usize,
@@ -85,7 +99,7 @@ mod tests {
         assert_eq!(size_of_shape(&[]), 1);
         assert_eq!(c_order_strides(&[]), Vec::<isize>::new());
         assert!(is_c_contiguous(&[], &[]));
-        assert_eq!(buffer_index(&[], &[], 0), 0);
+        assert_eq!(offset_at(&[], &[], 0), 0);
     }
 
     #[test]
