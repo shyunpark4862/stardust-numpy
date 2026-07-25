@@ -1,3 +1,9 @@
+//! Sorting and unique-value type traits plus optional unique outputs.
+//!
+//! [`SortElement`] and [`UniqueElement`] are sealed traits that encode NumPy-
+//! compatible comparison rules per dtype. [`UniqueOptions`] selects which
+//! auxiliary arrays `unique_with` returns alongside sorted unique values.
+
 use std::cmp::Ordering;
 
 use crate::dtype::{Complex64, Scalar};
@@ -11,13 +17,24 @@ mod sealed {
     impl Sealed for f64 {}
 }
 
-/// Element types accepted by [`sort`] and [`argsort`].
+/// Element types supported by [`sort`] and [`argsort`].
 ///
-/// This trait is sealed; the supported types are `bool`, `i64`, and `f64`.
-/// In particular, complex arrays intentionally do not implement general
-/// sorting.
+/// Sealed to `bool`, `i64`, and `f64`. Complex arrays do not support general
+/// sorting in this crate.
 pub trait SortElement: Scalar + sealed::Sealed {
-    /// Compare two values using the ordering required by sorting operations.
+    /// Compare two values using sort ordering (NaNs last for `f64`).
+    ///
+    /// # Arguments
+    ///
+    /// * `other` — value to compare against `self`
+    ///
+    /// # Returns
+    ///
+    /// [`Ordering`] suitable for stable sort kernels.
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
     fn sort_cmp(&self, other: &Self) -> Ordering;
 }
 
@@ -42,6 +59,7 @@ impl SortElement for f64 {
             (false, false) => {
                 self.partial_cmp(other).unwrap_or(Ordering::Equal)
             }
+            // NumPy: non-NaN values precede NaNs.
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
             (true, true) => Ordering::Equal,
@@ -58,15 +76,39 @@ mod unique_sealed {
     impl Sealed for crate::dtype::Complex64 {}
 }
 
-/// Element types accepted by [`unique`] and [`unique_with`].
+/// Element types supported by [`unique`] and [`unique_with`].
 ///
-/// This trait is sealed; the supported types are `bool`, `i64`, `f64`, and
-/// [`Complex64`].
+/// Sealed to `bool`, `i64`, `f64`, and [`Complex64`].
 pub trait UniqueElement: Scalar + unique_sealed::Sealed {
-    /// Compare values for their position in sorted unique output.
+    /// Compare values for ordering in sorted unique output.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` — value to compare against `self`
+    ///
+    /// # Returns
+    ///
+    /// [`Ordering`] for stable unique sorting; NaNs sort last for floats.
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
     fn unique_cmp(&self, other: &Self) -> Ordering;
 
-    /// Return whether values belong to the same unique-value group.
+    /// Whether two values belong to the same unique group.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` — value to compare against `self`
+    ///
+    /// # Returns
+    ///
+    /// `true` when both values collapse to one unique entry (all NaNs
+    /// match for floating types).
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
     fn unique_eq(&self, other: &Self) -> bool;
 }
 
@@ -102,6 +144,7 @@ impl UniqueElement for f64 {
 
     #[inline]
     fn unique_eq(&self, other: &Self) -> bool {
+        // All NaNs collapse to one unique group, like NumPy.
         self == other || (self.is_nan() && other.is_nan())
     }
 }
@@ -125,31 +168,47 @@ impl UniqueElement for Complex64 {
     }
 }
 
+/// Return whether either component of a complex value is NaN.
+///
+/// Used by [`UniqueElement`] for complex ordering and equality, mirroring
+/// NumPy's treatment of NaN complex entries as a single group.
+///
+/// # Arguments
+///
+/// * `value` — complex scalar to inspect
+///
+/// # Returns
+///
+/// `true` when `re` or `im` is NaN.
+///
+/// # Errors
+///
+/// Never fails.
 #[inline]
 fn complex_is_nan(value: Complex64) -> bool {
     value.re.is_nan() || value.im.is_nan()
 }
 
-/// Optional outputs requested from [`unique_with`].
+/// Flags selecting optional outputs from [`unique_with`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UniqueOptions {
-    /// Include each unique value's first flat input index.
+    /// Include each unique value's first flat C-order input index.
     pub return_index: bool,
-    /// Include a map from each flat input element to its unique value.
+    /// Include a map from each flat input element to its unique group.
     pub return_inverse: bool,
-    /// Include the number of occurrences of each unique value.
+    /// Include occurrence counts for each unique value.
     pub return_counts: bool,
 }
 
-/// Result of [`unique_with`].
+/// Result bundle returned by [`unique_with`].
 #[derive(Clone, Debug)]
 pub struct UniqueResult<T: Scalar> {
-    /// Sorted unique values.
+    /// Sorted unique values (1-D).
     pub values: Array<T>,
-    /// First C-order input indices, when requested.
+    /// First flat input indices, when requested.
     pub indices: Option<Array<i64>>,
-    /// Unique-value index for every C-order input element, when requested.
+    /// Unique group index for every flat input element, when requested.
     pub inverse_indices: Option<Array<i64>>,
-    /// Occurrence count for every unique value, when requested.
+    /// Occurrence count per unique value, when requested.
     pub counts: Option<Array<i64>>,
 }

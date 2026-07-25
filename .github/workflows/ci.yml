@@ -3,7 +3,16 @@ name: CI
 on:
   push:
     branches: [main, master]
+    paths-ignore:
+      - BENCHMARK.md
   pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rust:
@@ -11,18 +20,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo check --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --release --workspace
 
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin pytest
-      - working-directory: sdnp-py
-        run: maturin develop
-      - working-directory: sdnp-py
-        run: pytest python-tests
+      - name: Create virtualenv
+        working-directory: sdnp-py
+        run: python -m venv .venv
+
+      - name: Install Python dependencies
+        working-directory: sdnp-py
+        run: |
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install maturin pytest numpy hypothesis tqdm
+
+      - name: Build sdnp-py
+        working-directory: sdnp-py
+        run: |
+          source .venv/bin/activate
+          maturin develop --release
+
+      - name: Python tests
+        working-directory: sdnp-py
+        env:
+          HYPOTHESIS_PROFILE: ci
+        run: |
+          source .venv/bin/activate
+          pytest
+      - name: Full benchmarks
+        run: |
+          sdnp-py/.venv/bin/python benches/benchmark.py run \
+            --profile full \
+            --warmups 1 \
+            --samples 5 \
+            --target-sample-ms 25
+      - name: Commit benchmark report
+        if: >-
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add BENCHMARK.md
+          if git diff --staged --quiet; then
+            echo "Benchmark report unchanged"
+          else
+            git commit -m "$(cat <<'EOF'
+chore: update BENCHMARK.md from CI benchmarks [skip ci]
+
+EOF
+)"
+            git push
+          fi

@@ -1,4 +1,8 @@
-//! Parse Python index objects into `IndexSpec` lists.
+//! Parse Python index objects into core `IndexSpec` lists.
+//!
+//! Translates `int`, `slice`, `Ellipsis`, `None` (newaxis), tuples, and fancy
+//! integer/boolean arrays into the indexing IR consumed by `sdnp::gather` and
+//! `sdnp::scatter`. Validation runs here before the core sees the spec.
 
 use pyo3::prelude::*;
 use pyo3::types::{PySlice, PyTuple};
@@ -12,6 +16,36 @@ use crate::inner::ArrayInner;
 use crate::unwrap::{finish, PyScalar};
 use crate::validate::check_slice_step;
 
+/// Implement `Array.__getitem__`: parse, validate, gather, unwrap.
+///
+/// Translates Python index objects into core [`IndexSpec`] lists, validates
+/// bounds and mask shapes, then returns a scalar or new array.
+///
+/// # Arguments
+///
+/// * `py` - Python interpreter token.
+/// * `array` - Source `PyArray`.
+/// * `index` - NumPy-style index object.
+///
+/// # Returns
+///
+/// A Python scalar (0-D unwrap) or `PyArray` wrapper.
+///
+/// # Errors
+///
+/// * `TypeError` — invalid index type or 0-D fancy index array.
+/// * `IndexError` — out-of-bounds, too many indices, or mask mismatch.
+/// * `ValueError` — invalid slice step or core gather failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([10, 20, 30])
+/// assert a[1] == 20
+/// assert a[1:3].to_list() == [20, 30]
+/// ```
 pub fn get_item(
     py: Python<'_>,
     array: &PyArray,
@@ -28,6 +62,36 @@ pub fn get_item(
     finish(py, inner)
 }
 
+/// Implement `Array.__setitem__`: parse, validate, scatter scalar or array.
+///
+/// Accepts Python scalars with NumPy-like coercion or same-broadcast-shape
+/// array values. Mutates the source array in place.
+///
+/// # Arguments
+///
+/// * `array` - Mutable target `PyArray`.
+/// * `index` - NumPy-style index object.
+/// * `value` - Scalar or `Array` to write.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+///
+/// # Errors
+///
+/// * `TypeError` — invalid index type or 0-D index/value array.
+/// * `IndexError` — out-of-bounds or boolean mask shape mismatch.
+/// * `ValueError` — incompatible assignment dtype or scatter failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([1, 2, 3])
+/// a[0] = 99
+/// assert a.to_list() == [99, 2, 3]
+/// ```
 pub fn set_item(
     array: &mut PyArray,
     index: &Bound<'_, PyAny>,
@@ -36,12 +100,32 @@ pub fn set_item(
     let spec = parse_index(index)?;
     validate_index(array.inner.shape(), &spec)?;
     if let Ok(arr) = value.extract::<PyRef<PyArray>>() {
+        arr.reject_zero_dim_input("array assignment")?;
         return set_item_array(array, &spec, &arr.inner);
     }
     let scalar = coerce_scalar(value)?;
     set_item_scalar(array, &spec, scalar)
 }
 
+/// Scatter a Python scalar with permissive cross-dtype assignment rules.
+///
+/// Mirrors NumPy-like narrowing and widening when the stored dtype differs
+/// from the Python scalar type (e.g. `float` into `int`, `bool` into `int`).
+///
+/// # Arguments
+///
+/// * `array` - Mutable target `PyArray`.
+/// * `spec` - Parsed index specification.
+/// * `scalar` - Coerced Python scalar value.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+///
+/// # Errors
+///
+/// * `ValueError` — incompatible assignment to `bool` storage or scatter
+///   failure from the core.
 fn set_item_scalar(
     array: &mut PyArray,
     spec: &[IndexSpec],
@@ -60,6 +144,7 @@ fn set_item_scalar(
         (ArrayInner::C64(a), PyScalar::C64(v)) => {
             map_sdnp(scatter(a, spec, v)).map(|_| ())
         }
+        // Narrowing/widening assignments mirror NumPy-like coercion.
         (ArrayInner::Bool(a), PyScalar::I64(v)) => {
             map_sdnp(scatter(a, spec, v != 0)).map(|_| ())
         }
@@ -90,6 +175,21 @@ fn set_item_scalar(
     }
 }
 
+/// Promote a scalar to `Complex64` for complex-array assignment.
+///
+/// Real-valued scalars gain a zero imaginary part.
+///
+/// # Arguments
+///
+/// * `s` - Coerced Python scalar.
+///
+/// # Returns
+///
+/// A `Complex64` suitable for complex storage scatter.
+///
+/// # Errors
+///
+/// None; all scalar variants are representable as complex.
 fn scalar_to_c64(s: PyScalar) -> PyResult<sdnp::Complex64> {
     use sdnp::Complex64;
     Ok(match s {
@@ -100,6 +200,24 @@ fn scalar_to_c64(s: PyScalar) -> PyResult<sdnp::Complex64> {
     })
 }
 
+/// Scatter an array value; promote source dtype when needed.
+///
+/// When dtypes differ, the source is cast to the destination dtype and the
+/// scatter is retried recursively.
+///
+/// # Arguments
+///
+/// * `array` - Mutable target `PyArray`.
+/// * `spec` - Parsed index specification.
+/// * `values` - Source typed storage to write.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+///
+/// # Errors
+///
+/// * `ValueError` — cast or scatter failure from the core.
 fn set_item_array(
     array: &mut PyArray,
     spec: &[IndexSpec],
@@ -125,6 +243,23 @@ fn set_item_array(
     }
 }
 
+/// Parse a top-level index: bare item or tuple of items (no outer wrapper).
+///
+/// Tuple elements are concatenated into one flat `IndexSpec` list, matching
+/// NumPy's `(i, j, ...)` indexing semantics.
+///
+/// # Arguments
+///
+/// * `obj` - Python index object (`int`, `slice`, tuple, etc.).
+///
+/// # Returns
+///
+/// A vector of core [`IndexSpec`] entries.
+///
+/// # Errors
+///
+/// * `TypeError` — unsupported index type or 0-D fancy index array.
+/// * `ValueError` — invalid slice step.
 fn parse_index(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
     if let Ok(tuple) = obj.downcast::<PyTuple>() {
         let mut specs = Vec::new();
@@ -136,6 +271,23 @@ fn parse_index(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
     parse_index_item(obj)
 }
 
+/// Parse one index slot: int, slice, ellipsis, newaxis, or fancy array.
+///
+/// Fancy arrays become [`IndexSpec::IntegerArray`] or
+/// [`IndexSpec::BoolArray`]; float/complex index arrays are rejected.
+///
+/// # Arguments
+///
+/// * `obj` - One index component.
+///
+/// # Returns
+///
+/// A one-element (or fancy) `IndexSpec` vector for this slot.
+///
+/// # Errors
+///
+/// * `TypeError` — invalid index type, 0-D index array, or float/complex
+///   fancy index.
 fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
     let py = obj.py();
     if obj.is_none() {
@@ -151,6 +303,7 @@ fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
         return Ok(vec![IndexSpec::Index(i)]);
     }
     if let Ok(arr) = obj.extract::<PyRef<PyArray>>() {
+        arr.reject_zero_dim_input("array index")?;
         return fancy_spec(&arr);
     }
     Err(type_error(format!(
@@ -158,6 +311,22 @@ fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
     )))
 }
 
+/// Convert a Python slice object into `IndexSpec::Slice`.
+///
+/// `None` components remain `None` so the core applies NumPy default bounds.
+///
+/// # Arguments
+///
+/// * `slice` - Python `slice` object.
+///
+/// # Returns
+///
+/// An [`IndexSpec::Slice`] with optional start/stop/step.
+///
+/// # Errors
+///
+/// * `TypeError` — non-integer slice component.
+/// * `ValueError` — zero slice step.
 fn parse_slice(slice: &Bound<'_, PySlice>) -> PyResult<IndexSpec> {
     let start = optional_index(&slice.getattr("start")?)?;
     let stop = optional_index(&slice.getattr("stop")?)?;
@@ -166,6 +335,21 @@ fn parse_slice(slice: &Bound<'_, PySlice>) -> PyResult<IndexSpec> {
     Ok(IndexSpec::Slice { start, stop, step })
 }
 
+/// Extract `None` → `None`, otherwise an integer index component.
+///
+/// Used for slice `start`, `stop`, and `step` attributes.
+///
+/// # Arguments
+///
+/// * `obj` - Slice component attribute value.
+///
+/// # Returns
+///
+/// `None` when the attribute is `None`, else `Some(i64)`.
+///
+/// # Errors
+///
+/// * `TypeError` — non-integer, non-`None` component.
 fn optional_index(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
     if obj.is_none() {
         return Ok(None);
@@ -173,6 +357,23 @@ fn optional_index(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
     Ok(Some(obj.extract::<i64>()?))
 }
 
+/// Build a fancy-index spec from an integer or boolean index array.
+///
+/// Translates a `PyArray` used as an index into the core gather/scatter IR.
+/// Only integer and boolean dtypes are permitted for fancy indexing.
+///
+/// # Arguments
+///
+/// * `arr` - Index array (`ndim >= 1`).
+///
+/// # Returns
+///
+/// A one-element vector containing [`IndexSpec::IntegerArray`] or
+/// [`IndexSpec::BoolArray`].
+///
+/// # Errors
+///
+/// * `TypeError` — float or complex fancy index array.
 fn fancy_spec(arr: &PyRef<PyArray>) -> PyResult<Vec<IndexSpec>> {
     match &arr.inner {
         ArrayInner::Bool(a) => Ok(vec![IndexSpec::BoolArray(a.clone())]),
@@ -183,6 +384,21 @@ fn fancy_spec(arr: &PyRef<PyArray>) -> PyResult<Vec<IndexSpec>> {
     }
 }
 
+/// How many source axes one spec entry consumes (0 for newaxis/ellipsis).
+///
+/// Boolean masks consume `mask.ndim()` axes; scalar indices consume one.
+///
+/// # Arguments
+///
+/// * `spec` - One parsed index specification entry.
+///
+/// # Returns
+///
+/// Number of source axes consumed by this entry.
+///
+/// # Errors
+///
+/// None.
 fn axes_consumed(spec: &IndexSpec) -> usize {
     match spec {
         IndexSpec::NewAxis | IndexSpec::Ellipsis => 0,
@@ -193,6 +409,24 @@ fn axes_consumed(spec: &IndexSpec) -> usize {
     }
 }
 
+/// Check ellipsis count, axis count, and boolean mask shape alignment.
+///
+/// Ensures at most one ellipsis, not too many indices, and that boolean
+/// masks exactly cover the indexed sub-shape.
+///
+/// # Arguments
+///
+/// * `shape` - Source array shape.
+/// * `specs` - Parsed index specification list.
+///
+/// # Returns
+///
+/// `Ok(())` when the index is structurally valid.
+///
+/// # Errors
+///
+/// * `IndexError` — multiple ellipses, too many indices, or boolean mask
+///   shape mismatch.
 fn validate_index(shape: &[usize], specs: &[IndexSpec]) -> PyResult<()> {
     let ellipsis_count = specs
         .iter()
@@ -209,6 +443,7 @@ fn validate_index(shape: &[usize], specs: &[IndexSpec]) -> PyResult<()> {
             shape.len()
         )));
     }
+    // Ellipsis expands to consume all remaining unindexed axes.
     let missing = shape.len() - used;
     let mut source_axis = 0usize;
     for spec in specs {

@@ -16,19 +16,20 @@ num-complex = "0.4"
 num-traits = "0.2"
 thiserror = "2"
 
-[dev-dependencies]
-approx = "0.5"
-criterion = "0.5.1"
-
 [lib]
 name = "sdnp"
 path = "src/lib.rs"
 
-[[bench]]
-name = "paths"
-harness = false
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+incremental = false
+debug = false
+strip = "symbols"
+overflow-checks = false
 
-[profile.bench]
+[profile.test]
 opt-level = 3
 lto = "fat"
 codegen-units = 1

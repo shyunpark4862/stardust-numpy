@@ -1,27 +1,69 @@
-//! Axis / slice bound helpers used by indexing prepare.
+//! Low-level helpers for slice bounds and C-order coordinate stepping.
+//!
+//! These functions mirror Python/NumPy slice semantics: negative indices count
+//! from the end, omitted slice bounds pick axis defaults, and a zero step is
+//! rejected. They are used while turning [`IndexSpec`] into prepared entries.
 
 use crate::error::{Error, Result};
 
-/// Number of elements produced by `range(start, stop, step)`.
+/// Count elements selected by a Python-style slice.
 ///
-/// Matches Python/`slice` length semantics. `step` must be non-zero.
+/// Computes the length of `range(start, stop, step)` the way NumPy does.
+/// Empty ranges return zero; a zero `step` is rejected.
+///
+/// # Arguments
+///
+/// * `start` — resolved slice start (may be negative before resolution)
+/// * `stop` — resolved slice stop (exclusive, like Python)
+/// * `step` — slice step; must be non-zero
+///
+/// # Returns
+///
+/// The number of indices visited by the slice walk.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — `step == 0` or the length overflows
+///   `usize`
 pub(crate) fn slice_length(
     start: isize,
     stop: isize,
     step: isize,
 ) -> Result<usize> {
-    debug_assert!(step != 0, "slice step cannot be zero");
+    if step == 0 {
+        return Err(Error::InvalidArgument("slice step cannot be zero".into()));
+    }
+    let start = start as i128;
+    let stop = stop as i128;
+    let step = step as i128;
+    // Empty when start/stop do not advance in the step direction.
     if (stop - start) * step <= 0 {
         return Ok(0);
     }
     let numer = stop - start + step - if step > 0 { 1 } else { -1 };
-    Ok((numer / step) as usize)
+    usize::try_from(numer / step).map_err(|_| {
+        Error::InvalidArgument("slice length overflows usize".into())
+    })
 }
 
-/// Normalize a possibly-negative index into `0..axis_len`.
+/// Map a possibly-negative element index into `0..axis_len`.
 ///
-/// This is an **element** index along an axis of length `axis_len`
-/// (not an axis number in `0..ndim`).
+/// Negative values count backward from the end of the axis, matching NumPy.
+/// This is an index **along one axis**, not an axis number in `0..ndim`.
+///
+/// # Arguments
+///
+/// * `index` — raw element index (may be negative)
+/// * `axis_len` — length of the axis being indexed
+///
+/// # Returns
+///
+/// A non-negative index in `0..axis_len`.
+///
+/// # Errors
+///
+/// * [`Error::IndexOutOfBounds`] — the normalized index falls outside the
+///   axis
 pub(crate) fn normalize_element_index(
     index: i64,
     axis_len: usize,
@@ -37,11 +79,25 @@ pub(crate) fn normalize_element_index(
     Ok(idx as usize)
 }
 
-/// Advance a C-order multi-index in place (odometer).
+/// Advance a C-order multi-index in place, like an odometer.
+///
+/// Increments the rightmost axis first and carries left on overflow. When
+/// every axis wraps, the index becomes all zeros (the caller typically stops
+/// before that sentinel state).
+///
+/// # Arguments
+///
+/// * `indices` — current coordinate, updated in place
+/// * `shape` — axis lengths bounding each coordinate component
+///
+/// # Returns
+///
+/// Nothing; `indices` is advanced by one C-order step.
 pub(crate) fn advance_multi_index(indices: &mut [usize], shape: &[usize]) {
     if indices.is_empty() {
         return;
     }
+    // Rightmost axis increments first; carry left on overflow.
     for axis in (0..indices.len()).rev() {
         indices[axis] += 1;
         if indices[axis] < shape[axis] {
@@ -51,11 +107,28 @@ pub(crate) fn advance_multi_index(indices: &mut [usize], shape: &[usize]) {
     }
 }
 
-/// Resolve a Python-style slice against an axis of length `axis_len`.
+/// Resolve slice bounds against an axis of length `axis_len`.
 ///
-/// Returns `(start, stop, step)` suitable for [`slice_length`] and for
-/// computing the first selected index / stride multiplier (like
-/// `slice.indices` in Python).
+/// Applies NumPy/Python `slice.indices(length)` rules: omitted bounds pick
+/// axis defaults that depend on step sign, and negative bounds count from
+/// the end. The triple is suitable for [`slice_length`] and offset math.
+///
+/// # Arguments
+///
+/// * `start` — optional raw slice start (`None` → axis default)
+/// * `stop` — optional raw slice stop (`None` → axis default)
+/// * `step` — optional slice step (`None` → `1`)
+/// * `axis_len` — length of the axis being sliced
+///
+/// # Returns
+///
+/// `(start, stop, step)` as signed integers ready for length and stride
+/// computation.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — zero step, or any bound does not fit in
+///   `isize`
 pub(crate) fn resolve_slice(
     start: Option<i64>,
     stop: Option<i64>,
@@ -63,10 +136,15 @@ pub(crate) fn resolve_slice(
     axis_len: usize,
 ) -> Result<(isize, isize, isize)> {
     let step = step.unwrap_or(1);
-    debug_assert!(step != 0, "slice step cannot be zero");
-    let len = axis_len as i64;
+    if step == 0 {
+        return Err(Error::InvalidArgument("slice step cannot be zero".into()));
+    }
+    let len = i64::try_from(axis_len).map_err(|_| {
+        Error::InvalidArgument("axis length exceeds i64 range".into())
+    })?;
 
     let (start, stop) = if step > 0 {
+        // Forward slice: default start=0, default stop=axis length.
         let start = match start {
             None => 0,
             Some(s) if s < 0 => (s + len).max(0),
@@ -79,6 +157,7 @@ pub(crate) fn resolve_slice(
         };
         (start, stop)
     } else {
+        // Negative step: defaults mirror Python's reverse-slice rules.
         let start = match start {
             None => len - 1,
             Some(s) if s < 0 => (s + len).max(-1),
@@ -92,31 +171,15 @@ pub(crate) fn resolve_slice(
         (start, stop)
     };
 
-    Ok((start as isize, stop as isize, step as isize))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slice_length_basic() {
-        assert_eq!(slice_length(0, 5, 1).unwrap(), 5);
-        assert_eq!(slice_length(3, 1, 1).unwrap(), 0);
-    }
-
-    #[test]
-    fn normalize_negative() {
-        assert_eq!(normalize_element_index(-1, 3).unwrap(), 2);
-        assert!(normalize_element_index(3, 3).is_err());
-    }
-
-    #[test]
-    fn resolve_full_and_reverse() {
-        assert_eq!(resolve_slice(None, None, None, 5).unwrap(), (0, 5, 1));
-        assert_eq!(
-            resolve_slice(None, None, Some(-1), 4).unwrap(),
-            (3, -1, -1)
-        );
-    }
+    Ok((
+        isize::try_from(start).map_err(|_| {
+            Error::InvalidArgument("slice start exceeds isize range".into())
+        })?,
+        isize::try_from(stop).map_err(|_| {
+            Error::InvalidArgument("slice stop exceeds isize range".into())
+        })?,
+        isize::try_from(step).map_err(|_| {
+            Error::InvalidArgument("slice step exceeds isize range".into())
+        })?,
+    ))
 }

@@ -1,5 +1,30 @@
+//! Min, max, and boolean extremum reduction kernels.
+//!
+//! Each dtype picks suffix chunk folds, prefix row scans, or a general
+//! strided path via [`super::reduction_path`]. Floating kernels branch on NaN
+//! propagation; ignore mode delegates to
+//! [`super::reduce_ignore_with_counts`].
+
 use super::*;
 
+/// Build a [`ReducePlan`] for extremum reductions.
+///
+/// Thin wrapper around [`ReducePlan::new`] shared by min/max entry points.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+/// * `_op_name` - Operation label (reserved for diagnostics).
+///
+/// # Returns
+///
+/// Axis geometry for the extremum kernel dispatch.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 fn build_extremum_plan<T: Scalar>(
     a: &Array<T>,
     axes: Option<&[isize]>,
@@ -10,6 +35,25 @@ fn build_extremum_plan<T: Scalar>(
     Ok(plan)
 }
 
+/// Prefix-layout extremum: each output column scans down contiguous rows.
+///
+/// Used when reduced axes form a leading block and the buffer is
+/// C-contiguous. NaN propagation stops updating a slot once NaN is seen.
+///
+/// # Arguments
+///
+/// * `slice` - C-contiguous input elements.
+/// * `plan` - Reduction axis geometry.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// An array of extrema shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn extremum_prefix_contiguous<T, F, N>(
     slice: &[T],
     plan: &ReducePlan,
@@ -21,17 +65,13 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    if plan.reduction_is_empty() {
-        if slice.len() >= plan.output_len {
-            return Array::from_vec(
-                slice[..plan.output_len].to_vec(),
-                &plan.output_shape,
-            );
-        }
-        debug_assert!(slice.is_empty(), "empty reduction requires empty slice");
+    if plan.reduction_is_empty() && slice.len() >= plan.output_len {
+        return Array::from_vec(
+            slice[..plan.output_len].to_vec(),
+            &plan.output_shape,
+        );
     }
     if slice.len() < plan.output_len {
-        debug_assert!(plan.reduction_is_empty());
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
     let (first_row, remaining) = slice.split_at(plan.output_len);
@@ -48,9 +88,24 @@ where
     Array::from_vec(out, &plan.output_shape)
 }
 
-/// Boolean min/max is all/any respectively. The contiguous kernel uses
-/// bitwise accumulation so there is no comparison or generic dispatch in the
-/// hot loop.
+/// Boolean min/max (`MIN=true` → all-like, `MIN=false` → any-like).
+///
+/// `reduce_min` on booleans returns false only when every element is false;
+/// `reduce_max` returns true when any element is true.
+///
+/// # Arguments
+///
+/// * `a` - Boolean input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// A `bool` array shaped like the reduction output.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_bool_extremum<const MIN: bool>(
     a: &Array<bool>,
     axes: Option<&[isize]>,
@@ -61,8 +116,23 @@ pub(crate) fn reduce_bool_extremum<const MIN: bool>(
     reduce_bool_with_plan::<MIN>(a, &plan)
 }
 
-/// Boolean all/any shares the bitwise min/max kernel but preserves logical
-/// reduction identities on empty reduced axes.
+/// Boolean all/any with correct identities on empty reduced axes.
+///
+/// Empty reduced slices yield `ALL` (true for `all`, false for `any`).
+///
+/// # Arguments
+///
+/// * `a` - Boolean input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// A `bool` array of logical reductions.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_bool_logical<const ALL: bool>(
     a: &Array<bool>,
     axes: Option<&[isize]>,
@@ -72,6 +142,22 @@ pub(crate) fn reduce_bool_logical<const ALL: bool>(
     reduce_bool_with_plan::<ALL>(a, &plan)
 }
 
+/// Shared boolean fold using AND (`ALL=true`) or OR (`ALL=false`).
+///
+/// Dispatches to suffix chunks, prefix rows, or general strided traversal.
+///
+/// # Arguments
+///
+/// * `a` - Boolean input array.
+/// * `plan` - Precomputed reduction geometry.
+///
+/// # Returns
+///
+/// A `bool` array shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn reduce_bool_with_plan<const AND: bool>(
     a: &Array<bool>,
     plan: &ReducePlan,
@@ -135,6 +221,24 @@ fn reduce_bool_with_plan<const AND: bool>(
     }
 }
 
+/// Integer minimum over selected axes.
+///
+/// Empty reduced slices fill with `i64::MAX`. Uses eight-lane partial
+/// minima on contiguous suffix chunks.
+///
+/// # Arguments
+///
+/// * `a` - `i64` input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An `i64` array of minima.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_i64_min(
     a: &Array<i64>,
     axes: Option<&[isize]>,
@@ -145,6 +249,23 @@ pub(crate) fn reduce_i64_min(
     })
 }
 
+/// Integer maximum over selected axes.
+///
+/// Empty reduced slices fill with `i64::MIN`.
+///
+/// # Arguments
+///
+/// * `a` - `i64` input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An `i64` array of maxima.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_i64_max(
     a: &Array<i64>,
     axes: Option<&[isize]>,
@@ -155,7 +276,23 @@ pub(crate) fn reduce_i64_max(
     })
 }
 
-/// Integer min/max uses a concrete `Ord` kernel with no NaN branch.
+/// Shared `i64` min/max kernel with layout dispatch.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axes` - Axes to reduce.
+/// * `keepdims` - Keep reduced axes as length-1 dimensions.
+/// * `op_name` - `"min"` or `"max"` (selects empty-slice sentinel).
+/// * `is_better` - Comparison predicate.
+///
+/// # Returns
+///
+/// An `i64` array shaped like the reduction output.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid or allocation fails.
 fn reduce_i64_extremum<F>(
     a: &Array<i64>,
     axes: Option<&[isize]>,
@@ -181,6 +318,7 @@ where
         ReductionPath::SuffixContiguous(slice) => {
             let mut out = Vec::with_capacity(plan.output_len);
             for chunk in slice.chunks_exact(plan.reduction_len) {
+                // Eight-lane partial min/max, then merge.
                 let mut partials = [chunk[0]; 8];
                 let mut blocks = chunk.chunks_exact(8);
                 for block in &mut blocks {
@@ -214,9 +352,24 @@ where
     }
 }
 
-/// Floating min/max keeps NaN propagation while using independent comparison
-/// chains for NaN-free contiguous chunks. NaNs are still observed in logical
-/// C order, so the first NaN value is propagated as before.
+/// Floating min/max with NaN propagation in logical C order.
+///
+/// Any NaN in a reduced slice poisons that output slot. Suffix chunks use
+/// eight-lane partial extrema with a consolidated NaN mask.
+///
+/// # Arguments
+///
+/// * `a` - `f64` input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An `f64` array of extrema (NaN when any input in the slice was NaN).
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_f64_extremum<const MIN: bool>(
     a: &Array<f64>,
     axes: Option<&[isize]>,
@@ -320,6 +473,24 @@ pub(crate) fn reduce_f64_extremum<const MIN: bool>(
     }
 }
 
+/// Floating min/max skipping NaN elements.
+///
+/// Delegates to [`super::reduce_ignore_with_counts`] with ±infinity identity
+/// and NaN sentinels for all-NaN slices.
+///
+/// # Arguments
+///
+/// * `a` - `f64` input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An `f64` array of extrema over finite elements only.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid.
 pub(crate) fn reduce_f64_extremum_ignore<const MIN: bool>(
     a: &Array<f64>,
     axes: Option<&[isize]>,
@@ -365,6 +536,25 @@ pub(crate) fn reduce_f64_extremum_ignore<const MIN: bool>(
     Ok(result)
 }
 
+/// General-strided min/max over arbitrary layouts.
+///
+/// Walks outer kept-axis runs and inner [`ReducedAxisRuns`] for each output
+/// slot. Short-circuits on the first NaN when propagating.
+///
+/// # Arguments
+///
+/// * `a` - Strided input array.
+/// * `plan` - Reduction axis geometry.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// An array of extrema shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn extremum_strided_general<T, F, N>(
     a: &Array<T>,
     plan: &ReducePlan,
@@ -383,11 +573,7 @@ where
     let reduced = ReducedAxisRuns::new(&plan.reduced_shape, &reduced_strides);
     let mut reduced_cursor = reduced.cursor(a.offset() as isize);
 
-    // The overwhelmingly common case is a fully coalesced reduced layout
-    // (single axis, or several axes that merge into one linear run). A flat
-    // `pos += stride` loop lets the compiler keep `best`/`pos` in registers
-    // and avoids wrapping every element in an extra run-counting loop, which
-    // otherwise measurably hurts this branch-heavy (NaN-checking) kernel.
+    // Single coalesced run: simple inner loop without run-grid overhead.
     if reduced.run_count == 1 {
         let inner_len = reduced.run_len;
         let inner_stride = reduced.operand_stride;

@@ -1,4 +1,9 @@
-//! Reductions and cumulative operations (`sum`, `mean`, `cumsum`, …).
+//! Axis reductions, cumulative scans, and statistical aggregates.
+//!
+//! Public functions dispatch through dtype-specific traits in `traits`.
+//! `plan` resolves which axes collapse; `kernels` pick contiguous,
+//! prefix/suffix, or general strided traversal. NaN policy is applied at the
+//! trait layer so propagate and ignore paths stay separate in hot loops.
 
 mod kernels;
 mod ops;

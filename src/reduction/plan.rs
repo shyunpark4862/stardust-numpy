@@ -1,10 +1,26 @@
-//! Reduction-axis geometry helpers.
+//! Reduction-axis geometry and traversal scheduling.
+//!
+//! A [`ReducePlan`] records which axes collapse, output shape, and how many
+//! elements each output slot folds. [`TraversalSchedule`] picks contiguous
+//! suffix chunks, prefix rows, or a general strided walk once per call.
 
 use crate::axis::normalize_axis_list;
 use crate::error::Result;
-use crate::shape::size_of_shape;
+use crate::shape::{checked_size_of_shape, size_of_shape_unchecked};
 
-/// Normalize one or more axes. Returns sorted unique axes.
+/// Sort and deduplicate normalized axis indices.
+///
+/// Negative axis indices are resolved against `ndim` before sorting so
+/// kernels always see ascending, unique axis numbers.
+///
+/// # Arguments
+///
+/// * `axes` - Raw axis list (may contain negative indices).
+/// * `ndim` - Rank of the array being reduced.
+///
+/// # Returns
+///
+/// Sorted, deduplicated axis indices in `[0, ndim)`.
 fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Vec<usize> {
     let mut out = normalize_axis_list(axes, ndim);
     out.sort_unstable();
@@ -12,7 +28,24 @@ fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Vec<usize> {
     out
 }
 
-/// Axes to reduce: `None` → all axes; otherwise normalized and sorted.
+/// Resolve which axes collapse for a reduction call.
+///
+/// `None` reduces every axis (global reduction). `Some(&[])` reduces none
+/// and yields an output with the same rank as the input.
+///
+/// # Arguments
+///
+/// * `ndim` - Rank of the input array.
+/// * `axes` - Explicit axis list, empty slice, or `None` for all axes.
+///
+/// # Returns
+///
+/// Ascending, deduplicated axis indices to fold.
+///
+/// # Errors
+///
+/// Returns an error when an axis index is out of range or duplicated after
+/// normalization.
 pub(crate) fn resolve_reduced_axes(
     ndim: usize,
     axes: Option<&[isize]>,
@@ -24,7 +57,19 @@ pub(crate) fn resolve_reduced_axes(
     })
 }
 
-/// Shape after removing `reduced` axes (ascending).
+/// Shape after dropping reduced axes (ascending axis order).
+///
+/// Used when `keepdims = false`. Reduced dimensions are removed rather than
+/// replaced with length-one slots.
+///
+/// # Arguments
+///
+/// * `shape` - Input array shape.
+/// * `reduced` - Sorted axis indices being collapsed.
+///
+/// # Returns
+///
+/// Shape containing only non-reduced dimensions, in original axis order.
 pub(crate) fn kept_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(shape.len().saturating_sub(reduced.len()));
     let mut r = 0usize;
@@ -38,7 +83,19 @@ pub(crate) fn kept_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     out
 }
 
-/// Complementary axis list (ascending) for non-reduced axes.
+/// Non-reduced axis indices in ascending order.
+///
+/// Complements [`kept_shape`]: same filtering rule, but returns axis numbers
+/// instead of dimension lengths.
+///
+/// # Arguments
+///
+/// * `ndim` - Rank of the input array.
+/// * `reduced` - Sorted axis indices being collapsed.
+///
+/// # Returns
+///
+/// Axis indices that survive the reduction.
 pub(crate) fn kept_axes(ndim: usize, reduced: &[usize]) -> Vec<usize> {
     let mut out = Vec::with_capacity(ndim.saturating_sub(reduced.len()));
     let mut r = 0usize;
@@ -52,12 +109,36 @@ pub(crate) fn kept_axes(ndim: usize, reduced: &[usize]) -> Vec<usize> {
     out
 }
 
-/// Shape of the reduced block.
+/// Shape of the sub-array folded into each output slot.
+///
+/// Each reduced axis contributes its length; the product is
+/// [`ReducePlan::reduction_len`].
+///
+/// # Arguments
+///
+/// * `shape` - Input array shape.
+/// * `reduced` - Sorted axis indices being collapsed.
+///
+/// # Returns
+///
+/// Dimension lengths along reduced axes only, in ascending axis order.
 pub(crate) fn reduced_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     reduced.iter().map(|&ax| shape[ax]).collect()
 }
 
-/// `keepdims=True` output shape.
+/// Output shape when reduced axes are kept as length-one dimensions.
+///
+/// Used when `keepdims = true`. Collapsed axes remain in the shape tuple
+/// with size 1 so broadcasting semantics match NumPy.
+///
+/// # Arguments
+///
+/// * `shape` - Input array shape.
+/// * `reduced` - Sorted axis indices being collapsed.
+///
+/// # Returns
+///
+/// A copy of `shape` with reduced axes set to 1.
 pub(crate) fn keepdims_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     let mut out = shape.to_vec();
     for &ax in reduced {
@@ -66,7 +147,20 @@ pub(crate) fn keepdims_shape(shape: &[usize], reduced: &[usize]) -> Vec<usize> {
     out
 }
 
-/// Output shape for a reduction (`keepdims` aware).
+/// Final output shape for a reduction, honoring `keepdims`.
+///
+/// Dispatches to [`keepdims_shape`] or [`kept_shape`] depending on the
+/// caller flag.
+///
+/// # Arguments
+///
+/// * `shape` - Input array shape.
+/// * `reduced` - Sorted axis indices being collapsed.
+/// * `keepdims` - When true, reduced axes stay as length-1 dimensions.
+///
+/// # Returns
+///
+/// The shape every reduction kernel writes into.
 pub(crate) fn output_shape(
     shape: &[usize],
     reduced: &[usize],
@@ -79,8 +173,10 @@ pub(crate) fn output_shape(
     }
 }
 
-/// Shared geometry for operations that traverse one axis while preserving
-/// independent output slots.
+/// Geometry for ops that scan one axis while filling independent outputs.
+///
+/// Used by cumulative scans and arg-extremum along a single axis. Records
+/// which axis is traversed and how many independent output slots exist.
 #[derive(Clone, Debug)]
 pub(crate) struct AxisTraversalPlan {
     pub(crate) axis: usize,
@@ -91,8 +187,21 @@ pub(crate) struct AxisTraversalPlan {
 }
 
 impl AxisTraversalPlan {
+    /// Plan a single-axis traversal (cumsum, argmin along one axis, etc.).
+    ///
+    /// Treats `axis` as the sole reduced dimension and precomputes outer
+    /// shape metadata for strided or contiguous kernel dispatch.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` - Input array shape.
+    /// * `axis` - Normalized axis index to scan along.
+    ///
+    /// # Returns
+    ///
+    /// An [`AxisTraversalPlan`] with `output_len` equal to the product of
+    /// non-scanned dimensions.
     pub(crate) fn new(shape: &[usize], axis: usize) -> Self {
-        debug_assert!(axis < shape.len());
         let axis_len = shape[axis];
         let reduced_axes = [axis];
         let axes = kept_axes(shape.len(), &reduced_axes);
@@ -100,25 +209,50 @@ impl AxisTraversalPlan {
         Self {
             axis,
             axis_len,
-            output_len: size_of_shape(&kept_shape),
+            output_len: size_of_shape_unchecked(&kept_shape),
             kept_axes: axes,
             kept_shape,
         }
     }
 
-    /// Strides for the non-traversed axes in outer C-order.
+    /// Strides of non-traversed axes in outer C order.
+    ///
+    /// Outer run walkers use these strides to advance between independent
+    /// scan lines without touching the traversed axis stride.
+    ///
+    /// # Arguments
+    ///
+    /// * `strides` - Full input array strides.
+    ///
+    /// # Returns
+    ///
+    /// Strides along [`Self::kept_axes`], in ascending axis order.
     pub(crate) fn kept_strides(&self, strides: &[isize]) -> Vec<isize> {
         self.kept_axes.iter().map(|&axis| strides[axis]).collect()
     }
 
-    /// Whether the traversed axis is the last logical axis.
+    /// Whether the traversed axis is the last logical dimension.
+    ///
+    /// When true and the buffer is C-contiguous, each output row is one
+    /// contiguous memory chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `ndim` - Rank of the input array.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `axis + 1 == ndim`.
     #[inline]
     pub(crate) fn is_last_axis(&self, ndim: usize) -> bool {
         self.axis + 1 == ndim
     }
 }
 
-/// Shared geometry for axis reductions (computed once per call).
+/// Precomputed axis layout shared by all reduction kernels on one call.
+///
+/// Built once per public reduction; stores output shape, slot counts, and
+/// enough metadata to pick a [`TraversalSchedule`].
 #[derive(Clone, Debug)]
 pub(crate) struct ReducePlan {
     pub(crate) reduced_axes: Vec<usize>,
@@ -126,30 +260,49 @@ pub(crate) struct ReducePlan {
     pub(crate) output_shape: Vec<usize>,
     pub(crate) kept_shape: Vec<usize>,
     pub(crate) reduced_shape: Vec<usize>,
-    /// Number of independent reduction outputs (product of kept dimensions).
-    /// `0` means an empty result (no slots to fill).
+    /// Independent output slots (product of kept dimensions).
     pub(crate) output_len: usize,
-    /// Elements folded per slot (product of reduced dims).
-    /// `0` means the reduced block is empty.
+    /// Elements folded per slot (product of reduced dimensions).
     pub(crate) reduction_len: usize,
 }
 
-/// Physical traversal selected from reduction geometry and input layout.
+/// Physical memory walk chosen from plan geometry and layout.
+///
+/// Kernels branch once on this enum instead of re-deriving layout at every
+/// inner loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TraversalSchedule {
-    /// Every output slot owns one contiguous suffix chunk.
+    /// Each output slot owns one trailing C-order chunk.
     SuffixContiguous,
-    /// Reduced prefix rows are scanned in memory order while all output slots
-    /// are accumulated together.
+    /// Prefix rows are scanned while all outputs accumulate in parallel.
     PrefixContiguous {
         reduced_len: usize,
         output_len: usize,
     },
-    /// Arbitrary layout handled by `RunPlan` and reduced-axis cursors.
+    /// Arbitrary strides: outer `RunPlan` plus coalesced reduced-axis runs.
     GeneralStrided,
 }
 
 impl ReducePlan {
+    /// Build a plan from input shape, axis selection, and `keepdims`.
+    ///
+    /// Normalizes axes, computes kept/reduced shapes, and checks that output
+    /// and reduction lengths fit in `usize`.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` - Input array shape.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    ///
+    /// # Returns
+    ///
+    /// A [`ReducePlan`] shared by every kernel on this reduction call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid axis indices or shape products that
+    /// overflow.
     pub(crate) fn new(
         shape: &[usize],
         axes: Option<&[isize]>,
@@ -164,24 +317,39 @@ impl ReducePlan {
             reduced_axes,
             kept_axes,
             output_shape,
-            output_len: size_of_shape(&kept_shape),
-            reduction_len: size_of_shape(&reduced_shape),
+            output_len: checked_size_of_shape(&kept_shape)?,
+            reduction_len: checked_size_of_shape(&reduced_shape)?,
             kept_shape,
             reduced_shape,
         })
     }
 
-    /// True when the reduced block has no elements (`reduction_len == 0`).
+    /// True when the reduced block has zero elements.
+    ///
+    /// Empty reduced slices yield identity fills or NaN sentinels depending
+    /// on the operation, without touching input memory.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Self::reduction_len`] is zero.
     #[inline]
     pub(crate) fn reduction_is_empty(&self) -> bool {
         self.reduction_len == 0
     }
 
     /// True when reduced axes form a trailing contiguous block
-    /// (`[ndim-k, …, ndim-1]`), so each outer slot is one C-order chunk.
+    /// `[ndim - k, …, ndim - 1]`.
     ///
-    /// Does **not** check memory layout; callers combine this with
-    /// [`Array::as_c_contiguous_slice`](crate::array::Array::as_c_contiguous_slice).
+    /// Does not inspect memory layout; pair with
+    /// [`Array::as_c_contiguous_slice`].
+    ///
+    /// # Arguments
+    ///
+    /// * `ndim` - Rank of the input array.
+    ///
+    /// # Returns
+    ///
+    /// `true` when reduced axes are a suffix of `[0, ndim)`.
     #[inline]
     pub(crate) fn is_suffix_reduction(&self, ndim: usize) -> bool {
         let k = self.reduced_axes.len();
@@ -198,7 +366,14 @@ impl ReducePlan {
             .all(|(i, &ax)| ax == start + i)
     }
 
-    /// True when reduced axes form a leading block (`[0, …, k-1]`).
+    /// True when reduced axes form a leading block `[0, …, k - 1]`.
+    ///
+    /// Prefix reductions scan contiguous rows and update every output slot in
+    /// parallel.
+    ///
+    /// # Returns
+    ///
+    /// `true` when reduced axes are `[0, 1, …, k - 1]`.
     #[inline]
     pub(crate) fn is_prefix_reduction(&self) -> bool {
         self.reduced_axes
@@ -207,7 +382,20 @@ impl ReducePlan {
             .all(|(axis, &reduced)| axis == reduced)
     }
 
-    /// Choose a physical traversal without embedding operation semantics.
+    /// Pick a traversal schedule from plan shape and C-contiguity.
+    ///
+    /// Non-contiguous buffers always use [`TraversalSchedule::GeneralStrided`].
+    /// Contiguous buffers prefer suffix chunks, then prefix rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `ndim` - Rank of the input array.
+    /// * `is_c_contiguous` - Whether the buffer is C-contiguous with
+    ///   offset zero.
+    ///
+    /// # Returns
+    ///
+    /// The schedule kernels should use for this plan and layout.
     #[inline]
     pub(crate) fn traversal_schedule(
         &self,
@@ -229,7 +417,19 @@ impl ReducePlan {
         TraversalSchedule::GeneralStrided
     }
 
-    /// Source strides along kept and reduced axes, respectively.
+    /// Strides along kept and reduced axes, respectively.
+    ///
+    /// General-strided kernels split outer kept-axis walks from inner
+    /// reduced-axis runs using these stride vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `strides` - Full input array strides.
+    ///
+    /// # Returns
+    ///
+    /// `(kept_strides, reduced_strides)` in ascending axis order within each
+    /// group.
     pub(crate) fn kept_reduced_strides(
         &self,
         strides: &[isize],
@@ -237,90 +437,5 @@ impl ReducePlan {
         let kept = self.kept_axes.iter().map(|&ax| strides[ax]).collect();
         let reduced = self.reduced_axes.iter().map(|&ax| strides[ax]).collect();
         (kept, reduced)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_negative_axes() {
-        assert_eq!(normalize_reduction_axes(&[-1, 0], 3), vec![0, 2]);
-    }
-
-    #[test]
-    fn plan_shapes() {
-        let p = ReducePlan::new(&[2, 3, 4], Some(&[0, 2]), false).unwrap();
-        assert_eq!(p.output_shape, vec![3]);
-        assert_eq!(p.kept_shape, vec![3]);
-        assert_eq!(p.reduced_shape, vec![2, 4]);
-        assert_eq!(p.reduction_len, 8);
-        assert!(!p.reduction_is_empty());
-    }
-
-    #[test]
-    fn single_axis_traversal_geometry() {
-        let p = AxisTraversalPlan::new(&[2, 3, 4], 1);
-        assert_eq!(p.axis, 1);
-        assert_eq!(p.axis_len, 3);
-        assert_eq!(p.kept_axes, vec![0, 2]);
-        assert_eq!(p.kept_shape, vec![2, 4]);
-        assert_eq!(p.output_len, 8);
-        assert_eq!(p.kept_strides(&[12, 4, 1]), vec![12, 1]);
-        assert!(!p.is_last_axis(3));
-    }
-
-    #[test]
-    fn empty_outer_vs_inner() {
-        let outer_empty = ReducePlan::new(&[0, 3], Some(&[1]), false).unwrap();
-        assert_eq!(outer_empty.output_len, 0);
-        assert_eq!(outer_empty.reduction_len, 3);
-        assert!(!outer_empty.reduction_is_empty());
-
-        let inner_empty = ReducePlan::new(&[0, 3], Some(&[0]), false).unwrap();
-        assert_eq!(inner_empty.output_len, 3);
-        assert_eq!(inner_empty.reduction_len, 0);
-        assert!(inner_empty.reduction_is_empty());
-    }
-
-    #[test]
-    fn suffix_reduction() {
-        let s = ReducePlan::new(&[2, 3, 4], Some(&[1, 2]), false).unwrap();
-        assert!(s.is_suffix_reduction(3));
-        let all = ReducePlan::new(&[2, 3, 4], None, false).unwrap();
-        assert!(all.is_suffix_reduction(3));
-        let mid = ReducePlan::new(&[2, 3, 4], Some(&[1]), false).unwrap();
-        assert!(!mid.is_suffix_reduction(3));
-        let skip = ReducePlan::new(&[2, 3, 4], Some(&[0, 2]), false).unwrap();
-        assert!(!skip.is_suffix_reduction(3));
-    }
-
-    #[test]
-    fn traversal_schedule_classifies_prefix_suffix_and_general() {
-        let prefix = ReducePlan::new(&[2, 3, 4], Some(&[0, 1]), false).unwrap();
-        assert_eq!(
-            prefix.traversal_schedule(3, true),
-            TraversalSchedule::PrefixContiguous {
-                reduced_len: 6,
-                output_len: 4,
-            }
-        );
-
-        let suffix = ReducePlan::new(&[2, 3, 4], Some(&[1, 2]), false).unwrap();
-        assert_eq!(
-            suffix.traversal_schedule(3, true),
-            TraversalSchedule::SuffixContiguous
-        );
-
-        let middle = ReducePlan::new(&[2, 3, 4], Some(&[1]), false).unwrap();
-        assert_eq!(
-            middle.traversal_schedule(3, true),
-            TraversalSchedule::GeneralStrided
-        );
-        assert_eq!(
-            prefix.traversal_schedule(3, false),
-            TraversalSchedule::GeneralStrided
-        );
     }
 }

@@ -1,4 +1,10 @@
-//! Contiguous and strided contraction kernels.
+//! Execution kernels for matrix contraction and diagonal operations.
+//!
+//! `contract` walks batch axes with `RunPlan`, then multiplies matrix tiles.
+//! When the right operand has a unit column stride, an IKJ loop keeps the
+//! output row and right row in registers. Otherwise a general path handles
+//! arbitrary strides, with an inner fast path when both contraction axes are
+//! contiguous.
 
 use crate::array::Array;
 use crate::dtype::{CastTo, Scalar};
@@ -6,10 +12,28 @@ use crate::error::Result;
 use crate::linalg::geometry::{DiagonalPlan, MatmulPlan};
 use crate::linalg::traits::ContractElement;
 use crate::reduction::SumReduce;
-use crate::shape::checked_size_of_shape;
+use crate::shape::{checked_allocation_len, checked_size_of_shape};
 use crate::traversal::RunPlan;
 
-/// Execute a prepared contraction into a C-order output.
+/// Fill a C-order output buffer from a prepared [`MatmulPlan`].
+///
+/// Iterates every batch tile via [`RunPlan`], then contracts one `(M, N)`
+/// matrix per tile into the output vector. Output dtype is the promoted
+/// [`ContractElement`] type.
+///
+/// # Arguments
+///
+/// * `left` — left contraction operand
+/// * `right` — right contraction operand
+/// * `plan` — geometry from [`MatmulPlan::new`]
+///
+/// # Returns
+///
+/// New C-order array with shape [`MatmulPlan::output_shape`].
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — output size or allocation exceeds limits
 pub(crate) fn contract<L, R, Out>(
     left: &Array<L>,
     right: &Array<R>,
@@ -22,6 +46,7 @@ where
 {
     let output_shape = plan.output_shape();
     let output_len = checked_size_of_shape(&output_shape)?;
+    checked_allocation_len::<Out>(output_len)?;
     let mut output = Vec::with_capacity(output_len);
     let batch_plan = RunPlan::<2>::new(
         &plan.batch_shape,
@@ -42,10 +67,21 @@ where
         },
     );
 
-    debug_assert_eq!(output.len(), output_len);
     Array::from_vec(output, &output_shape)
 }
 
+/// Contract one `(M, N)` output tile into `output`.
+///
+/// Appends `plan.matrix_len` elements and fills them in place. Selects an
+/// IKJ path when `right_column_stride == 1`, a vectorized inner dot when
+/// both contraction strides are unit, or a fully general scalar loop.
+///
+/// # Arguments
+///
+/// * `left`, `right` — operand buffers
+/// * `plan` — matrix face geometry for this batch element
+/// * `left_base`, `right_base` — buffer offsets for the current batch tile
+/// * `output` — growing output vector receiving the tile
 fn contract_matrix<L, R, Out>(
     left: &Array<L>,
     right: &Array<R>,
@@ -58,11 +94,10 @@ fn contract_matrix<L, R, Out>(
     R: Scalar + CastTo<Out>,
     Out: ContractElement,
 {
-    let matrix_len = plan.rows * plan.columns;
     let output_start = output.len();
-    output.resize(output_start + matrix_len, Out::zero());
+    output.resize(output_start + plan.matrix_len, Out::zero());
 
-    // IKJ keeps a unit-stride right row and the output row hot.
+    // IKJ: one left scalar broadcasts across a contiguous right row.
     if plan.right_column_stride == 1 {
         for row in 0..plan.rows {
             let left_row =
@@ -109,13 +144,14 @@ fn contract_matrix<L, R, Out>(
         return;
     }
 
-    // General strided path computes one output element at a time.
+    // General layout: one output element per (row, column) tile.
     for row in 0..plan.rows {
         let left_row = left_base as isize + row as isize * plan.left_row_stride;
         for column in 0..plan.columns {
             let right_column = right_base as isize
                 + column as isize * plan.right_column_stride;
 
+            // Both contraction axes contiguous: vectorized inner dot.
             if plan.left_contraction_stride == 1
                 && plan.right_contraction_stride == 1
             {
@@ -160,6 +196,7 @@ fn contract_matrix<L, R, Out>(
                 continue;
             }
 
+            // Fully strided inner product: scalar loop over K.
             let mut accumulator = Out::zero();
             for inner in 0..plan.contraction_len {
                 let left_position =
@@ -177,7 +214,25 @@ fn contract_matrix<L, R, Out>(
     }
 }
 
-/// Flatten both operands logically and compute a conjugating vector product.
+/// C-order flatten of both operands, optionally conjugating the left side.
+///
+/// Materializes both vectors to C-order, then reduces with chunked
+/// multiply-add. Used for `dot` / `vdot` after rank classification.
+///
+/// # Arguments
+///
+/// * `left` — left vector operand
+/// * `right` — right vector operand (same logical length as `left`)
+/// * `conjugate_left` — apply [`ContractElement::conjugate`] to left values
+///
+/// # Returns
+///
+/// 0-D array holding the scalar inner product.
+///
+/// # Errors
+///
+/// Never fails for valid same-length vectors (no allocation size check beyond
+/// the scalar result).
 pub(crate) fn vector_dot<L, R, Out>(
     left: &Array<L>,
     right: &Array<R>,
@@ -228,42 +283,87 @@ where
     Array::from_vec(vec![accumulator], &[])
 }
 
-/// Gather an N-dimensional diagonal into a C-order copy.
+/// Copy diagonal elements into a new C-order array.
+///
+/// Walks outer axes with [`RunPlan`], then reads `geometry.len` elements along
+/// [`DiagonalPlan::diagonal_stride`] starting at
+/// [`DiagonalPlan::diagonal_start_offset`].
+///
+/// # Arguments
+///
+/// * `array` — source array
+/// * `plan` — geometry from [`DiagonalPlan::new`]
+///
+/// # Returns
+///
+/// C-order array with shape [`DiagonalPlan::diagonal_output_shape`].
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — output allocation exceeds limits
 pub(crate) fn gather_diagonal<T: Scalar>(
     array: &Array<T>,
     plan: &DiagonalPlan,
 ) -> Result<Array<T>> {
     let output_shape = plan.diagonal_output_shape();
     let output_len = checked_size_of_shape(&output_shape)?;
+    checked_allocation_len::<T>(output_len)?;
     let mut output = Vec::with_capacity(output_len);
     let outer_plan =
         RunPlan::<1>::new(&plan.outer_shape, [&plan.outer_strides]);
     outer_plan.for_each_element([array.offset() as isize], |[outer_base]| {
         let mut position = outer_base as isize + plan.diagonal_start_offset;
-        for _ in 0..plan.geometry.len {
-            output.push(array.data[position as usize]);
+        if plan.geometry.len == 0 {
+            return;
+        }
+        output.push(array.data[position as usize]);
+        // Step along the diagonal: sum of row and column strides.
+        for _ in 1..plan.geometry.len {
             position += plan.diagonal_stride;
+            output.push(array.data[position as usize]);
         }
     });
     Array::from_vec(output, &output_shape)
 }
 
-/// Sum each N-dimensional diagonal into the shape of the remaining axes.
+/// Reduce each diagonal with the element type's sum fold.
+///
+/// Like [`gather_diagonal`], but accumulates with [`SumReduce::accumulate`]
+/// instead of copying each element. Output rank equals `plan.outer_shape`.
+///
+/// # Arguments
+///
+/// * `array` — source array
+/// * `plan` — geometry from [`DiagonalPlan::new`]
+///
+/// # Returns
+///
+/// C-order array with shape `plan.outer_shape` and accumulator dtype
+/// `T::Acc`.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — output allocation exceeds limits
 pub(crate) fn trace_diagonal<T: SumReduce>(
     array: &Array<T>,
     plan: &DiagonalPlan,
 ) -> Result<Array<T::Acc>> {
     let output_len = checked_size_of_shape(&plan.outer_shape)?;
+    checked_allocation_len::<T::Acc>(output_len)?;
     let mut output = Vec::with_capacity(output_len);
     let outer_plan =
         RunPlan::<1>::new(&plan.outer_shape, [&plan.outer_strides]);
     outer_plan.for_each_element([array.offset() as isize], |[outer_base]| {
         let mut accumulator = T::identity();
         let mut position = outer_base as isize + plan.diagonal_start_offset;
-        for _ in 0..plan.geometry.len {
+        if plan.geometry.len > 0 {
             accumulator =
                 T::accumulate(accumulator, array.data[position as usize]);
-            position += plan.diagonal_stride;
+            for _ in 1..plan.geometry.len {
+                position += plan.diagonal_stride;
+                accumulator =
+                    T::accumulate(accumulator, array.data[position as usize]);
+            }
         }
         output.push(accumulator);
     });

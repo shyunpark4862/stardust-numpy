@@ -1,5 +1,30 @@
+//! Population variance kernels and post-reduction transforms.
+//!
+//! Variance uses a two-pass algorithm: mean then sum of squared deviations.
+//! Suffix and prefix contiguous paths vectorize with eight-lane partials.
+//! NaN-ignore `f64` reuses the same layout split as other reductions.
+
 use super::*;
 
+/// Population variance (`ddof = 0`) for any type cast via `to_f64`.
+///
+/// All outputs are `f64`. NaN in floating input propagates through the
+/// two-pass algorithm when `to_f64` maps them to NaN.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+/// * `to_f64` - Cast each element to `f64` for mean/variance math.
+///
+/// # Returns
+///
+/// An `f64` array of population variances shaped like the reduction output.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid or allocation fails.
 pub(crate) fn reduce_var<T, C>(
     a: &Array<T>,
     axes: Option<&[isize]>,
@@ -11,6 +36,7 @@ where
     C: Fn(T) -> f64,
 {
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
+    checked_allocation_len::<f64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
@@ -32,12 +58,31 @@ where
     }
 }
 
+/// Population variance for `f64` with NaN-skipping semantics.
+///
+/// Pass 1 counts and sums finite elements per slot; pass 2 accumulates
+/// squared deviations from that mean. All-NaN slices yield NaN.
+///
+/// # Arguments
+///
+/// * `a` - `f64` input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An `f64` array of population variances over finite elements only.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid or allocation fails.
 pub(crate) fn reduce_var_ignore_f64(
     a: &Array<f64>,
     axes: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<Array<f64>> {
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
+    checked_allocation_len::<f64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
@@ -51,6 +96,7 @@ pub(crate) fn reduce_var_ignore_f64(
         ReductionPath::SuffixContiguous(slice) => {
             let mut out = Vec::with_capacity(plan.output_len);
             for chunk in slice.chunks_exact(plan.reduction_len) {
+                // Pass 1: mean over finite elements only.
                 let mut sums = [0.0; 8];
                 let mut counts = [0_usize; 8];
                 let mut blocks = chunk.chunks_exact(8);
@@ -76,6 +122,7 @@ pub(crate) fn reduce_var_ignore_f64(
                     continue;
                 }
                 let mean = sum / count as f64;
+                // Pass 2: sum of squared deviations from that mean.
                 let mut deviations = [0.0; 8];
                 let mut blocks = chunk.chunks_exact(8);
                 for block in &mut blocks {
@@ -148,6 +195,23 @@ pub(crate) fn reduce_var_ignore_f64(
     }
 }
 
+/// General-strided NaN-ignore population variance for `f64`.
+///
+/// Two-pass mean and squared-deviation accumulation per output slot using
+/// [`ReducedAxisRuns`].
+///
+/// # Arguments
+///
+/// * `a` - Strided `f64` input array.
+/// * `plan` - Reduction geometry.
+///
+/// # Returns
+///
+/// Population variances shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn var_ignore_strided_general(
     a: &Array<f64>,
     plan: &ReducePlan,
@@ -202,6 +266,18 @@ fn var_ignore_strided_general(
     Array::from_vec(out, &plan.output_shape)
 }
 
+/// Tree-reduce eight partial `f64` sums for better FP associativity.
+///
+/// Pairs partial lanes before combining quartets, reducing rounding drift
+/// versus a strict left-to-right accumulation.
+///
+/// # Arguments
+///
+/// * `partials` - Eight lane partial sums.
+///
+/// # Returns
+///
+/// Combined sum of all eight partials.
 #[inline]
 fn merge_eight_f64(partials: [f64; 8]) -> f64 {
     let pair_0 = partials[0] + partials[1];
@@ -211,6 +287,18 @@ fn merge_eight_f64(partials: [f64; 8]) -> f64 {
     (pair_0 + pair_1) + (pair_2 + pair_3)
 }
 
+/// Sum one contiguous chunk after casting via `to_f64`.
+///
+/// Uses eight-lane partial accumulation for contiguous suffix chunks.
+///
+/// # Arguments
+///
+/// * `chunk` - Contiguous reduced slice for one output slot.
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Sum of converted chunk elements.
 #[inline]
 fn converted_sum_chunk<T, C>(chunk: &[T], to_f64: &C) -> f64
 where
@@ -231,6 +319,17 @@ where
     sum
 }
 
+/// Sum squared deviations of one chunk from a fixed mean.
+///
+/// # Arguments
+///
+/// * `chunk` - Contiguous reduced slice for one output slot.
+/// * `mean` - Precomputed mean for this slot.
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Sum of `(x - mean)²` over the chunk.
 #[inline]
 fn squared_deviation_sum_chunk<T, C>(chunk: &[T], mean: f64, to_f64: &C) -> f64
 where
@@ -253,6 +352,19 @@ where
     sum
 }
 
+/// Population variance of one contiguous reduced chunk.
+///
+/// Two-pass within the chunk: mean, then scaled sum of squared deviations.
+///
+/// # Arguments
+///
+/// * `chunk` - Contiguous reduced slice for one output slot.
+/// * `count` - Number of elements in the chunk (as `f64`).
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Population variance (`ddof = 0`) for the chunk.
 #[inline]
 fn variance_chunk<T, C>(chunk: &[T], count: f64, to_f64: &C) -> f64
 where
@@ -263,6 +375,23 @@ where
     squared_deviation_sum_chunk(chunk, mean, to_f64) / count
 }
 
+/// Suffix-contiguous population variance.
+///
+/// Each trailing chunk maps to one output slot.
+///
+/// # Arguments
+///
+/// * `slice` - C-contiguous input elements.
+/// * `plan` - Reduction geometry with suffix reduced axes.
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Variances shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn var_contiguous_chunks<T, C>(
     slice: &[T],
     plan: &ReducePlan,
@@ -280,6 +409,24 @@ where
     Array::from_vec(out, &plan.output_shape)
 }
 
+/// Prefix-contiguous population variance.
+///
+/// Pass 1 scans rows to compute per-column means; pass 2 accumulates
+/// squared deviations down rows.
+///
+/// # Arguments
+///
+/// * `slice` - C-contiguous input elements.
+/// * `plan` - Reduction geometry with prefix reduced axes.
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Variances shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn var_prefix_contiguous<T, C>(
     slice: &[T],
     plan: &ReducePlan,
@@ -314,6 +461,24 @@ where
     Array::from_vec(variances, &plan.output_shape)
 }
 
+/// General-strided population variance with `to_f64` casting.
+///
+/// Two-pass algorithm per output slot using outer runs and reduced-axis
+/// inner walks.
+///
+/// # Arguments
+///
+/// * `a` - Strided input array.
+/// * `plan` - Reduction geometry.
+/// * `to_f64` - Element cast to `f64`.
+///
+/// # Returns
+///
+/// Variances shaped like `plan.output_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn var_strided_general<T, C>(
     a: &Array<T>,
     plan: &ReducePlan,
@@ -367,9 +532,19 @@ where
     Array::from_vec(out, &plan.output_shape)
 }
 
-/// Map every logical element of an **owned, C-contiguous, offset-0** array.
+/// In-place map over an owned C-contiguous, offset-zero array.
 ///
-/// Intended only for freshly allocated reduction results (mean / std).
+/// Used for `std` after variance allocation. Mutates buffer elements without
+/// changing shape or strides.
+///
+/// # Arguments
+///
+/// * `a` - Owned array to transform in place.
+/// * `f` - Unary map applied to each element.
+///
+/// # Returns
+///
+/// The same `Array` with updated data (e.g. square-rooted variances).
 pub(crate) fn transform_owned_c_order<T, F>(
     mut a: Array<T>,
     mut f: F,
@@ -378,25 +553,6 @@ where
     T: Scalar,
     F: FnMut(T) -> T,
 {
-    debug_assert_eq!(
-        a.offset(),
-        0,
-        "transform_owned_c_order requires offset 0"
-    );
-    debug_assert!(
-        a.is_c_contiguous(),
-        "transform_owned_c_order requires C-contiguous layout"
-    );
-    debug_assert!(
-        a.is_writable(),
-        "transform_owned_c_order requires a writable array"
-    );
-    debug_assert_eq!(
-        a.size(),
-        a.data.len(),
-        "transform_owned_c_order requires the buffer to match the logical size"
-    );
-
     let data = Arc::make_mut(&mut a.data);
     for x in data.iter_mut() {
         *x = f(*x);

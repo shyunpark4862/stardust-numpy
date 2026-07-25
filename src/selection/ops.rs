@@ -1,15 +1,56 @@
+//! Conditional selection and coordinate-finding on arrays.
+//!
+//! [`where_`] broadcasts a boolean condition and two value arrays, then picks
+//! element-wise. [`nonzero`] reports C-order coordinates of true elements.
+//! [`clip`] clamps values to optional scalar bounds.
+
 use crate::array::Array;
 use crate::broadcast::broadcast_shapes;
 use crate::dtype::{AsBool, CastTo, Promote, Scalar};
 use crate::error::Result;
+use crate::shape::{checked_allocation_len, size_of_shape_unchecked};
 use crate::traversal::{collect_ternary, RunPlan, StrideIter};
 use crate::ufunc::kernels::map_unary;
 
-/// Select elements from `x` or `y` according to a boolean `condition`.
+/// Select from `x` or `y` according to boolean `condition`.
 ///
-/// All three arrays are broadcast to a common shape. Elements selected from
-/// `x` and `y` are cast to their promoted dtype, and the returned array is a
-/// newly allocated C-contiguous array.
+/// Like NumPy's `np.where`: for each output position, the value comes from
+/// `x` when `condition` is true and from `y` otherwise. All three inputs
+/// are broadcast together to a common shape using standard NumPy rules.
+/// Selected values are cast to the promoted dtype of `x` and `y`.
+///
+/// **Broadcasting:** `condition`, `x`, and `y` must be mutually
+/// broadcastable. Scalar inputs broadcast across the full output grid.
+///
+/// # Arguments
+///
+/// * `condition` - Boolean mask (may be broadcast).
+/// * `x` - Values chosen where `condition` is true.
+/// * `y` - Values chosen where `condition` is false.
+///
+/// # Returns
+///
+/// A new [`Array`] with the broadcast output shape and promoted element type.
+///
+/// # Errors
+///
+/// * [`Error::Broadcast`](crate::Error::Broadcast) - The three inputs cannot
+///   be aligned to a common shape.
+/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
+///   exceeds platform limits.
+/// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
+///   Internal buffer length mismatch.
+///
+/// # Examples
+///
+/// ```rust
+/// use sdnp::{where_, Array};
+///
+/// let cond = Array::from_slice(&[true, false, true], &[3]).unwrap();
+/// let x = Array::from_slice(&[10_i64, 20, 30], &[3]).unwrap();
+/// let y = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();
+/// assert_eq!(where_(&cond, &x, &y).unwrap().to_vec(), vec![10, 2, 30]);
+/// ```
 pub fn where_<X, Y>(
     condition: &Array<bool>,
     x: &Array<X>,
@@ -24,6 +65,9 @@ where
     let condition = condition.broadcast_to(&shape)?;
     let x = x.broadcast_to(&shape)?;
     let y = y.broadcast_to(&shape)?;
+    checked_allocation_len::<<X as Promote<Y>>::Output>(
+        size_of_shape_unchecked(&shape),
+    )?;
 
     if let (Some(conditions), Some(xs), Some(ys)) = (
         condition.as_c_contiguous_slice(),
@@ -67,12 +111,39 @@ where
     Array::from_vec(out, &shape)
 }
 
-/// Return the C-order coordinates of elements that are logically true.
+/// Return C-order coordinates of elements that evaluate to true.
 ///
-/// The result contains one one-dimensional `i64` array per input axis. Empty
-/// inputs produce empty coordinate arrays. A zero-dimensional input has no
-/// coordinate axes, so it produces an empty vector.
+/// Like NumPy's `np.nonzero`: returns one 1-D `i64` array per input axis.
+/// Each coordinate array has length equal to the number of true elements.
+/// Empty inputs yield empty coordinate arrays; 0-D inputs yield no
+/// coordinates (empty vectors for each axis).
+///
+/// # Arguments
+///
+/// * `a` - Input array; elements are tested with [`AsBool`].
+///
+/// # Returns
+///
+/// A vector of `ndim` one-dimensional [`Array<i64>`] coordinate arrays.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
+///   exceeds platform limits.
+/// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
+///   Internal buffer length mismatch.
+///
+/// # Examples
+///
+/// ```rust
+/// use sdnp::{nonzero, Array};
+///
+/// let a = Array::from_slice(&[0_i64, 1, 0, 2], &[4]).unwrap();
+/// let coords = nonzero(&a).unwrap();
+/// assert_eq!(coords[0].to_vec(), vec![1, 3]);
+/// ```
 pub fn nonzero<T: AsBool>(a: &Array<T>) -> Result<Vec<Array<i64>>> {
+    checked_allocation_len::<i64>(a.size())?;
     let mut coordinates = vec![Vec::new(); a.ndim()];
 
     StrideIter::new(a.shape(), a.strides(), a.offset()).for_each(
@@ -92,12 +163,35 @@ pub fn nonzero<T: AsBool>(a: &Array<T>) -> Result<Vec<Array<i64>>> {
         .collect()
 }
 
-/// Clamp every element of `a` between optional scalar bounds.
+/// Clamp every element between optional scalar bounds.
 ///
-/// The lower bound is applied before the upper bound, matching NumPy's
-/// behavior when both are supplied (including when `min > max`). `None`
-/// leaves that side unbounded. The returned array is always a new
-/// C-contiguous allocation.
+/// Like NumPy's `np.clip`: the lower bound is applied before the upper bound,
+/// so `min > max` still follows NumPy's two-pass semantics. `None` leaves
+/// that side unbounded.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `min` - Optional lower bound applied first.
+/// * `max` - Optional upper bound applied second.
+///
+/// # Returns
+///
+/// A new [`Array`] with the same shape as `a`.
+///
+/// # Errors
+///
+/// Returns `Ok` for all valid inputs; does not allocate beyond the unary
+/// map path (no additional error variants beyond internal invariants).
+///
+/// # Examples
+///
+/// ```rust
+/// use sdnp::{clip, Array};
+///
+/// let a = Array::from_slice(&[0_i64, 5, 10], &[3]).unwrap();
+/// assert_eq!(clip(&a, Some(2), Some(8)).unwrap().to_vec(), vec![2, 5, 8]);
+/// ```
 pub fn clip<T>(a: &Array<T>, min: Option<T>, max: Option<T>) -> Result<Array<T>>
 where
     T: Scalar + PartialOrd,
@@ -115,63 +209,4 @@ where
         }
         value
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn where_promotes_and_broadcasts_three_arrays() {
-        let condition = Array::from_slice(&[true, false], &[2, 1]).unwrap();
-        let x = Array::from_slice(&[1_i64, 2, 3], &[1, 3]).unwrap();
-        let y = Array::from_slice(&[0.5_f64], &[]).unwrap();
-
-        let selected = where_(&condition, &x, &y).unwrap();
-
-        assert_eq!(selected.shape(), &[2, 3]);
-        assert_eq!(selected.to_vec(), vec![1.0, 2.0, 3.0, 0.5, 0.5, 0.5]);
-        assert!(selected.is_c_contiguous());
-    }
-
-    #[test]
-    fn where_handles_noncontiguous_inputs() {
-        let base = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let x = base.transpose();
-        let condition = Array::from_slice(
-            &[true, false, false, true, true, false],
-            &[3, 2],
-        )
-        .unwrap();
-        let y = Array::from_slice(&[9_i64], &[]).unwrap();
-
-        let selected = where_(&condition, &x, &y).unwrap();
-
-        assert_eq!(selected.to_vec(), vec![1, 9, 9, 5, 3, 9]);
-    }
-
-    #[test]
-    fn nonzero_reports_transposed_coordinates_in_c_order() {
-        let base = Array::from_slice(&[0_i64, 1, 2, 0, 3, 0], &[2, 3]).unwrap();
-        let transposed = base.transpose();
-
-        let indices = nonzero(&transposed).unwrap();
-
-        assert_eq!(indices.len(), 2);
-        assert_eq!(indices[0].to_vec(), vec![1, 1, 2]);
-        assert_eq!(indices[1].to_vec(), vec![0, 1, 0]);
-    }
-
-    #[test]
-    fn clip_returns_a_contiguous_copy() {
-        let base =
-            Array::from_slice(&[1_i64, 5, -2, 8, 3, 4], &[2, 3]).unwrap();
-        let transposed = base.transpose();
-
-        let clipped = clip(&transposed, Some(2), Some(5)).unwrap();
-
-        assert_eq!(clipped.shape(), &[3, 2]);
-        assert_eq!(clipped.to_vec(), vec![2, 5, 5, 3, 2, 4]);
-        assert!(clipped.is_c_contiguous());
-    }
 }

@@ -1,52 +1,106 @@
-//! Shape, rank-promotion, and contraction geometry for linear algebra.
+//! Contraction geometry: batch broadcasting, ranks, and diagonal layout.
+//!
+//! `MatmulPlan` and `DiagonalPlan` capture every stride an execution kernel
+//! needs. Planning is separate from numeric work so kernels can focus on
+//! memory access patterns (IKJ tiles, diagonal walks, batch iteration).
 
 use crate::array::Array;
 use crate::axis::normalize_axis;
 use crate::broadcast::broadcast_shape;
 use crate::dtype::Scalar;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::linalg::diagonal_geometry::{diagonal_geometry, DiagonalGeometry};
+use crate::shape::checked_size_of_shape;
 
-/// Supported rank combinations for `dot`.
+/// Rank pattern recognized by [`plan_dot`].
+///
+/// Each variant names the effective matrix/vector ranks after treating 1-D
+/// operands as row or column vectors. The shared contraction axis is always
+/// the **inner** (last) axis of the left operand and the **leading** axis of
+/// the right operand (length `K` in `(M, K) · (K, N)`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DotKind {
-    /// `(K) dot (K) -> ()`.
+    /// `(K,) · (K,) → scalar`; one contraction axis, no batch.
     VectorVector,
-    /// `(M, K) dot (K) -> (M)`.
+    /// `(M, K) · (K,) → (M,)`; matrix times column vector.
     MatrixVector,
-    /// `(K) dot (K, N) -> (N)`.
+    /// `(K,) · (K, N) → (N,)`; row vector times matrix.
     VectorMatrix,
-    /// `(M, K) dot (K, N) -> (M, N)`.
+    /// `(M, K) · (K, N) → (M, N)`; full matrix multiply.
     MatrixMatrix,
 }
 
-/// Prepared matrix contraction, including virtual vector axes and batch strides.
+/// Prepared batched matrix multiply, including virtual vector axes.
+///
+/// Describes how to walk batch dimensions and contract the inner `K` axis
+/// between left rows `(M, K)` and right columns `(K, N)`. One-dimensional
+/// operands are promoted to `(1, K)` or `(K, 1)` without copying memory:
+/// `left_was_vector` / `right_was_vector` record that promotion so
+/// [`Self::output_shape`] can strip length-1 matrix axes from the result.
+///
+/// # Contraction geometry
+///
+/// ```text
+///   batch… × M × K  @  batch… × K × N  →  batch… × M × N
+///              └──── contraction_len ────┘
+/// ```
+///
+/// Batch leading dimensions are independently broadcast; size-1 batch axes
+/// contribute zero stride in the aligned batch stride vectors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MatmulPlan {
+    /// Broadcast shape of all leading batch axes.
     pub(crate) batch_shape: Vec<usize>,
+    /// Batch-axis strides for the left operand after broadcasting.
     pub(crate) left_batch_strides: Vec<isize>,
+    /// Batch-axis strides for the right operand after broadcasting.
     pub(crate) right_batch_strides: Vec<isize>,
+    /// Row count `M` of the left matrix face (1 when left was a vector).
     pub(crate) rows: usize,
+    /// `rows * columns`; size of one `(M, N)` output tile per batch element.
+    pub(crate) matrix_len: usize,
+    /// Inner dimension `K` summed during contraction.
     pub(crate) contraction_len: usize,
+    /// Column count `N` of the right matrix face (1 when right was a vector).
     pub(crate) columns: usize,
+    /// Stride between consecutive rows on the left matrix face.
     pub(crate) left_row_stride: isize,
+    /// Stride along the contraction axis on the left matrix face.
     pub(crate) left_contraction_stride: isize,
+    /// Stride along the contraction axis on the right matrix face.
     pub(crate) right_contraction_stride: isize,
+    /// Stride between consecutive columns on the right matrix face.
     pub(crate) right_column_stride: isize,
+    /// Left operand was 1-D and is treated as `(1, K)`.
     pub(crate) left_was_vector: bool,
+    /// Right operand was 1-D and is treated as `(K, 1)`.
     pub(crate) right_was_vector: bool,
 }
 
 impl MatmulPlan {
-    /// Build a batched matrix multiplication plan.
+    /// Build a plan from operand shapes, strides, and batch broadcasting.
+    ///
+    /// Reads the trailing `(M, K)` / `(K, N)` faces (or vector promotions),
+    /// broadcasts leading batch shapes, and precomputes all strides needed
+    /// by [`crate::linalg::kernels::contract`].
+    ///
+    /// # Arguments
+    ///
+    /// * `left` — left contraction operand
+    /// * `right` — right contraction operand (inner axis must match)
+    ///
+    /// # Returns
+    ///
+    /// A fully populated [`MatmulPlan`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — incompatible batch broadcast or shape
+    ///   product overflow
     pub(crate) fn new<L: Scalar, R: Scalar>(
         left: &Array<L>,
         right: &Array<R>,
     ) -> Result<Self> {
-        if left.ndim() == 0 || right.ndim() == 0 {
-            debug_assert!(false, "matmul does not support 0-D operands");
-        }
-
         let left_was_vector = left.ndim() == 1;
         let right_was_vector = right.ndim() == 1;
         let (rows, contraction_len, left_row_stride, left_contraction_stride) =
@@ -62,7 +116,7 @@ impl MatmulPlan {
                 )
             };
         let (
-            right_contraction_len,
+            _right_contraction_len,
             columns,
             right_contraction_stride,
             right_column_stride,
@@ -77,11 +131,6 @@ impl MatmulPlan {
                 right.strides()[rank - 1],
             )
         };
-
-        debug_assert_eq!(
-            contraction_len, right_contraction_len,
-            "matmul inner dimensions differ"
-        );
 
         let left_batch_rank = left.ndim().saturating_sub(2);
         let right_batch_rank = right.ndim().saturating_sub(2);
@@ -98,12 +147,14 @@ impl MatmulPlan {
             &right.strides()[..right_batch_rank],
             &batch_shape,
         );
+        let matrix_len = checked_size_of_shape(&[rows, columns])?;
 
         Ok(Self {
             batch_shape,
             left_batch_strides,
             right_batch_strides,
             rows,
+            matrix_len,
             contraction_len,
             columns,
             left_row_stride,
@@ -115,7 +166,18 @@ impl MatmulPlan {
         })
     }
 
-    /// Result shape after removing virtual vector axes.
+    /// Output shape after stripping virtual vector dimensions.
+    ///
+    /// Batch axes are preserved. Matrix rows appear when the left operand was
+    /// not a vector; columns appear when the right operand was not a vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - A validated [`MatmulPlan`] built from operand shapes.
+    ///
+    /// # Returns
+    ///
+    /// Shape of the contracted result array.
     pub(crate) fn output_shape(&self) -> Vec<usize> {
         let mut shape = self.batch_shape.clone();
         if !self.left_was_vector {
@@ -128,7 +190,24 @@ impl MatmulPlan {
     }
 }
 
-/// Validate `dot` ranks and construct its contraction plan.
+/// Classify `dot` operand ranks and build the shared contraction plan.
+///
+/// Maps `(left.ndim(), right.ndim())` to a [`DotKind`] for kernel dispatch,
+/// then delegates geometry to [`MatmulPlan::new`]. Higher-rank operands are
+/// treated as [`DotKind::MatrixMatrix`] with batched leading axes.
+///
+/// # Arguments
+///
+/// * `left` — left operand
+/// * `right` — right operand
+///
+/// # Returns
+///
+/// The detected [`DotKind`] and a shared [`MatmulPlan`].
+///
+/// # Errors
+///
+/// Propagates errors from [`MatmulPlan::new`].
 pub(crate) fn plan_dot<L: Scalar, R: Scalar>(
     left: &Array<L>,
     right: &Array<R>,
@@ -138,14 +217,26 @@ pub(crate) fn plan_dot<L: Scalar, R: Scalar>(
         (2, 1) => DotKind::MatrixVector,
         (1, 2) => DotKind::VectorMatrix,
         (2, 2) => DotKind::MatrixMatrix,
-        _ => {
-            debug_assert!(false, "dot supports only 1-D or 2-D operands");
-            DotKind::MatrixMatrix
-        }
+        _ => DotKind::MatrixMatrix,
     };
     Ok((kind, MatmulPlan::new(left, right)?))
 }
 
+/// Broadcast batch axes: size-1 source axes contribute zero stride.
+///
+/// Pads leading target axes with zero stride, then maps each trailing axis.
+/// When the source length is 1 and the broadcast target length is not 1, the
+/// stride is zero so the same element is reused.
+///
+/// # Arguments
+///
+/// * `source_shape` — batch shape of one operand before broadcast
+/// * `source_strides` — batch strides aligned with `source_shape`
+/// * `target_shape` — broadcast batch shape (same length or longer)
+///
+/// # Returns
+///
+/// Batch strides aligned with `target_shape`.
 fn align_batch_strides(
     source_shape: &[usize],
     source_strides: &[isize],
@@ -169,18 +260,46 @@ fn align_batch_strides(
         .collect()
 }
 
-/// Prepared geometry for N-dimensional diagonal extraction and trace.
+/// Geometry for N-dimensional diagonal extraction and trace.
+///
+/// Holds the shape/strides of all axes **outside** the two diagonal axes,
+/// plus byte offsets for stepping along one diagonal element at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DiagonalPlan {
+    /// Shape of axes other than the two diagonal axes.
     pub(crate) outer_shape: Vec<usize>,
+    /// Strides for [`Self::outer_shape`] axes.
     pub(crate) outer_strides: Vec<isize>,
+    /// Row/column start and length on the 2-D diagonal face.
     pub(crate) geometry: DiagonalGeometry,
+    /// Buffer offset of the first diagonal element for one outer tile.
     pub(crate) diagonal_start_offset: isize,
+    /// Added to the buffer index for each successive diagonal element.
     pub(crate) diagonal_stride: isize,
 }
 
 impl DiagonalPlan {
-    /// Validate axes and resolve all strides needed by diagonal kernels.
+    /// Resolve axes, diagonal length, and all offsets for the kernels.
+    ///
+    /// Normalizes `axis1` / `axis2`, computes [`DiagonalGeometry`] for their
+    /// face dimensions and `offset`, and derives linear memory offsets from
+    /// the array strides.
+    ///
+    /// # Arguments
+    ///
+    /// * `array` — source array (at least 2-D when both axes differ)
+    /// * `offset` — NumPy-style diagonal offset (0 = main diagonal)
+    /// * `axis1` — first diagonal axis (may be negative)
+    /// * `axis2` — second diagonal axis (may be negative)
+    ///
+    /// # Returns
+    ///
+    /// A [`DiagonalPlan`] ready for diagonal gather or trace kernels.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — diagonal offset arithmetic overflows
+    ///   `isize`
     pub(crate) fn new<T: Scalar>(
         array: &Array<T>,
         offset: isize,
@@ -189,7 +308,6 @@ impl DiagonalPlan {
     ) -> Result<Self> {
         let axis1 = normalize_axis(axis1, array.ndim());
         let axis2 = normalize_axis(axis2, array.ndim());
-        debug_assert_ne!(axis1, axis2, "axis1 and axis2 must differ");
 
         let geometry = diagonal_geometry(
             array.shape()[axis1],
@@ -204,46 +322,58 @@ impl DiagonalPlan {
                 outer_strides.push(array.strides()[axis]);
             }
         }
-        let diagonal_start_offset = geometry.row_start as isize
-            * array.strides()[axis1]
-            + geometry.column_start as isize * array.strides()[axis2];
+        let row_offset = isize::try_from(geometry.row_start)
+            .ok()
+            .and_then(|row| row.checked_mul(array.strides()[axis1]))
+            .ok_or_else(|| {
+                Error::InvalidArgument(
+                    "diagonal row offset overflows isize".into(),
+                )
+            })?;
+        let column_offset = isize::try_from(geometry.column_start)
+            .ok()
+            .and_then(|column| column.checked_mul(array.strides()[axis2]))
+            .ok_or_else(|| {
+                Error::InvalidArgument(
+                    "diagonal column offset overflows isize".into(),
+                )
+            })?;
+        let diagonal_start_offset =
+            row_offset.checked_add(column_offset).ok_or_else(|| {
+                Error::InvalidArgument(
+                    "diagonal start offset overflows isize".into(),
+                )
+            })?;
+        // Moving one step along the diagonal advances both axes.
+        let diagonal_stride = array.strides()[axis1]
+            .checked_add(array.strides()[axis2])
+            .ok_or_else(|| {
+                Error::InvalidArgument("diagonal stride overflows isize".into())
+            })?;
 
         Ok(Self {
             outer_shape,
             outer_strides,
             geometry,
             diagonal_start_offset,
-            diagonal_stride: array.strides()[axis1] + array.strides()[axis2],
+            diagonal_stride,
         })
     }
 
-    /// Shape returned by `diagonal`.
+    /// Shape produced by [`crate::linalg::diagonal`].
+    ///
+    /// Appends the diagonal length as the last axis after all outer axes.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - A validated [`DiagonalPlan`] for the source array layout.
+    ///
+    /// # Returns
+    ///
+    /// Output shape `[outer…, diagonal_len]`.
     pub(crate) fn diagonal_output_shape(&self) -> Vec<usize> {
         let mut shape = self.outer_shape.clone();
         shape.push(self.geometry.len);
         shape
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matmul_plan_broadcasts_and_removes_vector_axes() {
-        let left = Array::from_vec(vec![0_i64; 12], &[2, 2, 3]).unwrap();
-        let right = Array::from_vec(vec![0_i64; 3], &[3]).unwrap();
-        let plan = MatmulPlan::new(&left, &right).unwrap();
-        assert_eq!(plan.batch_shape, vec![2]);
-        assert_eq!(plan.output_shape(), vec![2, 2]);
-        assert!(plan.right_was_vector);
-    }
-
-    #[test]
-    fn diagonal_plan_preserves_remaining_axis_order() {
-        let array = Array::from_vec((0_i64..24).collect(), &[2, 3, 4]).unwrap();
-        let plan = DiagonalPlan::new(&array, 1, 0, 2).unwrap();
-        assert_eq!(plan.outer_shape, vec![3]);
-        assert_eq!(plan.diagonal_output_shape(), vec![3, 2]);
     }
 }

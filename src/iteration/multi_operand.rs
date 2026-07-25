@@ -1,3 +1,9 @@
+//! Lockstep iteration over broadcast-compatible arrays.
+//!
+//! Like NumPy's `np.nditer`, each step yields one scalar from every operand
+//! after implicit broadcasting. Contiguous operands share one linear index;
+//! strided operands advance a shared multi-index instead.
+
 use crate::array::Array;
 use crate::broadcast::broadcast_arrays;
 use crate::dtype::Scalar;
@@ -5,10 +11,14 @@ use crate::error::Result;
 use crate::index::advance_multi_index;
 use crate::shape::{checked_size_of_shape, offset_at};
 
-/// Read-only C-order iterator over broadcast-compatible operands.
+/// Read-only C-order iterator over broadcast-aligned operands.
 ///
-/// Every step yields one value per operand. All operands have the same scalar
-/// type in the Rust core; runtime dtype dispatch belongs to the Python layer.
+/// Like NumPy's `np.nditer`, each step yields one scalar from every operand
+/// after implicit broadcasting. The item type is `Vec<T>` with one entry per
+/// operand, in input order. Operands must share the same scalar type in the
+/// Rust core; mixed dtypes are handled in the Python binding layer.
+///
+/// Created by [`nditer`].
 pub struct NdIter<T: Scalar> {
     operands: Vec<Array<T>>,
     shape: Vec<usize>,
@@ -18,10 +28,38 @@ pub struct NdIter<T: Scalar> {
     all_contiguous: bool,
 }
 
-/// Iterate over one or more broadcast-compatible arrays in lockstep.
+/// Iterate one or more broadcast-compatible arrays in lockstep.
+///
+/// All operands are first aligned with [`broadcast_arrays`]. Each step yields
+/// `Vec<T>` containing one scalar from each operand at the current C-order
+/// coordinate. Contiguous operands share a fast linear index path; strided
+/// operands advance a shared multi-index instead.
+///
+/// # Arguments
+///
+/// * `operands` - Slice of array references to iterate together.
+///
+/// # Returns
+///
+/// An [`NdIter`] over the broadcast shape of all operands.
+///
+/// # Errors
+///
+/// Returns [`Error::Broadcast`](crate::error::Error::Broadcast) when operand
+/// shapes cannot be aligned under NumPy rules.
+///
+/// # Examples
+///
+/// ```rust
+/// use sdnp::{nditer, Array};
+///
+/// let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
+/// let b = Array::from_slice(&[10_i64], &[1]).unwrap();
+/// let steps: Vec<_> = nditer(&[&a, &b]).unwrap().collect();
+/// assert_eq!(steps[0], vec![1, 10]);
+/// assert_eq!(steps[3], vec![4, 10]);
+/// ```
 pub fn nditer<T: Scalar>(operands: &[&Array<T>]) -> Result<NdIter<T>> {
-    debug_assert!(!operands.is_empty(), "nditer requires at least one operand");
-
     let operands = broadcast_arrays(operands)?;
     let shape = operands[0].shape().to_vec();
     let remaining = checked_size_of_shape(&shape)?;
@@ -46,6 +84,7 @@ impl<T: Scalar> Iterator for NdIter<T> {
         }
 
         let values = if self.all_contiguous {
+            // Fast path: one linear index into each contiguous buffer.
             self.operands
                 .iter()
                 .map(|operand| {

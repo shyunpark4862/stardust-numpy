@@ -1,5 +1,32 @@
+//! Argmin and argmax kernels with NaN propagate and ignore variants.
+//!
+//! Flat reductions maintain a single linear index in C order. Axis
+//! reductions emit one index per outer position. Contiguous last-axis inputs
+//! scan row chunks directly; strided inputs use outer runs plus an inner
+//! axis stride loop.
+
 use super::*;
 
+/// Flat argmin/argmax with NaN propagation in logical C order.
+///
+/// Scans the entire array in C-order linear index. The first NaN encountered
+/// wins immediately (NumPy propagate semantics). Dispatches to a contiguous
+/// slice fast path when layout allows.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `_op_name` - Operation label (reserved for diagnostics).
+/// * `is_better` - Comparison: `true` when `candidate` beats `best`.
+/// * `is_nan` - Predicate marking NaN values that poison the result.
+///
+/// # Returns
+///
+/// A 0-D `i64` array holding the winning linear index.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 pub(crate) fn arg_extremum_flat<T, F, N>(
     a: &Array<T>,
     _op_name: &str,
@@ -22,6 +49,24 @@ where
     arg_extremum_flat_strided(a, &mut is_better, &is_nan)
 }
 
+/// Contiguous flat arg-extremum with NaN propagation.
+///
+/// Linear scan over a dense slice. Stops at the first NaN and returns its
+/// index.
+///
+/// # Arguments
+///
+/// * `slice` - C-contiguous input elements.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// A 0-D `i64` array with the extremum or first-NaN index.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn arg_extremum_flat_contiguous<T, F, N>(
     slice: &[T],
     is_better: &mut F,
@@ -34,6 +79,7 @@ where
 {
     let mut best_linear = 0_i64;
     let mut best_value = slice[0];
+    // First NaN wins immediately (NumPy propagate semantics).
     if is_nan(best_value) {
         return Array::from_vec(vec![0], &[]);
     }
@@ -49,6 +95,24 @@ where
     Array::from_vec(vec![best_linear], &[])
 }
 
+/// Strided flat arg-extremum with NaN propagation.
+///
+/// Coalesces the full shape into outer runs and walks elements in C-order
+/// linear index without requiring a contiguous buffer.
+///
+/// # Arguments
+///
+/// * `a` - Strided input array.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// A 0-D `i64` array with the extremum or first-NaN index.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn arg_extremum_flat_strided<T, F, N>(
     a: &Array<T>,
     is_better: &mut F,
@@ -59,11 +123,8 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    // Flat C-order walk over a non-contiguous buffer: coalesce the full
-    // shape into outer runs + a fixed-stride inner loop, then keep a single
-    // linear counter across runs (the argmin/argmax result is a flat index).
+    // Coalesce the full shape into outer runs + inner stride steps.
     let run_plan = RunPlan::new(a.shape(), [a.strides()]);
-    debug_assert!(run_plan.run_len() > 0 && run_plan.run_count() > 0);
     let mut best_value = a.data[a.offset()];
     if is_nan(best_value) {
         return Array::from_vec(vec![0], &[]);
@@ -102,7 +163,25 @@ where
     Array::from_vec(vec![best_linear], &[])
 }
 
-/// Argmin/argmax along a single axis.
+/// Argmin/argmax along one axis with NaN propagation.
+///
+/// Emits one axis-relative index per outer position. Uses a contiguous row
+/// fast path when the scanned axis is last and the buffer is C-contiguous.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axis` - Axis along which to find extrema (may be negative).
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// An `i64` array with shape equal to all dimensions except `axis`.
+///
+/// # Errors
+///
+/// Returns an error when the axis is out of range or allocation fails.
 pub(crate) fn arg_extremum_axis<T, F, N>(
     a: &Array<T>,
     axis: isize,
@@ -116,6 +195,7 @@ where
 {
     let axis = normalize_axis(axis, a.ndim());
     let plan = AxisTraversalPlan::new(a.shape(), axis);
+    checked_allocation_len::<i64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }
@@ -123,7 +203,7 @@ where
         return Array::from_vec(vec![0; plan.output_len], &plan.kept_shape);
     }
 
-    // Contiguous last-axis: each outer row is one contiguous chunk.
+    // Last axis + C-contiguous: each output row is one memory chunk.
     if plan.is_last_axis(a.ndim()) {
         if let Some(slice) = a.as_c_contiguous_slice() {
             return arg_extremum_axis_contiguous(
@@ -138,6 +218,25 @@ where
     arg_extremum_axis_strided(a, &plan, &mut is_better, &is_nan)
 }
 
+/// Contiguous last-axis arg-extremum with NaN propagation.
+///
+/// Splits the flat contiguous buffer into row chunks of length `axis_len`
+/// and finds the winning index within each chunk.
+///
+/// # Arguments
+///
+/// * `slice` - C-contiguous input elements.
+/// * `plan` - Single-axis traversal geometry.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// An `i64` array shaped like `plan.kept_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn arg_extremum_axis_contiguous<T, F, N>(
     slice: &[T],
     plan: &AxisTraversalPlan,
@@ -170,6 +269,25 @@ where
     Array::from_vec(out, &plan.kept_shape)
 }
 
+/// Strided single-axis arg-extremum with NaN propagation.
+///
+/// Walks outer positions with [`RunPlan`], then steps along the axis stride
+/// for each inner comparison.
+///
+/// # Arguments
+///
+/// * `a` - Strided input array.
+/// * `plan` - Single-axis traversal geometry.
+/// * `is_better` - Comparison predicate for finite values.
+/// * `is_nan` - NaN detector.
+///
+/// # Returns
+///
+/// An `i64` array shaped like `plan.kept_shape`.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 fn arg_extremum_axis_strided<T, F, N>(
     a: &Array<T>,
     plan: &AxisTraversalPlan,
@@ -211,6 +329,25 @@ where
     Array::from_vec(out, &plan.kept_shape)
 }
 
+/// Flat argmin/argmax skipping NaN elements.
+///
+/// Ignores NaN values entirely. When every element is NaN, returns index
+/// `0` (NumPy-compatible placeholder).
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `_op_name` - Operation label (reserved for diagnostics).
+/// * `is_better` - Comparison predicate among finite values.
+/// * `is_nan` - Predicate marking values to skip.
+///
+/// # Returns
+///
+/// A 0-D `i64` array with the winning linear index among finite elements.
+///
+/// # Errors
+///
+/// Returns an error when allocation fails.
 pub(crate) fn arg_extremum_flat_ignore<T, F, N>(
     a: &Array<T>,
     _op_name: &str,
@@ -249,6 +386,26 @@ where
     }
 }
 
+/// Axis argmin/argmax skipping NaN elements.
+///
+/// Emits one axis-relative index per outer position, considering only
+/// finite elements. All-NaN rows return index `0`.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axis` - Axis along which to find extrema (may be negative).
+/// * `_op_name` - Operation label (reserved for diagnostics).
+/// * `is_better` - Comparison predicate among finite values.
+/// * `is_nan` - Predicate marking values to skip.
+///
+/// # Returns
+///
+/// An `i64` array shaped like all dimensions except `axis`.
+///
+/// # Errors
+///
+/// Returns an error when the axis is out of range or allocation fails.
 pub(crate) fn arg_extremum_axis_ignore<T, F, N>(
     a: &Array<T>,
     axis: isize,
@@ -263,6 +420,7 @@ where
 {
     let axis = normalize_axis(axis, a.ndim());
     let plan = AxisTraversalPlan::new(a.shape(), axis);
+    checked_allocation_len::<i64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }

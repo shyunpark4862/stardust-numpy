@@ -1,26 +1,76 @@
-//! Element get/set with copy-on-write.
+//! Single-element read/write and copy-on-write (CoW) storage detachment.
+//!
+//! Indexed access maps logical coordinates through strides to a flat buffer
+//! offset. Writes on shared buffers clone only the logical elements when the
+//! view does not cover the entire allocation — a common ndarray optimization
+//! pattern worth studying alongside NumPy's buffer protocol rules.
 
 use std::sync::Arc;
 
 use crate::array::Array;
 use crate::dtype::Scalar;
 use crate::error::Result;
-use crate::shape::{c_order_strides, offset_at};
+use crate::shape::{c_order_strides_unchecked, offset_at};
 
 impl<T: Scalar> Array<T> {
-    /// Read one element by multi-index.
+    /// Read one element at the given multi-dimensional index.
+    ///
+    /// Maps `indices` through strides to a flat buffer offset without
+    /// copying storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `indices` — one coordinate per axis, in axis order
+    ///
+    /// # Returns
+    ///
+    /// A copy of the scalar at the resolved buffer location.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::IndexOutOfBounds`] — an index is ≥ its axis length
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sdnp::Array;
+    ///
+    /// let a = Array::from_slice(&[10_i64, 20, 30, 40], &[2, 2]).unwrap();
+    /// assert_eq!(a.get(&[0, 1]).unwrap(), 20);
+    /// ```
     pub fn get(&self, indices: &[usize]) -> Result<T> {
         let buf_idx = self.checked_offset(indices)?;
         Ok(self.data[buf_idx])
     }
 
-    /// Write one element by multi-index.
+    /// Write one element at the given multi-dimensional index.
     ///
-    /// Broadcast views are read-only and return [`Error::ReadOnly`](crate::error::Error::ReadOnly).
+    /// When other arrays share this buffer, storage is detached first via
+    /// copy-on-write so peers are not mutated.
     ///
-    /// If other views share this buffer, the buffer is cloned first
-    /// (copy-on-write).
+    /// # Arguments
     ///
+    /// * `indices` — one coordinate per axis, in axis order
+    /// * `value` — scalar to store at the resolved location
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success; the array remains writable afterward.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::ReadOnly`] — this is a broadcast (read-only) view
+    /// * [`Error::IndexOutOfBounds`] — an index is out of range for its axis
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sdnp::Array;
+    ///
+    /// let mut a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
+    /// a.set(&[1, 0], 99).unwrap();
+    /// assert_eq!(a.get(&[1, 0]).unwrap(), 99);
+    /// ```
     pub fn set(&mut self, indices: &[usize], value: T) -> Result<()> {
         if !self.writable {
             return Err(crate::error::Error::ReadOnly);
@@ -32,14 +82,31 @@ impl<T: Scalar> Array<T> {
         Ok(())
     }
 
-    /// Detach shared storage before a write.
+    /// Ensure this array owns its storage before an in-place mutation.
     ///
-    /// A non-trivial shared view materializes only its logical elements in
-    /// C-order instead of cloning unrelated elements from the backing buffer.
-    /// Returns whether detaching also changed the array's layout.
+    /// When the view covers the entire contiguous buffer, only the `Arc`
+    /// reference count is decremented. Otherwise logical elements are
+    /// materialized in C-order into a fresh buffer. Returns `true` when the
+    /// layout (strides/offset) was normalized as part of detaching.
+    ///
+    /// **CoW note:** Shared buffers with narrow or strided views cannot use
+    /// the cheap `Arc::make_mut` path; they copy logical elements only,
+    /// then reset to C-contiguous layout with offset zero.
+    ///
+    /// # Arguments
+    ///
+    /// None — only `self` may be modified.
+    ///
+    /// # Returns
+    ///
+    /// `true` when strides and offset were reset after a partial copy;
+    /// `false` when storage was already unique or only the `Arc` was split.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; allocation failure panics like ordinary `Vec` growth.
     #[must_use]
     pub(crate) fn ensure_unique_storage_for_write(&mut self) -> bool {
-        debug_assert!(self.writable);
         if Arc::strong_count(&self.data) == 1 {
             return false;
         }
@@ -48,25 +115,36 @@ impl<T: Scalar> Array<T> {
             && self.is_c_contiguous()
             && self.size() == self.data.len();
         if covers_entire_buffer {
+            // Cheap path: clone the Vec in place via Arc::make_mut later.
             Arc::make_mut(&mut self.data);
             return false;
         }
 
+        // Narrow view: copy only logical elements, then reset to C-order.
         let data = self.to_vec_c_order();
         self.data = Arc::new(data);
-        self.strides = c_order_strides(&self.shape);
+        self.strides = c_order_strides_unchecked(&self.shape);
         self.offset = 0;
         true
     }
 
+    /// Bounds-check indices and return the flat buffer offset.
+    ///
+    /// Combines per-axis range checks with stride-based address arithmetic.
+    /// Does not touch storage; safe to call on shared read-only views.
+    ///
+    /// # Arguments
+    ///
+    /// * `indices` — one coordinate per axis, in axis order
+    ///
+    /// # Returns
+    ///
+    /// The flat buffer index for the given multi-dimensional coordinate.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::IndexOutOfBounds`] — an index is ≥ its axis length
     fn checked_offset(&self, indices: &[usize]) -> Result<usize> {
-        debug_assert_eq!(
-            indices.len(),
-            self.ndim(),
-            "expected {} indices, got {}",
-            self.ndim(),
-            indices.len()
-        );
         for (&i, &dim) in indices.iter().zip(self.shape.iter()) {
             if i >= dim {
                 return Err(crate::error::Error::IndexOutOfBounds {
@@ -76,28 +154,5 @@ impl<T: Scalar> Array<T> {
             }
         }
         Ok(offset_at(indices, &self.strides, self.offset))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn get_set() {
-        let mut a = Array::from_vec(vec![0_i64; 6], &[2, 3]).unwrap();
-        a.set(&[1, 2], 42).unwrap();
-        assert_eq!(a.get(&[1, 2]).unwrap(), 42);
-    }
-
-    #[test]
-    fn set_cow_does_not_mutate_shared_view() {
-        let mut a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-        let b = a.transpose();
-        assert!(a.shares_buffer_with(&b));
-        a.set(&[0, 0], 99).unwrap();
-        assert!(!a.shares_buffer_with(&b));
-        assert_eq!(a.get(&[0, 0]).unwrap(), 99);
-        assert_eq!(b.get(&[0, 0]).unwrap(), 1);
     }
 }

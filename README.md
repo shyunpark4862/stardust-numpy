@@ -1,148 +1,269 @@
 # stardust-numpy (`sdnp`)
 
-Educational NumPy-style array library in Rust with an optional **PyO3 Python
-binding** (`sdnp` package in `sdnp-py/`).
+`sdnp` is a from-scratch, NumPy-style N-dimensional array library written in
+Rust, with a Python extension module (`sdnp-py/`) built on **PyO3**.
 
-- `Array<T>` with compile-time generics
-- Auto-promotion: `bool < i64 < f64 < Complex<f64>`
-- 0-D arrays allowed (`shape == []`, size 1); unlike the Python reference
-- No `str` / object / mixed-dtype arrays / runtime dtype API in the Rust core
-- Views share via `Arc`; writes use copy-on-write (not NumPy write-through)
+The project exists to **learn NumPy by rebuilding its core from first
+principles** — no `ndarray` crate, no shortcuts on the tricky parts (strides,
+broadcasting, fancy indexing, reductions, CoW views). At the same time, it is
+not a toy: every hot path is written to be genuinely fast, and the benchmark
+suite exists specifically to keep it honest against real NumPy on every push.
 
-Spec / behavioral reference: sibling Python project `../numpy` (with intentional differences).
+- **Educational**: `Array<T>` is implemented directly on flat buffers with
+  explicit shape/stride bookkeeping, so every operation (broadcasting, views,
+  gather/scatter, reductions, linear algebra) is traceable end to end.
+- **Optimization-aware**: contiguous fast paths, coalesced stride runs, `Arc`
+  copy-on-write buffers, and release-profile LTO builds are treated as
+  first-class concerns, not an afterthought.
+- **Continuously measured**: [`BENCHMARK.md`](BENCHMARK.md) is regenerated
+  from a full sdnp-vs-NumPy benchmark matrix on every push to `main`.
 
-## Setup
+Behavioral reference: a sibling Python project (`../numpy`), with a documented
+set of intentional differences (see [Differences from NumPy](#differences-from-numpy)).
+
+## Contents
+
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [Getting started](#getting-started)
+- [Quick example](#quick-example)
+- [Feature overview](#feature-overview)
+- [Differences from NumPy](#differences-from-numpy)
+- [Testing](#testing)
+- [Benchmarking](#benchmarking)
+- [CI](#ci)
+- [License](#license)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Python["sdnp-py (PyO3 extension)"]
+    pyapi["Python API: dunder methods,\ndtype dispatch, list/scalar coercion"]
+    pyarray["PyArray: tagged Bool/I64/F64/C64 wrapper"]
+  end
+  subgraph Rust["sdnp (Rust core crate)"]
+    array["Array&lt;T&gt;: shape + strides + Arc buffer"]
+    ops["ufunc / reduction / linalg / indexing / sorting kernels"]
+  end
+
+  pyapi --> pyarray --> ops
+  ops --> array
+```
+
+| Layer                               | Responsibility                                                                                                                                              |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rust core** (`src/`)              | Buffers, shape/strides, views + copy-on-write, broadcasting, ufunc kernels, reductions, linear algebra, fancy indexing gather/scatter                       |
+| **Python binding** (`sdnp-py/src/`) | `import sdnp`, operator overloading, Python object ↔ array coercion, runtime dtype dispatch over a compile-time-generic core, `__repr__`, error translation |
+
+The Rust core stays fully generic over `T: Scalar` and has **no runtime dtype
+concept**; `sdnp-py` wraps it in a small tagged enum (`Bool` / `I64` / `F64` /
+`C64`) and matches on it once per call, so the compiled kernels stay
+monomorphic and inlinable.
+
+## Repository layout
+
+```
+stardust-numpy/
+├── Cargo.toml            # workspace: root crate ("sdnp") + sdnp-py
+├── src/                  # Rust core (crate: sdnp)
+│   ├── dtype/            # Scalar + Promote + CastTo + ArrayCast + AsBool
+│   ├── shape.rs          # size / strides / contiguity / offset_at
+│   ├── axis.rs           # shared negative-axis normalization
+│   ├── array/            # Array<T>, element get/set (CoW), transpose/reshape/squeeze
+│   ├── broadcast.rs      # broadcast_shape / broadcast_to
+│   ├── index/            # IndexSpec, bounds helpers, gather / scatter
+│   ├── creation/         # factories, ranges/spaces, grids, triangular arrays
+│   ├── ufunc/            # kernels + ops + traits
+│   ├── traversal/        # coalesced layouts, RunPlan, stride cursors
+│   ├── iteration/        # ndindex / ndenumerate / nditer / flat / axis-0
+│   ├── reduction/        # plans, traits, ops, split kernel families
+│   ├── manipulation/     # concatenate / stack / vstack / hstack
+│   ├── selection/        # where_ / nonzero / clip
+│   ├── sorting/          # sort / argsort / unique
+│   └── linalg/           # contraction/diagonal geometry, kernels, public ops
+├── tests/                # Rust integration tests (core-only semantics)
+├── sdnp-py/              # PyO3 Python extension
+│   ├── src/              # PyArray, dtype dispatch, binding-level validation
+│   ├── tests/            # pytest: API contract, NumPy differential, property tests
+│   └── pyproject.toml
+├── benches/              # sdnp-vs-NumPy benchmark runner (see Benchmarking)
+├── BENCHMARK.md          # generated report (kept up to date by CI)
+└── .github/workflows/    # CI: fmt/clippy/tests, full benchmark, report commit
+```
+
+## Getting started
+
+Requires a stable Rust toolchain and Python ≥ 3.12.
 
 ```bash
-# Rust core
-cargo test
+# Rust core: format, lint, and test
+cargo fmt --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --release --workspace
 
-# Python binding (requires Python >= 3.12, maturin)
-pip install maturin pytest
+# Python extension
 cd sdnp-py
-maturin develop          # or: pip install -e .
-pytest python-tests
+python -m venv .venv
+.venv/bin/pip install maturin pytest numpy hypothesis
+.venv/bin/maturin develop --release
+.venv/bin/pytest
 ```
 
 On Python 3.14+, set `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` when building if
-PyO3 has not yet published 3.14 wheels for your platform.
+PyO3 has not yet published wheels for your interpreter.
 
-Quick smoke check:
+`cargo test` and benchmarking both require the `release` profile: the
+`[profile.test]` section in `Cargo.toml` mirrors `[profile.release]` (LTO,
+`opt-level = 3`, `codegen-units = 1`) so correctness tests run against the same
+codegen as production, and the Python extension exposes
+`sdnp.sdnp.__optimized__` / `__build_profile__` so tooling can refuse to
+benchmark a debug build.
+
+## Quick example
 
 ```python
 import sdnp
-a = sdnp.zeros((2, 3))
-assert (a + sdnp.ones((2, 3))).shape == [2, 3]
-assert not isinstance(sdnp.sum(a), sdnp.Array)  # 0-D unwrap at boundary
+
+a = sdnp.arange(6).reshape([2, 3])
+b = sdnp.ones((2, 3))
+
+c = sdnp.add(a, b)
+assert c.shape == [2, 3]
+
+total = sdnp.sum(a)
+assert not isinstance(total, sdnp.Array)  # 0-D results unwrap to Python scalars
+
+row = a[1]              # basic indexing -> zero-copy view
+mask = sdnp.greater(a, 2)
+picked = a[mask]        # boolean fancy indexing -> copy
 ```
 
-## Benchmarks
+## Feature overview
+
+- **Array core**: `Array<T>` with `get`/`set` (copy-on-write), `transpose` /
+  `t` / `permute_axes` / `reshape` / `squeeze` / `copy` / `astype`,
+  `as_c_contiguous_slice`.
+- **Creation**: `zeros` / `ones` / `full` / `arange` / `eye` / `eye_with`,
+  `linspace` / `logspace` / `geomspace` / `meshgrid`,
+  `tri` / `tri_with` / `tril` / `triu` / `diag`.
+- **Broadcasting**: NumPy-compatible `broadcast_shape` / `broadcast_to`;
+  broadcast views are read-only.
+- **ufuncs**: arithmetic (`add`, `subtract`, `multiply`, `divide`,
+  `trunc_divide`, `remainder`, `power`, `negative`, `absolute`), comparisons,
+  `logical_and` / `or` / `not`, `isnan` / `isinf` / `isfinite`, complex
+  `conj` / `real` / `imag` — all with automatic dtype promotion.
+- **Reductions**: `sum` / `prod` / `min` / `max` / `mean` / `var` / `std` /
+  `any` / `all` (with `axes`, `keepdims`); `argmin` / `argmax` / `cumsum` /
+  `cumprod` (with `axis`); numeric reductions accept a `NanPolicy`
+  (`propagate` / `ignore`).
+- **Indexing**: `IndexSpec`-based `gather` / `scatter` / `scatter_array` —
+  basic indexing (negative indices, steps, `newaxis`, ellipsis) returns
+  zero-copy views; fancy/boolean indexing returns copies, matching NumPy's
+  output shapes.
+- **Manipulation**: `concatenate` / `stack` / `vstack` / `hstack`.
+- **Selection**: `where_` / `nonzero` / `clip`.
+- **Sorting**: `sort` / `argsort` / `unique`.
+- **Linear algebra**: `dot` / `matmul` / `vdot` / `outer` / `diagonal` /
+  `trace`.
+- **Iteration**: `ndindex` / `ndenumerate` / `nditer`, plus `Array::flat` and
+  axis-0 iteration.
+
+On the Python side (`sdnp-py`), the exported `sdnp.__all__` surface wraps this
+core with operator overloading, list/scalar coercion, 0-D unwrapping at the
+Python boundary, and structured error translation (`sdnp::Error` → `PyErr`).
+
+## Differences from NumPy
+
+These are **intentional** design choices, not bugs — each is covered by its
+own contract tests rather than hidden behind `xfail`.
+
+| Aspect                         | Reference NumPy                                 | `sdnp`                                                                                                       |
+| ------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 0-D arrays                     | Rejected by the Python reference implementation | Allowed internally (`shape == []`, size 1); always unwrapped to a scalar before crossing the Python boundary |
+| dtype                          | Runtime, open-ended (`str`, object, mixed)      | Four fixed types: `bool`, `i64`, `f64`, `Complex<f64>`; promotion is `bool < i64 < f64 < Complex<f64>`       |
+| Storage                        | `list` or shared-write `ndarray` buffers        | `Arc<Vec<T>>`; views share the buffer, writes trigger copy-on-write (no write-through aliasing)              |
+| Mixed-dtype ops                | Runtime promotion                               | `Promote` + `CastTo` traits resolved at the Rust type level                                                  |
+| `/`                            | True division, always float                     | Follows Rust's `/`; integer floor division is the separate `trunc_divide`                                    |
+| Operators                      | `a + b` via dunder methods                      | Rust core exposes free functions (`add(&a, &b)?`); `sdnp-py` adds the dunder wrapping                        |
+| `out=` / `where=` ufunc kwargs | Supported                                       | Not supported                                                                                                |
+| Zero-copy NumPy interop        | Writable shared buffers                         | Not exposed; array data crosses the boundary by copy or as read-only                                         |
+
+## Testing
+
+- **Rust (`tests/`)**: integration tests for core-only semantics that are not
+  reachable through the Python boundary — 0-D internal representation, bool
+  core arithmetic, structured errors, shape/stride overflow handling,
+  copy-on-write, and non-contiguous gather/scatter/reduction/linalg paths.
+- **Python (`sdnp-py/tests/`)**: the behavioral spec for the public API —
+  contract tests (`__all__` completeness, signatures), per-domain tests
+  (creation, ufuncs, reductions, indexing, linear algebra, manipulation,
+  selection/sorting, iteration/repr), regression tests, and Hypothesis-based
+  property tests that differentially check `sdnp` against NumPy across
+  dtype/shape/view combinations.
+- Tests never live alongside source files; each language keeps its own
+  independent `tests/` tree.
 
 ```bash
-# Rust: all paths or one Criterion substring
-cargo bench --bench paths
-cargo bench --bench paths -- concatenate_axis0_strided
-
-# NumPy: project-local Python 3 environment
-uv venv --python python3 .venv
-uv pip install --python .venv/bin/python numpy
-.venv/bin/python benches/numpy_paths.py
-
-# NumPy: list, exact path, or substring selection
-.venv/bin/python benches/numpy_paths.py --list
-.venv/bin/python benches/numpy_paths.py concatenate_axis0_strided_f64
-.venv/bin/python benches/numpy_paths.py --match concatenate --match where
-
-# Rebuild the Markdown report and Cursor canvas from existing measurements
-.venv/bin/python benches/generate_benchmark_report.py --skip-run
-.venv/bin/python benches/render_benchmark_canvas.py --skip-run \
-  --rust-log benches/.bench-rust.log \
-  --numpy-json benches/.bench-numpy.json
+cargo test --release --workspace          # Rust
+cd sdnp-py && .venv/bin/pytest             # Python
 ```
 
-Materializing comparison paths produce C-contiguous outputs on both sides.
-With no Python path filter, the script keeps its JSON output format and runs
-the full suite.
+## Benchmarking
 
-Rust and NumPy measurements must run sequentially to avoid CPU interference.
-The generated report is `benches/BENCHMARK_REPORT.md`; its optimization
-reference is maintained in `benches/optimization_techniques.md`. Raw
-`.bench-rust.log` and `.bench-numpy.json` files are local generated artifacts
-and are ignored; the Markdown report is the reviewable checked-in result.
+`benches/` runs a single Python process that imports both the exported
+`sdnp` API and NumPy, and measures them under identical conditions.
 
-## Layout
+```bash
+cd sdnp-py && .venv/bin/maturin develop --release && cd ..
 
-```
-src/
-  dtype/         Scalar + promotion + explicit ArrayCast
-  axis.rs        shared negative-axis normalization
-  shape.rs       size / strides / contiguity / offset_at
-  error.rs
-  array/         Array<T>, element get/set (CoW), transpose/reshape/squeeze
-  index/         IndexSpec, bounds helpers, gather / scatter
-  creation/      factories, ranges/spaces, grids, triangular arrays
-  broadcast.rs   broadcast_shape / broadcast_to / …
-  ufunc/         kernels + ops + traits (internals pub(crate))
-  traversal/     coalesced layouts, RunPlan, stride cursors
-  iteration/     ndindex / ndenumerate / nditer / flat / axis-0 iteration
-  reduction/     plans, traits, ops, split kernel families
-  manipulation/  concatenate / stack / vstack / hstack
-  selection/     where_ / nonzero / clip
-  sorting/       sort / argsort / unique
-  linalg/        contraction/diagonal geometry, traits, kernels, public ops
+# Discover functions and generated matrix cases
+sdnp-py/.venv/bin/python benches/benchmark.py list --functions
+sdnp-py/.venv/bin/python benches/benchmark.py list --profile smoke
+
+# Standard suite, or every valid size x ndim x dtype combination
+sdnp-py/.venv/bin/python benches/benchmark.py run
+sdnp-py/.venv/bin/python benches/benchmark.py run --profile full
+
+# One function, optionally intersected with matrix filters
+sdnp-py/.venv/bin/python benches/benchmark.py run --function add
+sdnp-py/.venv/bin/python benches/benchmark.py run \
+  --function matmul --dtype float64 --size large
+
+# Explicit measurement controls
+sdnp-py/.venv/bin/python benches/benchmark.py run \
+  --function sum --warmups 5 --samples 25 --iterations 10
+
+# Rebuild Markdown and Canvas from an existing summary JSON
+sdnp-py/.venv/bin/python benches/benchmark.py render
 ```
 
-## What already works (Phase 0–7.5)
+- Cases are generated from a `size x ndim x dtype` matrix (small/medium/large
+  x 1/2/3/6-D x `bool`/`int64`/`float64`/`complex128`) intersected with
+  per-function filters.
+- Every run prints per-case progress to stdout and writes results
+  incrementally, so a long run can be inspected while it's in progress.
+- Raw samples go to `benches/results/benchmark.csv`; p25/p50/p75/mean
+  statistics go to `benches/results/benchmark.json`; both are then rendered
+  **mechanically** (no inferred commentary) into root [`BENCHMARK.md`](BENCHMARK.md)
+  and a Cursor Canvas.
+- The runner refuses to execute against a debug build — it checks
+  `sdnp.sdnp.__optimized__` before measuring anything.
 
-- `Array::from_vec` / `from_slice` / `get` / `set` (CoW) / `item` / `to_vec` / `as_c_contiguous_slice`
-- `transpose` / `t` / `permute_axes` / `reshape` / `squeeze` / `copy` / `astype`
-- internal `broadcast_to` support (broadcast views remain read-only)
-- indexing: `IndexSpec` + `gather` / `scatter` / `scatter_array` (basic → view; fancy/bool → copy; 음수·step·newaxis·ellipsis)
-- `zeros` / `ones` / `full` / `arange` (`i64`) / `eye` (+ broadcasting)
-- ufuncs: `add`/`subtract`/`multiply`/`divide`/`trunc_divide`/`remainder`/`power`/`negative`/`absolute`
-- comparisons + `logical_and`/`or`/`not` + `isnan`/`isinf`/`isfinite`
-- complex: `conj` / `real` / `imag`
-- reductions: `sum`/`prod`/`min`/`max`/`mean`/`var`/`std`/`any`/`all`
-  (`axes`, `keepdims`); `argmin`/`argmax`/`cumsum`/`cumprod` (`axis`);
-  numeric reductions accept `NanPolicy::{Propagate, Ignore}`
-- joining: `concatenate` / `stack` / `vstack` / `hstack`
-- selection: `where_` / `nonzero` / `clip`
-- sorting: `sort` / `argsort` / `unique`
-- spaces: `linspace` / `logspace` / `geomspace` / `meshgrid`
-- linear algebra: `dot` / `matmul` / `vdot` / `outer` / `diagonal` / `trace`
-- triangular arrays: `tri` / `tri_with` / `tril` / `triu` / `diag`
-- iteration: `ndindex` / `ndenumerate` / `nditer` / `Array::flat` /
-  `Array::iter_axis0` / `Array::axis0_len`
-- `dtype::{Scalar, Promote, CastTo, ArrayCast, AsBool}`
+## CI
 
-Intentional differences vs NumPy: no operator overloading; scalar-valued
-linear algebra results are 0-D `Array`s; `dot` supports only 1-D/2-D inputs;
-`divide` follows Rust `/`; CoW on write; no `out`/`where`.
+`.github/workflows/ci.yml` runs on every push and pull request:
 
-Fill in modules phase-by-phase; Python bindings ship in `sdnp-py/` (Phase 8).
+1. **Rust job**: `cargo fmt --check`, `cargo clippy -- -D warnings`,
+   `cargo test --release --workspace`.
+2. **Python job**: release-build the extension, run the full pytest suite,
+   then run the **full benchmark matrix** (`--profile full`).
 
-## Python API (Phase 8)
+On pushes to `main`, the Python job commits the freshly generated
+`BENCHMARK.md` back to the repository (skipped if unchanged), so the report
+at the top of this README always reflects the latest `main`.
 
-Import as `sdnp`. Public surface matches the Rust subset documented above,
-with these binding policies:
+## License
 
-- **0-D unwrap**: full reductions, integer basic indexing, 1-D `__iter__`, and
-  scalar linear-algebra results return Python scalars — never user-visible 0-D
-  `Array` instances.
-- **Creation**: `sdnp.array(3)` and `shape=()` are rejected with `ValueError`.
-- **Excluded from `__all__`**: `item`, buffer/broadcast helpers, `gather` /
-  `scatter`, internal layout utilities (see `plan.md`).
-- **Intentional gaps**: no transcendental ufuncs (`sin`, `exp`, …); `/` follows
-  Rust true division semantics; `//` maps to `trunc_divide`.
-
-## Internal terminology
-
-- **C-contiguous**: an entire logical array has C-order strides; a non-zero
-  backing-buffer offset is allowed.
-- **Unit-stride run**: one coalesced run advances an operand by one element.
-  The whole array need not be C-contiguous.
-- **Run grid / run**: `RunPlan` traverses a grid of fixed-stride linear runs.
-- **Kept / reduced axes**: reduction output axes versus axes folded into each
-  output. `output_len` and `reduction_len` are their element counts.
-- **Prefix / suffix reduction**: reduced axes form the leading or trailing
-  logical axis block; this is unrelated to join's leading dimensions.
+MIT — see [LICENSE](LICENSE).

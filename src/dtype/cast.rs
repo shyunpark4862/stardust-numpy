@@ -1,13 +1,32 @@
+//! Explicit scalar conversions for [`Array::astype`](crate::Array::astype).
+//!
+//! Unlike [`CastTo`](super::CastTo), which models promotion only, this
+//! trait covers every conversion among the four supported scalar kinds.
+//! Narrowing follows Rust `as` semantics; complex-to-real conversions take
+//! the real component.
+
 use super::{AsBool, Complex64, Scalar};
 
-/// Explicit scalar conversion used by [`Array::astype`](crate::Array::astype).
+/// Scalar conversion trait used when casting an entire array to a new dtype.
 ///
-/// Unlike [`CastTo`], which only models promotion, this trait covers every
-/// conversion among the four supported scalar types. Narrowing follows Rust
-/// `as` semantics. Converting a complex value to a real or integer value uses
-/// its real component.
+/// Unlike [`CastTo`](super::CastTo), which models promotion only, this
+/// trait covers every conversion among the four supported scalar kinds.
+/// Narrowing follows Rust `as` semantics; complex-to-real takes the real
+/// component.
 pub trait ArrayCast<T: Scalar>: Scalar {
-    /// Convert one array element to the requested scalar type.
+    /// Convert one element to the requested output scalar type.
+    ///
+    /// # Arguments
+    ///
+    /// None — only `self` is converted.
+    ///
+    /// # Returns
+    ///
+    /// The element value in dtype `T`, per the [`ArrayCast`] impl rules.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; unsupported pairs are rejected at compile time.
     fn array_cast(self) -> T;
 }
 

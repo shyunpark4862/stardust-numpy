@@ -1,4 +1,9 @@
-//! Type-specific reduction behaviour via traits.
+//! Per-dtype reduction dispatch through traits.
+//!
+//! Each scalar type implements the traits for the operations it supports.
+//! `NanPolicy` selects propagate vs ignore paths for floating reductions;
+//! integer and boolean types ignore the policy. Trait methods delegate to
+//! the shared kernels in `kernels` with type-specific accumulate rules.
 
 use crate::array::Array;
 use crate::dtype::{AsBool, CastTo, Complex64, Scalar};
@@ -13,37 +18,148 @@ use crate::reduction::kernels::{
 };
 use crate::reduction::plan::ReducePlan;
 
-/// Controls how numeric reductions handle NaN values.
+/// How floating reductions treat NaN inputs.
+///
+/// Integer and boolean types ignore this policy. For `f64` and complex
+/// dtypes, each variant selects a different kernel path in sum, product,
+/// mean, variance, extremum, and cumulative operations.
+///
+/// # Examples
+///
+/// ```
+/// use sdnp::{Array, NanPolicy, sum};
+///
+/// let a = Array::from_vec(vec![1.0, f64::NAN, 3.0], &[3]).unwrap();
+/// let p = sum(&a, None, false, NanPolicy::Propagate).unwrap();
+/// assert!(p.item().unwrap().is_nan());
+/// let i = sum(&a, None, false, NanPolicy::Ignore).unwrap();
+/// assert_eq!(i.item().unwrap(), 4.0);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NanPolicy {
-    /// Preserve the existing behavior: a NaN propagates into the result.
+    /// NaN in the reduced slice poisons the result (NumPy default).
+    ///
+    /// Any NaN encountered during reduction makes the output NaN for that
+    /// slot, even when other elements are finite.
     Propagate,
-    /// Skip NaN elements; all-NaN non-empty slices produce NaN or an error.
+    /// Skip NaN elements; all-NaN non-empty slices yield NaN.
+    ///
+    /// Finite values are combined normally. When every element in a
+    /// non-empty reduced slice is NaN, the result is NaN.
     Ignore,
 }
 
-/// Associative sum fold: `Acc` may differ from `Self` (e.g. bool → i64).
+/// Associative sum reduction for a scalar dtype.
 ///
-/// Used by [`crate::reduction::sum`] and [`crate::reduction::cumsum`].
+/// The accumulator type `Acc` may differ from `Self` (e.g. `bool` → `i64`).
+/// Implementors provide identity, promotion, and merge rules used by the
+/// shared associative reduction kernels.
 pub trait SumReduce: Scalar {
-    /// Accumulator / output element type.
+    /// Accumulator and output element type.
     type Acc: Scalar;
-    /// Additive identity (empty reduction).
+
+    /// Additive identity for an empty reduction.
+    ///
+    /// Returned when a reduced slice has length zero (e.g. `sum` over an
+    /// empty axis). Integer types use wrapping zero; floats use `0.0`.
+    ///
+    /// # Arguments
+    ///
+    /// None — this is a type-level constant query.
+    ///
+    /// # Returns
+    ///
+    /// The neutral element for [`Self::accumulate`].
     fn identity() -> Self::Acc;
-    /// Promote one element into the accumulator type.
+
+    /// Promote one input element into the accumulator type.
+    ///
+    /// Boolean input casts to `i64`; other types typically pass through.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Input element before it enters the reduction kernel.
+    ///
+    /// # Returns
+    ///
+    /// `self` widened or cast to [`Self::Acc`].
     fn to_acc(self) -> Self::Acc;
-    /// `acc + x` in the accumulator type.
+
+    /// Combine one element into a running accumulator.
+    ///
+    /// Used by sequential folds and as the per-element step in associative
+    /// eight-lane unrolling.
+    ///
+    /// # Arguments
+    ///
+    /// * `acc` - Partial sum so far.
+    /// * `x` - Next input element (still type `Self`).
+    ///
+    /// # Returns
+    ///
+    /// Updated accumulator after adding `x`.
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc;
-    /// Merge two partial accumulators.
+
+    /// Merge two partial accumulators from independent chains.
+    ///
+    /// Must be associative with [`Self::accumulate`] so suffix-chunk kernels
+    /// can combine eight lanes in parallel.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - Partial sum from one sub-chain.
+    /// * `right` - Partial sum from another sub-chain.
+    ///
+    /// # Returns
+    ///
+    /// Combined accumulator value.
     fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc;
-    /// Type-dispatched sum implementation.
+
+    /// Axis sum implementation for this dtype.
+    ///
+    /// Dispatches to associative or NaN-ignore kernels depending on
+    /// [`NanPolicy`]. Floating and complex types branch at this boundary so
+    /// hot loops stay branch-free.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for floating dtypes.
+    ///
+    /// # Returns
+    ///
+    /// An array of sums with dtype [`Self::Acc`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid.
     fn reduce_sum(
         a: &Array<Self>,
         axes: Option<&[isize]>,
         keepdims: bool,
         nan_policy: NanPolicy,
     ) -> Result<Array<Self::Acc>>;
-    /// Type-dispatched cumulative sum implementation.
+
+    /// Prefix sum along one axis or in flat C order.
+    ///
+    /// Output shape matches the input. With `axis = None`, elements are
+    /// scanned in C-order linear index.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axis` - Axis to scan, or `None` for flat C order.
+    /// * `nan_policy` - Propagate or ignore NaN for floating dtypes.
+    ///
+    /// # Returns
+    ///
+    /// Cumulative sums with dtype [`Self::Acc`], same shape as `a`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the axis index is out of range.
     fn reduce_cumsum(
         a: &Array<Self>,
         axis: Option<isize>,
@@ -51,28 +167,101 @@ pub trait SumReduce: Scalar {
     ) -> Result<Array<Self::Acc>>;
 }
 
-/// Associative product fold.
+/// Associative product reduction for a scalar dtype.
 ///
-/// Used by [`crate::reduction::prod`] and [`crate::reduction::cumprod`].
+/// Mirrors [`SumReduce`]: `Acc` may differ from `Self` (e.g. `bool` →
+/// `i64`), and floating dtypes honor [`NanPolicy`].
 pub trait ProdReduce: Scalar {
-    /// Accumulator / output element type.
+    /// Accumulator and output element type.
     type Acc: Scalar;
-    /// Multiplicative identity (empty reduction).
+
+    /// Multiplicative identity for an empty reduction.
+    ///
+    /// # Arguments
+    ///
+    /// None — this is a type-level constant query.
+    ///
+    /// # Returns
+    ///
+    /// The neutral element for [`Self::accumulate`] (typically `1`).
     fn identity() -> Self::Acc;
-    /// Promote one element into the accumulator type.
+
+    /// Promote one input element into the accumulator type.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Input element before it enters the reduction kernel.
+    ///
+    /// # Returns
+    ///
+    /// `self` widened or cast to [`Self::Acc`].
     fn to_acc(self) -> Self::Acc;
-    /// `acc * x` in the accumulator type.
+
+    /// Multiply one element into a running accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `acc` - Partial product so far.
+    /// * `x` - Next input element.
+    ///
+    /// # Returns
+    ///
+    /// Updated accumulator after multiplying by `x`.
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc;
-    /// Merge two partial accumulators.
+
+    /// Merge two partial accumulators from independent chains.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - Partial product from one sub-chain.
+    /// * `right` - Partial product from another sub-chain.
+    ///
+    /// # Returns
+    ///
+    /// Combined accumulator value.
     fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc;
-    /// Type-dispatched product implementation.
+
+    /// Axis product implementation for this dtype.
+    ///
+    /// Mirrors [`SumReduce::reduce_sum`] but uses multiplicative identity and
+    /// [`NanPolicy`] branches for floating types.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for floating dtypes.
+    ///
+    /// # Returns
+    ///
+    /// An array of products with dtype [`Self::Acc`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid.
     fn reduce_prod(
         a: &Array<Self>,
         axes: Option<&[isize]>,
         keepdims: bool,
         nan_policy: NanPolicy,
     ) -> Result<Array<Self::Acc>>;
-    /// Type-dispatched cumulative product implementation.
+
+    /// Prefix product along one axis or in flat C order.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axis` - Axis to scan, or `None` for flat C order.
+    /// * `nan_policy` - Propagate or ignore NaN for floating dtypes.
+    ///
+    /// # Returns
+    ///
+    /// Cumulative products with dtype [`Self::Acc`], same shape as `a`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the axis index is out of range.
     fn reduce_cumprod(
         a: &Array<Self>,
         axis: Option<isize>,
@@ -80,31 +269,119 @@ pub trait ProdReduce: Scalar {
     ) -> Result<Array<Self::Acc>>;
 }
 
-/// Orderable element for min / max / argmin / argmax (NaN-aware).
+/// Orderable reductions: min, max, argmin, and argmax.
+///
+/// For `f64`, [`NanPolicy`] selects propagate vs ignore paths. Integer
+/// and boolean types treat every value as finite.
 pub trait ExtremumReduce: Scalar + PartialOrd {
-    /// Type-specific minimum kernel.
+    /// Minimum over selected axes.
+    ///
+    /// For `f64`, [`NanPolicy::Propagate`] poisons the result when any NaN is
+    /// seen; [`NanPolicy::Ignore`] skips NaN elements.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for `f64` input.
+    ///
+    /// # Returns
+    ///
+    /// An array of minima with the same element type as the input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid or a reduced slice is
+    /// empty.
     fn reduce_min(
         a: &Array<Self>,
         axes: Option<&[isize]>,
         keepdims: bool,
         nan_policy: NanPolicy,
     ) -> Result<Array<Self>>;
-    /// Type-specific maximum kernel.
+
+    /// Maximum over selected axes.
+    ///
+    /// NaN semantics match [`Self::reduce_min`].
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for `f64` input.
+    ///
+    /// # Returns
+    ///
+    /// An array of maxima with the same element type as the input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid or a reduced slice is
+    /// empty.
     fn reduce_max(
         a: &Array<Self>,
         axes: Option<&[isize]>,
         keepdims: bool,
         nan_policy: NanPolicy,
     ) -> Result<Array<Self>>;
-    /// Whether this value is NaN (only `f64` is true).
+
+    /// Whether this scalar should be treated as NaN.
+    ///
+    /// Only `f64` returns `true`; integer and boolean types always return
+    /// `false`, letting shared arg/extremum kernels compile once.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Scalar value to classify before extremum/arg reductions.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the value is NaN for this dtype.
     fn is_nan(self) -> bool;
-    /// Type-specific argmin kernel.
+
+    /// Index of the minimum element along an axis or over the whole array.
+    ///
+    /// With `axis = None`, returns a flat C-order index (0-D output). With
+    /// an axis, indices are relative to that axis length.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axis` - Axis along which to find minima, or `None` for flat index.
+    /// * `nan_policy` - Propagate or ignore NaN for `f64` input.
+    ///
+    /// # Returns
+    ///
+    /// An `i64` array of indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the axis is out of range or the slice is empty.
     fn reduce_argmin(
         a: &Array<Self>,
         axis: Option<isize>,
         nan_policy: NanPolicy,
     ) -> Result<Array<i64>>;
-    /// Type-specific argmax kernel.
+
+    /// Index of the maximum element along an axis or over the whole array.
+    ///
+    /// Index semantics match [`Self::reduce_argmin`].
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axis` - Axis along which to find maxima, or `None` for flat index.
+    /// * `nan_policy` - Propagate or ignore NaN for `f64` input.
+    ///
+    /// # Returns
+    ///
+    /// An `i64` array of indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the axis is out of range or the slice is empty.
     fn reduce_argmax(
         a: &Array<Self>,
         axis: Option<isize>,
@@ -112,21 +389,95 @@ pub trait ExtremumReduce: Scalar + PartialOrd {
     ) -> Result<Array<i64>>;
 }
 
-/// Sum-then-divide protocol for [`crate::reduction::mean`].
+/// Sum-then-divide mean reduction.
+///
+/// Accumulates in type `Acc`, then divides by the element count (or the
+/// count of non-NaN elements when [`NanPolicy::Ignore`] applies).
 pub trait MeanReduce: Scalar {
-    /// Mean accumulator / output type.
+    /// Mean accumulator and output type.
     type Acc: Scalar;
+
     /// Additive identity for the mean accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// None — this is a type-level constant query.
+    ///
+    /// # Returns
+    ///
+    /// Zero in [`Self::Acc`] before summing.
     fn identity() -> Self::Acc;
+
     /// Cast an element into the mean accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Input element before summing for the mean.
+    ///
+    /// # Returns
+    ///
+    /// `self` promoted to [`Self::Acc`].
     fn to_acc(self) -> Self::Acc;
-    /// `acc + x` (after promotion).
+
+    /// Add one element into the running sum used for the mean.
+    ///
+    /// # Arguments
+    ///
+    /// * `acc` - Partial sum so far.
+    /// * `x` - Next input element.
+    ///
+    /// # Returns
+    ///
+    /// Updated sum accumulator.
     fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc;
-    /// Merge two partial accumulators.
+
+    /// Merge two partial sum accumulators.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - Partial sum from one sub-chain.
+    /// * `right` - Partial sum from another sub-chain.
+    ///
+    /// # Returns
+    ///
+    /// Combined sum.
     fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc;
-    /// Divide accumulator by the element count.
+
+    /// Divide a sum accumulator by the number of contributing elements.
+    ///
+    /// Called once per output slot after summation (or after NaN-ignore
+    /// counting).
+    ///
+    /// # Arguments
+    ///
+    /// * `acc` - Total sum for one output slot.
+    /// * `count` - Number of finite elements folded into that slot.
+    ///
+    /// # Returns
+    ///
+    /// The arithmetic mean.
     fn divide_by_count(acc: Self::Acc, count: f64) -> Self::Acc;
-    /// Type-dispatched mean implementation.
+
+    /// Axis mean implementation for this dtype.
+    ///
+    /// Sums via associative kernels, then divides by per-slot counts.
+    /// [`NanPolicy::Ignore`] skips NaN and leaves all-NaN slots as NaN.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for floating dtypes.
+    ///
+    /// # Returns
+    ///
+    /// An array of means with dtype [`Self::Acc`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid or a reduced slice is
+    /// empty.
     fn reduce_mean(
         a: &Array<Self>,
         axes: Option<&[isize]>,
@@ -135,11 +486,45 @@ pub trait MeanReduce: Scalar {
     ) -> Result<Array<Self::Acc>>;
 }
 
-/// Element → `f64` cast for population [`crate::reduction::var`] / [`crate::reduction::std`].
+/// Population variance and standard deviation (`ddof = 0`).
+///
+/// All outputs are `f64`. Floating input honors [`NanPolicy`].
 pub trait VarReduce: Scalar {
-    /// Cast to the floating value used by Welford’s algorithm.
+    /// Cast to the `f64` value used in the two-pass variance algorithm.
+    ///
+    /// Every input dtype is converted to `f64` before mean and squared-
+    /// deviation passes in the variance kernels.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Input element to convert into an unbiased sample value.
+    ///
+    /// # Returns
+    ///
+    /// `self` as an `f64` sample value.
     fn to_f64(self) -> f64;
-    /// Type-dispatched population variance implementation.
+
+    /// Population variance (`ddof = 0`) over selected axes.
+    ///
+    /// Always returns `f64`. Uses a two-pass algorithm: mean, then sum of
+    /// squared deviations. [`NanPolicy::Ignore`] applies only to `f64`
+    /// input via a dedicated kernel path.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    /// * `nan_policy` - Propagate or ignore NaN for `f64` input.
+    ///
+    /// # Returns
+    ///
+    /// An `f64` array of population variances.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid or a reduced slice is
+    /// empty.
     fn reduce_var(
         a: &Array<Self>,
         axes: Option<&[isize]>,
@@ -148,16 +533,52 @@ pub trait VarReduce: Scalar {
     ) -> Result<Array<f64>>;
 }
 
-/// Type-dispatched logical reduction used by [`crate::any`] and [`crate::all`].
+/// Logical OR / AND reductions for [`crate::any`] and [`crate::all`].
+///
+/// Non-boolean scalars are converted via [`AsBool`] before folding.
+/// [`NanPolicy`] does not apply to logical reductions.
 pub trait LogicalReduce: Scalar + AsBool {
-    /// Logical OR reduction.
+    /// True if any element is logically true over selected axes.
+    ///
+    /// Non-boolean scalars are converted via [`AsBool`]. [`NanPolicy`] does
+    /// not apply. Empty reduced axes yield `false`.
+    ///
+    /// # Arguments
+    ///
+    /// * `array` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` array of OR-reduction results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid.
     fn reduce_any(
         array: &Array<Self>,
         axes: Option<&[isize]>,
         keepdims: bool,
     ) -> Result<Array<bool>>;
 
-    /// Logical AND reduction.
+    /// True if all elements are logically true over selected axes.
+    ///
+    /// Empty reduced axes yield `true` (vacuous truth), matching NumPy.
+    ///
+    /// # Arguments
+    ///
+    /// * `array` - Input array.
+    /// * `axes` - Axes to reduce, or `None` for all axes.
+    /// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` array of AND-reduction results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when axis indices are invalid.
     fn reduce_all(
         array: &Array<Self>,
         axes: Option<&[isize]>,
@@ -227,11 +648,11 @@ macro_rules! sum_prod_same {
             }
             #[inline]
             fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
-                acc + x
+                acc.wrapping_add(x)
             }
             #[inline]
             fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
-                left + right
+                left.wrapping_add(right)
             }
             fn reduce_sum(
                 a: &Array<Self>,
@@ -273,11 +694,11 @@ macro_rules! sum_prod_same {
             }
             #[inline]
             fn accumulate(acc: Self::Acc, x: Self) -> Self::Acc {
-                acc * x
+                acc.wrapping_mul(x)
             }
             #[inline]
             fn combine(left: Self::Acc, right: Self::Acc) -> Self::Acc {
-                left * right
+                left.wrapping_mul(right)
             }
             fn reduce_prod(
                 a: &Array<Self>,
@@ -775,6 +1196,26 @@ impl ExtremumReduce for f64 {
     }
 }
 
+/// Mean with NaN propagation (or non-floating types).
+///
+/// Every output slot folds the same number of elements. Sums via
+/// [`reduce_associative_with_plan`], then divides each slot by
+/// `plan.reduction_len`.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+///
+/// # Returns
+///
+/// An array of means with dtype `T::Acc`.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid or a reduced slice is
+/// empty.
 fn mean_propagate<T: MeanReduce>(
     a: &Array<T>,
     axes: Option<&[isize]>,
@@ -784,6 +1225,7 @@ fn mean_propagate<T: MeanReduce>(
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
+    // Every slot folds the same number of elements.
     let count = plan.reduction_len as f64;
     let sums = reduce_associative_with_plan(
         a,
@@ -797,6 +1239,26 @@ fn mean_propagate<T: MeanReduce>(
     }))
 }
 
+/// Mean skipping NaN elements, dividing by per-slot finite counts.
+///
+/// Uses [`reduce_ignore_with_counts`] so each output slot tracks how many
+/// non-NaN values contributed. Slots with count zero remain `nan`.
+///
+/// # Arguments
+///
+/// * `a` - Input array.
+/// * `axes` - Axes to reduce, or `None` for all axes.
+/// * `keepdims` - When true, reduced axes remain as length-1 dimensions.
+/// * `nan` - Sentinel written for slots with no finite inputs.
+/// * `is_nan` - Predicate marking values to skip.
+///
+/// # Returns
+///
+/// An array of means with dtype `T::Acc`.
+///
+/// # Errors
+///
+/// Returns an error when axis indices are invalid or allocation fails.
 fn mean_ignore<T: MeanReduce, N: Fn(T) -> bool>(
     a: &Array<T>,
     axes: Option<&[isize]>,
@@ -818,6 +1280,7 @@ fn mean_ignore<T: MeanReduce, N: Fn(T) -> bool>(
         is_nan,
     )?;
     let data = std::sync::Arc::make_mut(&mut sums.data);
+    // Divide only slots that saw at least one finite value.
     for (value, &count) in data.iter_mut().zip(&counts) {
         if count > 0 {
             *value = T::divide_by_count(*value, count as f64);

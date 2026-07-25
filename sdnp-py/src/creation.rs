@@ -1,20 +1,58 @@
-//! Array creation free functions.
+//! Array-creation free functions (`array`, `zeros`, ranges, grids, …).
+//!
+//! Each entry point parses Python arguments, validates bounds at the boundary,
+//! selects a typed `sdnp` factory kernel, and returns a value through the
+//! 0-D unwrap policy. Default dtype is float64 where NumPy would agree.
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use sdnp::MeshgridIndexing;
 
 use crate::array::{array_from_inner, wrap_result, PyArray};
-use crate::coerce::{coerce_array_like, coerce_scalar, parse_shape};
+use crate::coerce::{
+    coerce_array_like, coerce_scalar, parse_shape, require_pyarray,
+};
 use crate::dtype::PyDType;
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
 use crate::validate::{
     check_arange_step, check_diag_input, check_finite_bounds,
     check_geomspace_bounds, check_logspace_base, check_meshgrid_arrays,
-    check_meshgrid_indexing, check_triangle_input, require_pyarray,
+    check_meshgrid_indexing, check_triangle_input,
 };
 
+/// Construct an array from nested sequences, or broadcast a scalar to `shape`.
+///
+/// Bare Python scalars cannot become 0-D arrays; use `shape=` with a scalar
+/// fill value instead. Default dtype follows nested-sequence inference or
+/// float64 for factory-style fills.
+///
+/// # Arguments
+///
+/// * `obj` - Nested sequence, scalar (with `shape=`), or existing `Array`.
+/// * `dtype` - Optional target dtype (`bool`, `int`, `float`, `complex`).
+/// * `shape` - When set, broadcast `obj` as a scalar fill value.
+///
+/// # Returns
+///
+/// An `Array` with ndim ≥ 1, or a bare Python scalar when ndim would be 0.
+///
+/// # Errors
+///
+/// * `ValueError` — 0-D scalar without `shape=`, invalid shape, or core
+///   allocation failure.
+/// * `TypeError` — unsupported nested structure or dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([[1, 2], [3, 4]])
+/// assert a.shape == (2, 2)
+/// b = np.array(5, shape=(2, 2))
+/// assert b.to_list() == [[5, 5], [5, 5]]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (obj, *, dtype=None, shape=None))]
 pub fn array(
@@ -34,6 +72,7 @@ pub fn array(
         return crate::array::into_pyobject(py, arr);
     }
     if crate::coerce::is_python_scalar(obj) {
+        // Bare scalars cannot become 0-D arrays from Python.
         return Err(value_error(
             "0-dimensional arrays cannot be created from Python",
         ));
@@ -42,6 +81,22 @@ pub fn array(
     crate::array::into_pyobject(py, arr)
 }
 
+/// Fill `shape` with one scalar value (typed by the scalar's dtype).
+///
+/// Internal helper for [`full`] and [`array`] with `shape=`.
+///
+/// # Arguments
+///
+/// * `scalar` - Coerced Python scalar with resolved storage type.
+/// * `shape` - Parsed output dimensions.
+///
+/// # Returns
+///
+/// An `Array` filled with `scalar` at every element.
+///
+/// # Errors
+///
+/// * `ValueError` — invalid shape or core allocation failure.
 fn scalar_fill_array(
     scalar: crate::unwrap::PyScalar,
     shape: &[usize],
@@ -56,6 +111,33 @@ fn scalar_fill_array(
     Ok(array_from_inner(inner))
 }
 
+/// Return a new array of zeros with the given `shape`.
+///
+/// Default dtype is float64 when `dtype` is omitted.
+///
+/// # Arguments
+///
+/// * `shape` - Tuple or int sequence defining output dimensions.
+/// * `dtype` - Optional element type (`bool`, `int`, `float`, `complex`).
+///
+/// # Returns
+///
+/// A zero-filled `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — invalid shape or allocation failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.zeros((2, 3))
+/// assert a.shape == (2, 3)
+/// assert a[0, 0] == 0.0
+/// ```
 #[pyfunction]
 #[pyo3(signature = (shape, *, dtype=None))]
 pub fn zeros(
@@ -77,6 +159,32 @@ pub fn zeros(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return a new array of ones with the given `shape`.
+///
+/// Default dtype is float64 when `dtype` is omitted.
+///
+/// # Arguments
+///
+/// * `shape` - Tuple or int sequence defining output dimensions.
+/// * `dtype` - Optional element type (`bool`, `int`, `float`, `complex`).
+///
+/// # Returns
+///
+/// A one-filled `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — invalid shape or allocation failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.ones(3, dtype=int)
+/// assert a.to_list() == [1, 1, 1]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (shape, *, dtype=None))]
 pub fn ones(
@@ -98,6 +206,32 @@ pub fn ones(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return a new array filled with `fill_value`.
+///
+/// Dtype is inferred from `fill_value`; no explicit `dtype` keyword.
+///
+/// # Arguments
+///
+/// * `shape` - Tuple or int sequence defining output dimensions.
+/// * `fill_value` - Scalar broadcast to every element.
+///
+/// # Returns
+///
+/// An `Array` where every element equals `fill_value`.
+///
+/// # Errors
+///
+/// * `ValueError` — invalid shape or allocation failure.
+/// * `TypeError` — unsupported scalar type.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.full((2, 2), 7)
+/// assert a.to_list() == [[7, 7], [7, 7]]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (shape, fill_value))]
 pub fn full(
@@ -110,6 +244,33 @@ pub fn full(
     crate::array::into_pyobject(py, scalar_fill_array(scalar, &shape)?)
 }
 
+/// Return evenly spaced integer values in `[start, stop)` or `[0, start)`.
+///
+/// When `stop` is omitted, `start` acts as the exclusive upper bound and the
+/// implicit start is 0. Output dtype is always int64.
+///
+/// # Arguments
+///
+/// * `start` - Inclusive start, or exclusive stop when `stop` is `None`.
+/// * `stop` - Exclusive upper bound; when omitted, range is `[0, start)`.
+/// * `step` - Stride between consecutive values (must be non-zero).
+///
+/// # Returns
+///
+/// A 1-D int64 `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — zero step or core range failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// assert np.arange(5).to_list() == [0, 1, 2, 3, 4]
+/// assert np.arange(2, 10, 2).to_list() == [2, 4, 6, 8]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (start, stop=None, step=1))]
 pub fn arange(
@@ -128,6 +289,37 @@ pub fn arange(
     crate::array::into_pyobject(py, array_from_inner(ArrayInner::I64(arr)))
 }
 
+/// Return evenly spaced float64 values between `start` and `stop`.
+///
+/// When `endpoint` is true (default), `stop` is included; otherwise the step
+/// is adjusted so samples span the interval without the final point.
+///
+/// # Arguments
+///
+/// * `start` - First sample value (must be finite).
+/// * `stop` - Last sample when `endpoint=true` (must be finite).
+/// * `num` - Number of samples to generate.
+/// * `endpoint` - Include `stop` in the output when true.
+///
+/// # Returns
+///
+/// A 1-D float64 `Array`, or a bare Python float when `num` is 1 and 0-D
+/// unwrap applies.
+///
+/// # Errors
+///
+/// * `ValueError` — non-finite bounds or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.linspace(0.0, 1.0, 5)
+/// assert len(a) == 5
+/// assert a[0] == 0.0
+/// assert a[-1] == 1.0
+/// ```
 #[pyfunction]
 #[pyo3(signature = (start, stop, num, *, endpoint=true))]
 pub fn linspace(
@@ -144,6 +336,35 @@ pub fn linspace(
     )
 }
 
+/// Return evenly spaced samples on a log scale.
+///
+/// Values are `base ** x` where `x` comes from [`linspace`] over `[start,
+/// stop]`. Default `base` is 10.
+///
+/// # Arguments
+///
+/// * `start` - Exponent at the first sample (must be finite).
+/// * `stop` - Exponent at the last sample when `endpoint=true`.
+/// * `num` - Number of samples to generate.
+/// * `endpoint` - Include the `stop` exponent when true.
+/// * `base` - Logarithm base (must be positive and not 1).
+///
+/// # Returns
+///
+/// A 1-D float64 `Array` of powers of `base`.
+///
+/// # Errors
+///
+/// * `ValueError` — non-finite bounds, invalid base, or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.logspace(0.0, 2.0, 3)
+/// assert a.to_list() == [1.0, 10.0, 100.0]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (start, stop, num, *, endpoint=true, base=10.0))]
 pub fn logspace(
@@ -164,6 +385,34 @@ pub fn logspace(
     )
 }
 
+/// Return evenly spaced samples on a geometric progression.
+///
+/// Samples lie on a multiplicative scale from `start` to `stop`. Both
+/// endpoints must be finite and non-zero with the same sign.
+///
+/// # Arguments
+///
+/// * `start` - First sample value.
+/// * `stop` - Last sample when `endpoint=true`.
+/// * `num` - Number of samples to generate.
+/// * `endpoint` - Include `stop` in the output when true.
+///
+/// # Returns
+///
+/// A 1-D float64 `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — invalid bounds or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.geomspace(1.0, 8.0, 4)
+/// assert a.to_list() == [1.0, 2.0, 4.0, 8.0]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (start, stop, num, *, endpoint=true))]
 pub fn geomspace(
@@ -180,6 +429,32 @@ pub fn geomspace(
     )
 }
 
+/// Return an `n × n` identity matrix.
+///
+/// Default dtype is float64. Bool dtype is not supported.
+///
+/// # Arguments
+///
+/// * `n` - Side length of the square output.
+/// * `dtype` - Optional element type (`int`, `float`, or `complex`).
+///
+/// # Returns
+///
+/// A 2-D identity `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — bool dtype requested or core failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.eye(3)
+/// assert a.to_list() == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (n, *, dtype=None))]
 pub fn eye(
@@ -202,6 +477,34 @@ pub fn eye(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return an `n × m` identity-like matrix with diagonal offset `k`.
+///
+/// Default dtype is float64. Bool dtype is not supported.
+///
+/// # Arguments
+///
+/// * `n` - Number of rows.
+/// * `m` - Number of columns.
+/// * `k` - Diagonal offset (`0` is main diagonal, positive is above).
+/// * `dtype` - Optional element type (`int`, `float`, or `complex`).
+///
+/// # Returns
+///
+/// A 2-D `Array` with ones on the selected diagonal.
+///
+/// # Errors
+///
+/// * `ValueError` — bool dtype requested or core failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.eye_with(3, 4, k=1)
+/// assert a.shape == (3, 4)
+/// ```
 #[pyfunction]
 #[pyo3(signature = (n, m, *, k=0, dtype=None))]
 pub fn eye_with(
@@ -226,6 +529,33 @@ pub fn eye_with(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return an `n × n` lower-triangular matrix of ones.
+///
+/// Default dtype is float64. Bool dtype is not supported.
+///
+/// # Arguments
+///
+/// * `n` - Side length of the square output.
+/// * `dtype` - Optional element type (`int`, `float`, or `complex`).
+///
+/// # Returns
+///
+/// A 2-D lower-triangular `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — bool dtype requested or core failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.tri(3)
+/// assert a[2, 0] == 1.0
+/// assert a[0, 2] == 0.0
+/// ```
 #[pyfunction]
 #[pyo3(signature = (n, *, dtype=None))]
 pub fn tri(
@@ -248,6 +578,34 @@ pub fn tri(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return an `n × m` lower-triangular matrix with diagonal offset `k`.
+///
+/// Default dtype is float64. Bool dtype is not supported.
+///
+/// # Arguments
+///
+/// * `n` - Number of rows.
+/// * `m` - Number of columns.
+/// * `k` - Diagonal offset controlling which triangle is filled.
+/// * `dtype` - Optional element type (`int`, `float`, or `complex`).
+///
+/// # Returns
+///
+/// A 2-D lower-triangular `Array`.
+///
+/// # Errors
+///
+/// * `ValueError` — bool dtype requested or core failure.
+/// * `TypeError` — unsupported dtype object.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.tri_with(3, 4, k=-1)
+/// assert a.shape == (3, 4)
+/// ```
 #[pyfunction]
 #[pyo3(signature = (n, m, k=0, *, dtype=None))]
 pub fn tri_with(
@@ -272,6 +630,32 @@ pub fn tri_with(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return a copy with elements above the `k`-th diagonal zeroed.
+///
+/// Bool dtype is not supported. Input must be at least 2-D.
+///
+/// # Arguments
+///
+/// * `array` - Input 2-D (or higher) array.
+/// * `k` - Diagonal offset (`0` keeps main diagonal and below).
+///
+/// # Returns
+///
+/// Lower-triangular view copy with the same shape and dtype.
+///
+/// # Errors
+///
+/// * `TypeError` — 0-D input or bool dtype.
+/// * `ValueError` — non-2-D input or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([[1, 2], [3, 4]])
+/// assert np.tril(a).to_list() == [[1, 0], [3, 4]]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (array, k=0))]
 pub fn tril(
@@ -279,6 +663,7 @@ pub fn tril(
     array: PyRef<PyArray>,
     k: isize,
 ) -> PyResult<PyObject> {
+    array.reject_zero_dim_input("tril")?;
     check_triangle_input("tril", &array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::tril(a, k))?),
@@ -291,6 +676,32 @@ pub fn tril(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Return a copy with elements below the `k`-th diagonal zeroed.
+///
+/// Bool dtype is not supported. Input must be at least 2-D.
+///
+/// # Arguments
+///
+/// * `array` - Input 2-D (or higher) array.
+/// * `k` - Diagonal offset (`0` keeps main diagonal and above).
+///
+/// # Returns
+///
+/// Upper-triangular view copy with the same shape and dtype.
+///
+/// # Errors
+///
+/// * `TypeError` — 0-D input or bool dtype.
+/// * `ValueError` — non-2-D input or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([[1, 2], [3, 4]])
+/// assert np.triu(a).to_list() == [[1, 2], [0, 4]]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (array, k=0))]
 pub fn triu(
@@ -298,6 +709,7 @@ pub fn triu(
     array: PyRef<PyArray>,
     k: isize,
 ) -> PyResult<PyObject> {
+    array.reject_zero_dim_input("triu")?;
     check_triangle_input("triu", &array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::triu(a, k))?),
@@ -310,6 +722,34 @@ pub fn triu(
     crate::array::into_pyobject(py, array_from_inner(inner))
 }
 
+/// Extract a diagonal or construct a diagonal matrix from a vector.
+///
+/// For 2-D input, returns the `k`-th diagonal as a 1-D array. For 1-D input,
+/// returns a square matrix with the vector on the main diagonal. Bool input
+/// is promoted to int64 on the construct path.
+///
+/// # Arguments
+///
+/// * `array` - 1-D vector or 2-D matrix.
+/// * `k` - Diagonal offset (`0` is main diagonal).
+///
+/// # Returns
+///
+/// A 1-D diagonal vector or 2-D diagonal matrix.
+///
+/// # Errors
+///
+/// * `TypeError` — 0-D input.
+/// * `ValueError` — invalid shape for `diag` or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([[1, 2], [3, 4]])
+/// assert np.diag(a).to_list() == [1, 4]
+/// ```
 #[pyfunction]
 #[pyo3(signature = (array, k=0))]
 pub fn diag(
@@ -317,6 +757,7 @@ pub fn diag(
     array: PyRef<PyArray>,
     k: isize,
 ) -> PyResult<PyObject> {
+    array.reject_zero_dim_input("diag")?;
     check_diag_input(&array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::diag(a, k))?),
@@ -330,6 +771,34 @@ pub fn diag(
     wrap_result(py, inner)
 }
 
+/// Return coordinate matrices from coordinate vectors.
+///
+/// All inputs must share the same dtype (int, float, or complex). Bool is
+/// not supported. Empty input returns an empty tuple.
+///
+/// # Arguments
+///
+/// * `arrays` - Tuple of 1-D coordinate arrays.
+/// * `indexing` - `"xy"` (Cartesian default) or `"ij"` (matrix indexing).
+///
+/// # Returns
+///
+/// A tuple of broadcast coordinate grids, one per input vector.
+///
+/// # Errors
+///
+/// * `TypeError` — non-array input or dtype mismatch.
+/// * `ValueError` — invalid `indexing`, shape rules, or core failure.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// x, y = np.meshgrid(np.array([0, 1]), np.array([10, 20]))
+/// assert x.shape == (2, 2)
+/// assert y.shape == (2, 2)
+/// ```
 #[pyfunction]
 #[pyo3(signature = (*arrays, indexing="xy"))]
 pub fn meshgrid(
@@ -413,6 +882,31 @@ pub fn meshgrid(
     Ok(tuple.into())
 }
 
+/// Register array-creation callables on the extension module.
+///
+/// Adds `array`, factory functions, range generators, triangular matrices,
+/// and `meshgrid` to the `sdnp` module object.
+///
+/// # Arguments
+///
+/// * `m` - Bound reference to the `sdnp` extension module.
+///
+/// # Returns
+///
+/// `Ok(())` when every callable is registered successfully.
+///
+/// # Errors
+///
+/// Returns `PyErr` if PyO3 function wrapping or registration fails.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// assert callable(np.zeros)
+/// assert callable(np.meshgrid)
+/// ```
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(array, m)?)?;
     m.add_function(wrap_pyfunction!(zeros, m)?)?;

@@ -1,4 +1,10 @@
-//! Shared strided-layout and run traversal primitives.
+//! Shared strided-layout traversal for kernels across the crate.
+//!
+//! These primitives walk array memory in C-order without materializing
+//! broadcast shapes. [`CoalescedLayout`] merges adjacent axes into linear
+//! runs when every operand's strides allow it; [`RunPlan`] then drives ufuncs,
+//! reductions, indexing, and iterators over an outer run grid plus inner
+//! fixed-stride segments.
 
 mod layout;
 mod run;

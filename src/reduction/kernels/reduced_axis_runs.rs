@@ -1,14 +1,15 @@
+//! Coalesced inner layout for general-strided axis reductions.
+//!
+//! Reduced axes are flattened into a [`RunPlan`] grid once per call. Each
+//! output slot resets a [`StrideCursor`] to its base and walks
+//! `run_len` elements at a fixed operand stride, replacing per-element
+//! N-dimensional carry with far fewer run boundaries.
+
 use super::*;
 
-/// Coalesced reduced-axis layout shared by every general-strided reduction
-/// kernel below.
+/// Shared reduced-axis run geometry for general-strided kernels.
 ///
-/// Built once per call from `plan.reduced_shape`/reduced strides; each output
-/// position then resets a cursor over the run grid to its own base offset and
-/// walks [`Self::run_len`] elements at a fixed [`Self::operand_stride`] —
-/// replacing the old per-reduced-element N-dimensional carry with a run-grid
-/// traversal over far fewer axes (often
-/// exactly one) plus a linear inner run.
+/// Built once per reduction call and reused for every outer output slot.
 pub(crate) struct ReducedAxisRuns {
     plan: RunPlan<1>,
     pub(crate) run_count: usize,
@@ -17,6 +18,19 @@ pub(crate) struct ReducedAxisRuns {
 }
 
 impl ReducedAxisRuns {
+    /// Build run metadata from reduced shape and per-axis strides.
+    ///
+    /// Coalesces the reduced sub-array into a small run grid so inner loops
+    /// advance with a fixed stride instead of N-dimensional index carry.
+    ///
+    /// # Arguments
+    ///
+    /// * `reduced_shape` - Shape of axes folded into each output slot.
+    /// * `reduced_strides` - Input strides along those axes.
+    ///
+    /// # Returns
+    ///
+    /// A [`ReducedAxisRuns`] describing inner walk length and stride.
     pub(crate) fn new(
         reduced_shape: &[usize],
         reduced_strides: &[isize],
@@ -33,7 +47,18 @@ impl ReducedAxisRuns {
         }
     }
 
-    /// A cursor over the run grid, ready to reset to an output base offset.
+    /// Cursor over the run grid, reset per output slot.
+    ///
+    /// Each outer position calls [`StrideCursor::reset`] with its base
+    /// offset before walking reduced-axis elements.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Base byte/element offset for the current outer slot.
+    ///
+    /// # Returns
+    ///
+    /// A [`StrideCursor`] positioned at `offset` on the run grid.
     pub(crate) fn cursor(&self, offset: isize) -> StrideCursor<'_, 1> {
         self.plan.cursor([offset])
     }

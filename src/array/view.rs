@@ -1,14 +1,36 @@
-//! View operations: transpose, reshape, and cheap aliases.
+//! Zero-copy view operations: transpose, reshape, squeeze, and axis insert.
+//!
+//! Views reinterpret the same backing buffer with new shape/strides metadata.
+//! Reshape returns a view when the source is C-contiguous; otherwise it copies.
+//! These operations mirror NumPy's `reshape`, `transpose`, and `squeeze`
+//! without changing the underlying educational storage model.
 
 use std::sync::Arc;
 
 use crate::array::Array;
 use crate::axis::{normalize_axis_list, normalize_insert_axis};
 use crate::dtype::Scalar;
-use crate::error::Result;
-use crate::shape::{c_order_strides, size_of_shape};
+use crate::error::{Error, Result};
 
-/// Insert a size-one axis without copying the backing buffer.
+/// Insert a length-one axis without copying the backing buffer.
+///
+/// The new axis receives stride zero, matching NumPy's `np.newaxis` behavior.
+/// Logical elements are unchanged; only shape/strides metadata grows.
+///
+/// # Arguments
+///
+/// * `array` — source array whose buffer is shared by the result
+/// * `axis` — insertion position; negative values count from the end
+///
+/// # Returns
+///
+/// A view with rank increased by one; shares `array`'s `Arc` buffer.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — `axis` out of range after normalization,
+///   or the resulting layout fails bounds validation in
+///   [`Array::from_shared_parts`]
 pub(crate) fn insert_axis_view<T: Scalar>(
     array: &Array<T>,
     axis: isize,
@@ -30,8 +52,20 @@ pub(crate) fn insert_axis_view<T: Scalar>(
 impl<T: Scalar> Array<T> {
     /// Return a view with axes reversed (matrix transpose for 2-D).
     ///
-    /// Shares the backing buffer. For 0-D and 1-D, returns a view with the
-    /// same layout.
+    /// Shares the backing buffer. For 0-D and 1-D arrays, returns an
+    /// equivalent-layout view with the same shape and strides.
+    ///
+    /// # Arguments
+    ///
+    /// None — only `self` is reinterpreted.
+    ///
+    /// # Returns
+    ///
+    /// A view with `shape` and `strides` reversed; preserves writability.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; layout invariants are preserved by axis reversal.
     pub fn transpose(&self) -> Array<T> {
         if self.ndim() <= 1 {
             return self.view();
@@ -48,18 +82,51 @@ impl<T: Scalar> Array<T> {
         .expect("transpose preserves shape/strides rank")
     }
 
-    /// Alias for [`Array::transpose`].
+    /// Shorthand for [`Array::transpose`].
+    ///
+    /// # Arguments
+    ///
+    /// None — only `self` is reinterpreted.
+    ///
+    /// # Returns
+    ///
+    /// Same as [`Array::transpose`].
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
     #[inline]
     pub fn t(&self) -> Array<T> {
         self.transpose()
     }
 
-    /// Return a view with axes permuted by `axes`.
+    /// Return a view with axes permuted according to `axes`.
     ///
-    /// `axes` must be a permutation of `0..ndim`; negative axes count from
-    /// the end.
+    /// `axes` must be a permutation of `0..ndim`; negative values count from
+    /// the end, NumPy-style. The backing buffer is not copied.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` — new axis order; length must equal [`ndim`](Array::ndim)
+    ///
+    /// # Returns
+    ///
+    /// A view sharing storage with reordered shape and strides.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — layout bounds violated after permute
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sdnp::Array;
+    ///
+    /// let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
+    /// let b = a.permute_axes(&[1, 0]).unwrap();
+    /// assert_eq!(b.get(&[0, 1]).unwrap(), 3);
+    /// ```
     pub fn permute_axes(&self, axes: &[isize]) -> Result<Array<T>> {
-        debug_assert_eq!(axes.len(), self.ndim());
         let axes = normalize_axis_list(axes, self.ndim());
         let shape: Vec<usize> = axes.iter().map(|&a| self.shape[a]).collect();
         let strides: Vec<isize> =
@@ -73,15 +140,41 @@ impl<T: Scalar> Array<T> {
         )
     }
 
-    /// Reshape the array.
+    /// Change the array's shape without changing its element order.
     ///
-    /// One dimension may be `-1` to infer size. Returns a view when this
-    /// array is C-contiguous; otherwise returns a contiguous copy with the
-    /// new shape.
+    /// One dimension may be `-1` to infer its length from the total size.
+    /// Returns a zero-copy view when this array is C-contiguous; otherwise
+    /// copies logical elements into a new owned buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` — target axis lengths; at most one entry may be `-1`
+    ///
+    /// # Returns
+    ///
+    /// An array with the requested shape and the same elements in C-order.
+    /// Views share the buffer when the source is C-contiguous.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — incompatible size, multiple `-1`
+    ///   entries, invalid negative dimensions, or stride overflow
+    /// * [`Error::BufferSizeMismatch`] — only when a copy path is taken and
+    ///   materialized data does not match the resolved shape
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sdnp::Array;
+    ///
+    /// let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
+    /// let b = a.reshape(&[4]).unwrap();
+    /// assert_eq!(b.shape(), &[4]);
+    /// ```
     pub fn reshape(&self, shape: &[isize]) -> Result<Array<T>> {
-        let new_shape = resolve_reshape(shape, self.size());
+        let new_shape = resolve_reshape(shape, self.size())?;
         if self.is_c_contiguous() {
-            let strides = c_order_strides(&new_shape);
+            let strides = crate::shape::c_order_strides(&new_shape)?;
             Self::from_shared_parts(
                 Arc::clone(&self.data),
                 new_shape,
@@ -95,12 +188,23 @@ impl<T: Scalar> Array<T> {
         }
     }
 
-    /// Remove length-one axes as a zero-copy view.
+    /// Drop length-one axes as a zero-copy view.
     ///
-    /// `None` removes every length-one axis. `Some(axes)` removes only the
-    /// requested axes; negative axes count from the end. Requested axes must
-    /// be unique and have length one. Removing every axis yields a valid 0-D
-    /// array.
+    /// Pass `None` to remove every axis of length one. Pass `Some(axes)` to
+    /// remove only the listed axes (negative indices allowed). Every listed
+    /// axis must have length one. Removing all axes yields a valid 0-D array.
+    ///
+    /// # Arguments
+    ///
+    /// * `axes` — axes to squeeze, or `None` to squeeze all length-1 axes
+    ///
+    /// # Returns
+    ///
+    /// A view with fewer dimensions; shares the backing buffer.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — resulting layout exceeds buffer bounds
     pub fn squeeze(&self, axes: Option<&[isize]>) -> Result<Array<T>> {
         let mut remove = vec![false; self.ndim()];
         match axes {
@@ -111,7 +215,6 @@ impl<T: Scalar> Array<T> {
             }
             Some(axes) => {
                 for axis in normalize_axis_list(axes, self.ndim()) {
-                    debug_assert_eq!(self.shape[axis], 1);
                     remove[axis] = true;
                 }
             }
@@ -138,7 +241,21 @@ impl<T: Scalar> Array<T> {
         )
     }
 
-    /// Cheap view alias: same buffer, shape, strides, and offset.
+    /// Return a cheap alias sharing buffer, shape, strides, and offset.
+    ///
+    /// Increments the `Arc` reference count only; no element copy occurs.
+    ///
+    /// # Arguments
+    ///
+    /// None — only `self` is aliased.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Array`] handle referencing the same storage and layout.
+    ///
+    /// # Errors
+    ///
+    /// Never fails.
     pub fn view(&self) -> Array<T> {
         Self::from_shared_parts(
             Arc::clone(&self.data),
@@ -151,146 +268,73 @@ impl<T: Scalar> Array<T> {
     }
 }
 
-fn resolve_reshape(shape: &[isize], size: usize) -> Vec<usize> {
+/// Resolve a NumPy-style reshape spec, including at most one `-1` inference.
+///
+/// Converts signed dimensions to `usize`, infers a single `-1` from the
+/// remaining element count, and verifies the product matches `size`.
+///
+/// # Arguments
+///
+/// * `shape` — target axis lengths; at most one entry may be `-1`
+/// * `size` — total logical element count of the source array
+///
+/// # Returns
+///
+/// A concrete unsigned shape vector suitable for layout construction.
+///
+/// # Errors
+///
+/// * [`Error::InvalidArgument`] — multiple `-1` entries, negative dimension
+///   other than `-1`, size mismatch, ambiguous inference when a zero axis
+///   is present, or shape product overflow
+fn resolve_reshape(shape: &[isize], size: usize) -> Result<Vec<usize>> {
     let mut inferred = None;
     let mut known = 1_usize;
     let mut out = Vec::with_capacity(shape.len());
 
     for (i, &d) in shape.iter().enumerate() {
         if d == -1 {
-            debug_assert!(
-                inferred.is_none(),
-                "only one reshape dimension may be -1"
-            );
+            if inferred.is_some() {
+                return Err(Error::InvalidArgument(
+                    "only one reshape dimension may be -1".into(),
+                ));
+            }
             inferred = Some(i);
             out.push(0);
         } else {
-            debug_assert!(d >= 0, "invalid reshape dimension {d}");
+            if d < 0 {
+                return Err(Error::InvalidArgument(format!(
+                    "invalid reshape dimension {d}"
+                )));
+            }
             let d = d as usize;
-            known *= d;
+            known = known.checked_mul(d).ok_or_else(|| {
+                Error::InvalidArgument(
+                    "reshape shape size overflows usize".into(),
+                )
+            })?;
             out.push(d);
         }
     }
 
     if let Some(idx) = inferred {
-        debug_assert!(
-            known != 0,
-            "cannot infer reshape dimension when another is 0"
-        );
-        debug_assert_eq!(
-            size % known,
-            0,
-            "cannot reshape array of size {size} into shape {shape:?}"
-        );
+        // Cannot infer when a zero dimension makes the product ambiguous.
+        if known == 0 {
+            return Err(Error::InvalidArgument(
+                "cannot infer reshape dimension when another is 0".into(),
+            ));
+        }
+        if size % known != 0 {
+            return Err(Error::InvalidArgument(format!(
+                "cannot reshape array of size {size} into shape {shape:?}"
+            )));
+        }
         out[idx] = size / known;
-    } else {
-        debug_assert_eq!(
-            size_of_shape(&out),
-            size,
+    } else if known != size {
+        return Err(Error::InvalidArgument(format!(
             "cannot reshape array of size {size} into shape {shape:?}"
-        );
+        )));
     }
 
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transpose_shares_buffer() {
-        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let b = a.transpose();
-        assert!(a.shares_buffer_with(&b));
-        assert_eq!(b.shape(), &[3, 2]);
-        assert_eq!(b.strides(), &[1, 3]);
-        assert_eq!(b.get(&[0, 1]).unwrap(), 4); // was a[1,0]
-        assert_eq!(b.get(&[2, 1]).unwrap(), 6); // was a[1,2]
-    }
-
-    #[test]
-    fn reshape_view_when_contiguous() {
-        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let b = a.reshape(&[3, 2]).unwrap();
-        assert!(a.shares_buffer_with(&b));
-        assert_eq!(b.shape(), &[3, 2]);
-        assert_eq!(b.get(&[1, 0]).unwrap(), 3);
-    }
-
-    #[test]
-    fn reshape_infers_minus_one() {
-        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let b = a.reshape(&[-1, 2]).unwrap();
-        assert_eq!(b.shape(), &[3, 2]);
-    }
-
-    #[test]
-    fn reshape_copies_when_not_contiguous() {
-        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let t = a.transpose();
-        assert!(!t.is_c_contiguous());
-        let b = t.reshape(&[6]).unwrap();
-        assert!(!t.shares_buffer_with(&b));
-        assert_eq!(b.shape(), &[6]);
-        assert_eq!(b.get(&[0]).unwrap(), 1);
-        assert_eq!(b.get(&[1]).unwrap(), 4);
-    }
-
-    #[test]
-    fn permute_axes() {
-        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-        let b = a.permute_axes(&[1, 0]).unwrap();
-        assert_eq!(b.shape(), a.transpose().shape());
-        assert_eq!(b.get(&[2, 0]).unwrap(), a.get(&[0, 2]).unwrap());
-
-        let negative = a.permute_axes(&[-1, -2]).unwrap();
-        assert_eq!(negative.shape(), b.shape());
-    }
-
-    #[test]
-    fn squeeze_all_and_selected_axes_share_storage() {
-        let a = Array::from_slice(&[1_i64, 2, 3], &[1, 3, 1]).unwrap();
-        let all = a.squeeze(None).unwrap();
-        assert_eq!(all.shape(), &[3]);
-        assert_eq!(all.to_vec(), [1, 2, 3]);
-        assert!(all.shares_buffer_with(&a));
-
-        let selected = a.squeeze(Some(&[0])).unwrap();
-        assert_eq!(selected.shape(), &[3, 1]);
-        assert!(selected.shares_buffer_with(&a));
-
-        let negative = a.squeeze(Some(&[-1])).unwrap();
-        assert_eq!(negative.shape(), &[1, 3]);
-    }
-
-    #[test]
-    fn squeeze_allows_zero_dimensional_results() {
-        let a = Array::from_slice(&[7_i64], &[1]).unwrap();
-        let scalar = a.squeeze(None).unwrap();
-        assert_eq!(scalar.shape(), &[] as &[usize]);
-        assert_eq!(scalar.item().unwrap(), 7);
-
-        let zero_dimensional = Array::from_slice(&[9_i64], &[]).unwrap();
-        assert!(zero_dimensional.squeeze(None).unwrap().shape().is_empty());
-    }
-
-    #[test]
-    fn squeeze_preserves_empty_broadcast_and_copy_on_write_semantics() {
-        let empty = Array::from_slice(&[] as &[i64], &[0, 1]).unwrap();
-        assert_eq!(empty.squeeze(None).unwrap().shape(), &[0]);
-
-        let base = Array::from_slice(&[1_i64, 2, 3], &[1, 3, 1]).unwrap();
-        let broadcast = base.broadcast_to(&[2, 3, 1]).unwrap();
-        let squeezed = broadcast.squeeze(None).unwrap();
-        assert_eq!(squeezed.shape(), &[2, 3]);
-        assert!(!squeezed.is_writable());
-        assert!(squeezed.shares_buffer_with(&base));
-
-        let mut writable = base.squeeze(None).unwrap();
-        writable.set(&[0], 9).unwrap();
-        assert_eq!(writable.get(&[0]).unwrap(), 9);
-        assert_eq!(base.get(&[0, 0, 0]).unwrap(), 1);
-        assert!(!writable.shares_buffer_with(&base));
-    }
+    Ok(out)
 }

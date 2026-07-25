@@ -1,14 +1,9 @@
-//! Stride-aware reduction / cumulative kernels.
+//! Stride-aware reduction and cumulative execution kernels.
 //!
-//! Dispatch (same philosophy as ufunc / indexing):
-//! 1. suffix reduced axes + C-contiguous slice → contiguous chunk fold
-//! 2. otherwise → general strided walk, itself split into an outer
-//!    traversal and a coalesced reduced-axis inner run (see
-//!    [`ReducedAxisRuns`]). A single reduced axis coalesces to exactly one run,
-//!    so it needs no separate dispatch arm or duplicated kernel.
-//!
-//! Contiguity is decided once at the dispatch site via
-//! [`Array::as_c_contiguous_slice`]; fast-path kernels never fall back.
+//! Dispatch mirrors ufunc and indexing: suffix reduced axes on a C-contiguous
+//! buffer use chunk folds; prefix reductions scan rows in parallel; all other
+//! layouts walk outer runs plus coalesced reduced-axis inner runs via
+//! [`ReducedAxisRuns`]. Contiguity is decided once at the dispatch site.
 
 use std::sync::Arc;
 
@@ -19,7 +14,7 @@ use crate::error::Result;
 use crate::reduction::plan::{
     AxisTraversalPlan, ReducePlan, TraversalSchedule,
 };
-use crate::shape::c_order_strides;
+use crate::shape::{c_order_strides_unchecked, checked_allocation_len};
 use crate::traversal::{RunPlan, StrideCursor};
 
 enum ReductionPath<'a, T> {
@@ -28,6 +23,21 @@ enum ReductionPath<'a, T> {
     GeneralStrided,
 }
 
+/// Classify input layout into a reduction traversal path.
+///
+/// Inspects C-contiguity once and maps [`ReducePlan::traversal_schedule`] to
+/// a concrete slice borrow or the general-strided fallback.
+///
+/// # Arguments
+///
+/// * `a` - Input array (may or may not be C-contiguous).
+/// * `plan` - Precomputed axis geometry for this reduction.
+///
+/// # Returns
+///
+/// [`ReductionPath::SuffixContiguous`] or [`ReductionPath::PrefixContiguous`]
+/// when the buffer is contiguous and the plan allows chunk/row scans;
+/// otherwise [`ReductionPath::GeneralStrided`].
 #[inline]
 fn reduction_path<'a, T: Scalar>(
     a: &'a Array<T>,
@@ -38,12 +48,7 @@ fn reduction_path<'a, T: Scalar>(
         TraversalSchedule::SuffixContiguous => {
             ReductionPath::SuffixContiguous(contiguous.unwrap())
         }
-        TraversalSchedule::PrefixContiguous {
-            reduced_len,
-            output_len,
-        } => {
-            debug_assert_eq!(reduced_len, plan.reduction_len);
-            debug_assert_eq!(output_len, plan.output_len);
+        TraversalSchedule::PrefixContiguous { .. } => {
             ReductionPath::PrefixContiguous(contiguous.unwrap())
         }
         TraversalSchedule::GeneralStrided => ReductionPath::GeneralStrided,

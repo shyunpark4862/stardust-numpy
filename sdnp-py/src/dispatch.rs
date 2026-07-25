@@ -1,4 +1,9 @@
-//! Binary dtype promotion and ufunc dispatch.
+//! Binary/unary ufunc dispatch with dtype promotion.
+//!
+//! Python operators and module-level ufuncs share this layer. Scalars are
+//! detected without treating 0-D arrays as literals; arrays are promoted to
+//! a common [`PyDType`] before monomorphized kernels run. Results pass through
+//! [`crate::unwrap::finish`] for 0-D scalar unwrap.
 
 use pyo3::prelude::*;
 use sdnp::{
@@ -14,6 +19,41 @@ use crate::error::{map_sdnp, value_error, zero_division_error};
 use crate::inner::ArrayInner;
 use crate::unwrap::{finish, PyScalar};
 
+/// Entry point for binary ufuncs and rich comparison operators.
+///
+/// Fast path: two Python scalar literals → promote dtypes, compute in scalar
+/// space, optionally unwrap 0-D. General path: coerce both sides to arrays,
+/// [`promote_arrays`], then monomorphized `dispatch_*_*` kernels. Comparison
+/// ops return bool arrays (or bare bool for scalar–scalar).
+///
+/// # Arguments
+///
+/// * `py` - GIL token for constructing the return value.
+/// * `left` - Left operand (`Array`, nested list, or scalar literal).
+/// * `right` - Right operand (same coercion rules as `left`).
+/// * `op` - [`BinaryOp`] tag selecting the kernel.
+///
+/// # Returns
+///
+/// Result array or scalar after [`finish`] unwrap policy.
+///
+/// # Errors
+///
+/// * `TypeError` — operand coercion failure.
+/// * `ValueError` — unsupported op for dtype, promotion/cast failure, or
+///   division by zero.
+/// * `ZeroDivisionError` — integer division/remainder by zero.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([1, 2, 3])
+/// assert np.add(a, 1).to_list() == [2, 3, 4]
+/// assert (a == 2).to_list() == [False, True, False]
+/// assert np.add(1, 2) == 3
+/// ```
 pub fn binary_op(
     py: Python<'_>,
     left: &Bound<'_, PyAny>,
@@ -27,6 +67,7 @@ pub fn binary_op(
         return scalar_binary(py, ls, rs, dt, op);
     }
     let (larr, rarr) = promote_arrays(left, right)?;
+    // After promotion both arms share one dtype tag.
     let inner = match (larr, rarr) {
         (ArrayInner::Bool(l), ArrayInner::Bool(r)) => {
             dispatch_bool_bool(&l, &r, op)?
@@ -47,6 +88,37 @@ pub fn binary_op(
     finish(py, inner)
 }
 
+/// Entry point for unary ufuncs and sign/abs/not tests.
+///
+/// Scalar literals take the scalar fast path (wrap as 0-D, dispatch, unwrap).
+/// Array-like input is coerced via [`coerce_array_like`] then passed to
+/// [`dispatch_unary_inner`]. Some ops change dtype (e.g. `abs` on complex
+/// → float, `logical_not` → bool).
+///
+/// # Arguments
+///
+/// * `py` - GIL token for constructing the return value.
+/// * `obj` - Operand (`Array`, nested list, or scalar literal).
+/// * `op` - [`UnaryOp`] tag selecting the kernel.
+///
+/// # Returns
+///
+/// Result array or scalar after [`finish`] unwrap policy.
+///
+/// # Errors
+///
+/// * `TypeError` — coercion failure.
+/// * `ValueError` — unsupported unary op for the operand dtype.
+///
+/// # Examples
+///
+/// ```python
+/// import sdnp as np
+///
+/// a = np.array([-1.0, 2.0])
+/// assert np.negative(a).to_list() == [1.0, -2.0]
+/// assert np.abs(-3) == 3
+/// ```
 pub fn unary_op(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -61,11 +133,46 @@ pub fn unary_op(
     finish(py, dispatch_unary_inner(arr.inner, op)?)
 }
 
+/// Return whether `obj` is a scalar literal and not a `PyArray`.
+///
+/// Uses [`coerce_scalar`] success as a type probe but excludes existing
+/// `sdnp.Array` instances (including would-be 0-D arrays). Distinguishes
+/// `np.add(1, 2)` from `np.add(arr, 1)`.
+///
+/// # Arguments
+///
+/// * `obj` - Candidate operand.
+///
+/// # Returns
+///
+/// `true` when the object coerces as a bare scalar and is not an Array.
+///
+/// # Errors
+///
+/// Never fails.
 fn is_scalar(obj: &Bound<'_, PyAny>) -> bool {
     crate::coerce::coerce_scalar(obj).is_ok()
         && !obj.extract::<PyRef<crate::array::PyArray>>().is_ok()
 }
 
+/// Coerce both operands and promote to a common storage dtype.
+///
+/// Each side is parsed with [`coerce_array_like`]. Dtype promotion uses
+/// [`PyDType::promote`] (complex > float > int > bool), then both inners
+/// are cast via [`cast_inner`] so dispatch sees matching enum variants.
+///
+/// # Arguments
+///
+/// * `left` - Left array-like operand.
+/// * `right` - Right array-like operand.
+///
+/// # Returns
+///
+/// Tuple of promoted [`ArrayInner`] values (same dtype tag in both arms).
+///
+/// # Errors
+///
+/// * `TypeError` / `ValueError` — coercion or cast failures on either side.
 fn promote_arrays(
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
@@ -76,6 +183,24 @@ fn promote_arrays(
     Ok((cast_inner(l.inner, dt)?, cast_inner(r.inner, dt)?))
 }
 
+/// Cast [`ArrayInner`] to `dt` via typed core `astype` kernels.
+///
+/// No-op when source and target tags match. Otherwise selects the appropriate
+/// `Array::astype()` monomorphization. Used after dtype promotion and when
+/// `array(..., dtype=)` / `astype` request explicit casts.
+///
+/// # Arguments
+///
+/// * `inner` - Source storage (any of the four variants).
+/// * `dt` - Target [`PyDType`].
+///
+/// # Returns
+///
+/// New [`ArrayInner`] with elements converted to `dt`.
+///
+/// # Errors
+///
+/// * `ValueError` — unsupported cast pair or core cast failure.
 pub(crate) fn cast_inner(
     inner: ArrayInner,
     dt: PyDType,
@@ -133,6 +258,28 @@ fn scalar_to_inner_zero_d(s: &PyScalar) -> ArrayInner {
     crate::inner::scalar_to_inner(s)
 }
 
+/// Execute a binary op on two promoted scalars and apply unwrap policy.
+///
+/// Casts both scalars to the promoted dtype via [`cast_scalar`]. Comparison
+/// and logical ops route through [`scalar_predicate`] and always yield bool
+/// storage; arithmetic keeps the promoted numeric dtype.
+///
+/// # Arguments
+///
+/// * `py` - GIL token for the return value.
+/// * `left` - Left scalar (already coerced).
+/// * `right` - Right scalar (already coerced).
+/// * `dt` - Promoted computation dtype.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Python scalar or 0-D-unwrapped result via [`finish`].
+///
+/// # Errors
+///
+/// * `ValueError` — unsupported op, cast failure, or overflow/division rules.
+/// * `ZeroDivisionError` — integer division by zero.
 fn scalar_binary(
     py: Python<'_>,
     left: PyScalar,
@@ -153,6 +300,7 @@ fn scalar_binary(
             | BinaryOp::And
             | BinaryOp::Or
     ) {
+        // Comparisons return bool arrays even for numeric scalar inputs.
         let value = scalar_predicate(&l, &r, op)?;
         return finish(
             py,
@@ -220,6 +368,25 @@ fn scalar_binary(
     finish(py, inner)
 }
 
+/// Evaluate comparison or logical ops on two same-dtype scalars.
+///
+/// Returns a plain Rust `bool` (not wrapped). Ordering comparisons on bool
+/// and complex are rejected. Integer/float truthiness for `and`/`or` follows
+/// nonzero semantics.
+///
+/// # Arguments
+///
+/// * `left` - Left scalar at promoted dtype.
+/// * `right` - Right scalar at promoted dtype.
+/// * `op` - Comparison or logical [`BinaryOp`].
+///
+/// # Returns
+///
+/// Predicate result as `bool`.
+///
+/// # Errors
+///
+/// * `ValueError` — ordering on bool/complex or internal dtype mismatch.
 fn scalar_predicate(
     left: &PyScalar,
     right: &PyScalar,
@@ -282,6 +449,24 @@ fn scalar_predicate(
     })
 }
 
+/// Cast a [`PyScalar`] to a target dtype for scalar ufunc computation.
+///
+/// Implements the scalar subset of [`cast_inner`] (widening only; narrowing
+/// falls through unchanged and may fail later in dispatch). No-op when tags
+/// already match.
+///
+/// # Arguments
+///
+/// * `s` - Source scalar.
+/// * `dt` - Promoted target dtype.
+///
+/// # Returns
+///
+/// Scalar re-tagged at `dt` when a widening cast applies.
+///
+/// # Errors
+///
+/// Never fails (unsupported narrows keep the original scalar).
 fn cast_scalar(s: PyScalar, dt: PyDType) -> PyResult<PyScalar> {
     if s.dtype() == dt {
         return Ok(s);
@@ -305,6 +490,7 @@ fn cast_scalar(s: PyScalar, dt: PyDType) -> PyResult<PyScalar> {
     })
 }
 
+/// Binary ufunc / operator tag used by dispatch tables.
 #[derive(Clone, Copy)]
 pub enum BinaryOp {
     Add,
@@ -324,6 +510,7 @@ pub enum BinaryOp {
     Or,
 }
 
+/// Unary ufunc / operator tag used by dispatch tables.
 #[derive(Clone, Copy)]
 pub enum UnaryOp {
     Neg,
@@ -337,6 +524,24 @@ pub enum UnaryOp {
     Imag,
 }
 
+/// Dispatch a unary op on typed [`ArrayInner`] storage.
+///
+/// Matches `(variant, op)` pairs to core ufunc kernels. Result dtype may
+/// differ from input (e.g. complex `abs` → float, `logical_not` → bool).
+/// Float/complex-only predicates reject bool/int inputs.
+///
+/// # Arguments
+///
+/// * `inner` - Input array storage (any variant).
+/// * `op` - Unary operation tag.
+///
+/// # Returns
+///
+/// New [`ArrayInner`] with operation result.
+///
+/// # Errors
+///
+/// * `ValueError` — unsupported `(dtype, op)` pair or kernel failure.
 fn dispatch_unary_inner(
     inner: ArrayInner,
     op: UnaryOp,
@@ -365,6 +570,7 @@ fn dispatch_unary_inner(
             Ok(ArrayInner::F64(map_sdnp(absolute(&a))?))
         }
         (ArrayInner::C64(a), Abs) => {
+            // Complex abs is real-valued (modulus).
             Ok(ArrayInner::F64(map_sdnp(absolute(&a))?))
         }
         (ArrayInner::Bool(a), Not) => {
@@ -388,6 +594,7 @@ fn dispatch_unary_inner(
         (ArrayInner::F64(a), IsFinite) => {
             Ok(ArrayInner::Bool(map_sdnp(isfinite(&a))?))
         }
+        // isnan/isinf/isfinite are defined for float and complex only.
         (ArrayInner::C64(a), IsNan) => {
             Ok(ArrayInner::Bool(map_sdnp(isnan(&a))?))
         }
@@ -407,6 +614,24 @@ fn dispatch_unary_inner(
     }
 }
 
+/// Binary ufunc dispatch for two bool arrays.
+///
+/// Supports logical `and`/`or` and equality comparisons only; arithmetic
+/// ops are rejected at this dtype.
+///
+/// # Arguments
+///
+/// * `l` - Left bool array.
+/// * `r` - Right bool array (broadcast-compatible).
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Bool [`ArrayInner`] result (comparisons also bool).
+///
+/// # Errors
+///
+/// * `ValueError` — unsupported bool binary op or kernel failure.
 fn dispatch_bool_bool(
     l: &Array<bool>,
     r: &Array<bool>,
@@ -421,6 +646,25 @@ fn dispatch_bool_bool(
     })
 }
 
+/// Binary ufunc dispatch for two int64 arrays.
+///
+/// Full arithmetic, comparisons, and logical ops. Integer division uses
+/// truncating semantics with explicit zero and overflow checks in scalar
+/// paths; array paths delegate to core kernels.
+///
+/// # Arguments
+///
+/// * `l` - Left int array.
+/// * `r` - Right int array.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// [`ArrayInner`] with result dtype (bool for comparisons, i64 otherwise).
+///
+/// # Errors
+///
+/// * `ValueError` — kernel failure.
 fn dispatch_i64_i64(
     l: &Array<i64>,
     r: &Array<i64>,
@@ -445,6 +689,24 @@ fn dispatch_i64_i64(
     })
 }
 
+/// Binary ufunc dispatch for two float64 arrays.
+///
+/// Supports full arithmetic, comparisons, and logical truthiness. Uses core
+/// floating kernels for broadcast-aware element-wise evaluation.
+///
+/// # Arguments
+///
+/// * `l` - Left float array.
+/// * `r` - Right float array.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// [`ArrayInner`] with result dtype (bool for comparisons, f64 otherwise).
+///
+/// # Errors
+///
+/// * `ValueError` — kernel failure.
 fn dispatch_f64_f64(
     l: &Array<f64>,
     r: &Array<f64>,
@@ -469,6 +731,25 @@ fn dispatch_f64_f64(
     })
 }
 
+/// Binary ufunc dispatch for two complex128 arrays.
+///
+/// Arithmetic and equality are supported; ordering comparisons are rejected
+/// (NumPy-compatible). Logical ops use nonzero complex magnitude semantics.
+///
+/// # Arguments
+///
+/// * `l` - Left complex array.
+/// * `r` - Right complex array.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// [`ArrayInner`] with result dtype (bool for comparisons/logical, c64 for
+/// arithmetic).
+///
+/// # Errors
+///
+/// * `ValueError` — ordering comparison or kernel failure.
 fn dispatch_c64_c64(
     l: &Array<Complex64>,
     r: &Array<Complex64>,
@@ -494,6 +775,21 @@ fn dispatch_c64_c64(
     })
 }
 
+/// Scalar bool binary kernel for ufunc fast path.
+///
+/// # Arguments
+///
+/// * `l` - Left bool value.
+/// * `r` - Right bool value.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Result bool for logical/compare ops.
+///
+/// # Errors
+///
+/// * `ValueError` — non-logical/non-equality op on bool scalars.
 fn bool_op(l: bool, r: bool, op: BinaryOp) -> PyResult<bool> {
     Ok(match op {
         BinaryOp::And => l && r,
@@ -504,6 +800,26 @@ fn bool_op(l: bool, r: bool, op: BinaryOp) -> PyResult<bool> {
     })
 }
 
+/// Scalar i64 binary kernel for ufunc fast path.
+///
+/// Wrapping add/sub/mul; checked div/mod; limited pow exponent range.
+/// Comparisons and logical ops return 0/1 int truth values for non-predicate
+/// scalar path (predicate path uses [`scalar_predicate`] instead).
+///
+/// # Arguments
+///
+/// * `l` - Left int value.
+/// * `r` - Right int value.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Computed i64 result.
+///
+/// # Errors
+///
+/// * `ValueError` — division/mod overflow or bad pow exponent.
+/// * `ZeroDivisionError` — div/mod by zero.
 fn i64_op(l: i64, r: i64, op: BinaryOp) -> PyResult<i64> {
     Ok(match op {
         BinaryOp::Add => l.wrapping_add(r),
@@ -540,6 +856,24 @@ fn i64_op(l: i64, r: i64, op: BinaryOp) -> PyResult<i64> {
     })
 }
 
+/// Scalar f64 binary kernel for ufunc fast path.
+///
+/// Uses native floating arithmetic. Comparisons and logical ops encode bool
+/// results as `1.0`/`0.0` for the non-predicate scalar path.
+///
+/// # Arguments
+///
+/// * `l` - Left float value.
+/// * `r` - Right float value.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Computed f64 result.
+///
+/// # Errors
+///
+/// Never fails (IEEE rules apply for div/pow).
 fn f64_op(l: f64, r: f64, op: BinaryOp) -> PyResult<f64> {
     Ok(match op {
         BinaryOp::Add => l + r,
@@ -608,6 +942,24 @@ fn f64_op(l: f64, r: f64, op: BinaryOp) -> PyResult<f64> {
     })
 }
 
+/// Scalar complex128 binary kernel for ufunc fast path.
+///
+/// Ordering comparisons are unsupported. Equality and logical ops return
+/// complex `1+0j` / `0+0j` sentinels in the non-predicate scalar path.
+///
+/// # Arguments
+///
+/// * `l` - Left complex value.
+/// * `r` - Right complex value.
+/// * `op` - Binary operation tag.
+///
+/// # Returns
+///
+/// Computed [`Complex64`] result.
+///
+/// # Errors
+///
+/// * `ValueError` — ordering comparison requested.
 fn c64_op(l: Complex64, r: Complex64, op: BinaryOp) -> PyResult<Complex64> {
     Ok(match op {
         BinaryOp::Add => l + r,
@@ -657,6 +1009,25 @@ fn c64_op(l: Complex64, r: Complex64, op: BinaryOp) -> PyResult<Complex64> {
     })
 }
 
+/// Thin wrapper used by `Array` dunder methods (`__add__`, …).
+///
+/// Forwards to [`binary_op`] so operator overloads share promotion, coercion,
+/// and unwrap logic with module-level ufuncs.
+///
+/// # Arguments
+///
+/// * `py` - GIL token.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `op` - Operator-mapped [`BinaryOp`].
+///
+/// # Returns
+///
+/// Same as [`binary_op`].
+///
+/// # Errors
+///
+/// Same as [`binary_op`].
 pub fn py_binary(
     py: Python<'_>,
     l: &Bound<'_, PyAny>,
@@ -666,6 +1037,24 @@ pub fn py_binary(
     binary_op(py, l, r, op)
 }
 
+/// Thin wrapper used by module-level unary ufuncs.
+///
+/// Forwards to [`unary_op`] so free functions and methods share one dispatch
+/// pipeline.
+///
+/// # Arguments
+///
+/// * `py` - GIL token.
+/// * `obj` - Operand.
+/// * `op` - Ufunc-mapped [`UnaryOp`].
+///
+/// # Returns
+///
+/// Same as [`unary_op`].
+///
+/// # Errors
+///
+/// Same as [`unary_op`].
 pub fn py_unary(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,

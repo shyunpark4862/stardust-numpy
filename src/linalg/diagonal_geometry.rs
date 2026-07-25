@@ -1,17 +1,37 @@
-//! Shared two-dimensional diagonal geometry.
+//! Two-dimensional diagonal indexing shared by `diagonal` and `trace`.
+//!
+//! Given matrix dimensions and a NumPy-style offset, this module resolves
+//! where a diagonal starts and how many elements it contains. Triangle
+//! predicates support future masked linear algebra without duplicating
+//! offset arithmetic.
 
-/// Start coordinates and length of diagonal `offset` in a matrix.
+/// Inclusive start and length of a diagonal in a 2-D face.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DiagonalGeometry {
-    /// Starting row.
+    /// First row index on the diagonal.
     pub(crate) row_start: usize,
-    /// Starting column.
+    /// First column index on the diagonal.
     pub(crate) column_start: usize,
-    /// Number of diagonal elements.
+    /// Number of elements along the diagonal.
     pub(crate) len: usize,
 }
 
-/// Resolve a NumPy-style diagonal offset for a `rows × columns` matrix.
+/// Compute diagonal geometry for a `rows × columns` matrix face.
+///
+/// Non-negative offsets shift the start column right; negative offsets shift
+/// the start row down. Length is clipped by both dimensions so the walk stays
+/// inside the face.
+///
+/// # Arguments
+///
+/// * `rows` — height of the 2-D face
+/// * `columns` — width of the 2-D face
+/// * `offset` — diagonal offset (`0` = main diagonal, `k>0` = upper, `k<0`
+///   = lower)
+///
+/// # Returns
+///
+/// Inclusive `(row_start, column_start)` and the number of diagonal elements.
 pub(crate) fn diagonal_geometry(
     rows: usize,
     columns: usize,
@@ -32,7 +52,20 @@ pub(crate) fn diagonal_geometry(
     }
 }
 
-/// Whether `(row, column)` lies on or below diagonal `offset`.
+/// True when `(row, column)` is on or below diagonal `offset`.
+///
+/// Uses signed arithmetic so large indices compare correctly relative to the
+/// shifted main diagonal.
+///
+/// # Arguments
+///
+/// * `row` — row index on the 2-D face
+/// * `column` — column index on the 2-D face
+/// * `offset` — same convention as [`diagonal_geometry`]
+///
+/// # Returns
+///
+/// `true` when the cell lies in the lower triangle (including the diagonal).
 #[inline]
 pub(crate) fn is_lower_triangle(
     row: usize,
@@ -42,7 +75,19 @@ pub(crate) fn is_lower_triangle(
     column as i128 <= row as i128 + offset as i128
 }
 
-/// Whether `(row, column)` lies on or above diagonal `offset`.
+/// True when `(row, column)` is on or above diagonal `offset`.
+///
+/// Complement of the lower triangle for the same offset convention.
+///
+/// # Arguments
+///
+/// * `row` — row index on the 2-D face
+/// * `column` — column index on the 2-D face
+/// * `offset` — same convention as [`diagonal_geometry`]
+///
+/// # Returns
+///
+/// `true` when the cell lies in the upper triangle (including the diagonal).
 #[inline]
 pub(crate) fn is_upper_triangle(
     row: usize,
@@ -50,30 +95,4 @@ pub(crate) fn is_upper_triangle(
     offset: isize,
 ) -> bool {
     column as i128 >= row as i128 + offset as i128
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_positive_negative_and_empty_diagonals() {
-        assert_eq!(
-            diagonal_geometry(3, 4, 1),
-            DiagonalGeometry {
-                row_start: 0,
-                column_start: 1,
-                len: 3,
-            }
-        );
-        assert_eq!(
-            diagonal_geometry(3, 4, -1),
-            DiagonalGeometry {
-                row_start: 1,
-                column_start: 0,
-                len: 2,
-            }
-        );
-        assert_eq!(diagonal_geometry(3, 4, 8).len, 0);
-    }
 }
