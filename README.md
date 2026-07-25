@@ -56,45 +56,50 @@ and are ignored; the Markdown report is the reviewable checked-in result.
 
 ```
 src/
-  dtype.rs       Scalar + Promote + CastTo + AsBool
+  dtype/         Scalar + promotion + explicit ArrayCast
   axis.rs        shared negative-axis normalization
   shape.rs       size / strides / contiguity / offset_at
   error.rs
-  array/         Array<T>, element get/set (CoW), views (transpose/reshape)
+  array/         Array<T>, element get/set (CoW), transpose/reshape/squeeze
   index/         IndexSpec, bounds helpers, gather / scatter
-  create.rs      zeros/ones/full/arange/eye
+  creation/      factories, ranges/spaces, grids, triangular arrays
   broadcast.rs   broadcast_shape / broadcast_to / …
   ufunc/         kernels + ops + traits (internals pub(crate))
-  layout.rs      joint operand layout coalescing (pub(crate))
-  run.rs         prepared fixed-stride runs (pub(crate))
-  stride_iter.rs StrideIter (pub(crate); public API in Phase 7)
-  reduce/        reduction geometry, traits, ops, split kernel families
-  join.rs        concatenate / stack / vstack / hstack
-  select.rs      where_ / nonzero / clip
-  sort.rs        sort / argsort / unique
-  diagonal.rs    shared diagonal geometry (pub(crate))
-  linalg/        Phase 6 geometry / kernels / ops (pub(crate) skeleton)
-  format.rs      Phase 7 (pub(crate) stub)
+  traversal/     coalesced layouts, RunPlan, stride cursors
+  iteration/     ndindex / ndenumerate / nditer / flat / axis-0 iteration
+  reduction/     plans, traits, ops, split kernel families
+  manipulation/  concatenate / stack / vstack / hstack
+  selection/     where_ / nonzero / clip
+  sorting/       sort / argsort / unique
+  linalg/        contraction/diagonal geometry, traits, kernels, public ops
 ```
 
-## What already works (Phase 0–5)
+## What already works (Phase 0–7.5)
 
 - `Array::from_vec` / `from_slice` / `get` / `set` (CoW) / `item` / `to_vec` / `as_c_contiguous_slice`
-- `transpose` / `t` / `permute_axes` / `reshape` / `copy` / `broadcast_to` (broadcast views read-only)
+- `transpose` / `t` / `permute_axes` / `reshape` / `squeeze` / `copy` / `astype`
+- internal `broadcast_to` support (broadcast views remain read-only)
 - indexing: `IndexSpec` + `gather` / `scatter` / `scatter_array` (basic → view; fancy/bool → copy; 음수·step·newaxis·ellipsis)
 - `zeros` / `ones` / `full` / `arange` (`i64`) / `eye` (+ broadcasting)
 - ufuncs: `add`/`subtract`/`multiply`/`divide`/`trunc_divide`/`remainder`/`power`/`negative`/`absolute`
 - comparisons + `logical_and`/`or`/`not` + `isnan`/`isinf`/`isfinite`
 - complex: `conj` / `real` / `imag`
 - reductions: `sum`/`prod`/`min`/`max`/`mean`/`var`/`std`/`any`/`all`
-  (`axes`, `keepdims`); `argmin`/`argmax`/`cumsum`/`cumprod` (`axis`)
+  (`axes`, `keepdims`); `argmin`/`argmax`/`cumsum`/`cumprod` (`axis`);
+  numeric reductions accept `NanPolicy::{Propagate, Ignore}`
 - joining: `concatenate` / `stack` / `vstack` / `hstack`
 - selection: `where_` / `nonzero` / `clip`
-- sorting: `sort` / `sort_in_place` / `argsort` / `unique`
+- sorting: `sort` / `argsort` / `unique`
 - spaces: `linspace` / `logspace` / `geomspace` / `meshgrid`
-- `dtype::{Scalar, Promote, CastTo, AsBool}`
+- linear algebra: `dot` / `matmul` / `vdot` / `outer` / `diagonal` / `trace`
+- triangular arrays: `tri` / `tri_with` / `tril` / `triu` / `diag`
+- iteration: `ndindex` / `ndenumerate` / `nditer` / `Array::flat` /
+  `Array::iter_axis0` / `Array::axis0_len`
+- `dtype::{Scalar, Promote, CastTo, ArrayCast, AsBool}`
 
-Intentional differences vs NumPy: no operator overloading; `divide` follows Rust `/`; CoW on write; no `out`/`where`.
+Intentional differences vs NumPy: no operator overloading; scalar-valued
+linear algebra results are 0-D `Array`s; `dot` supports only 1-D/2-D inputs;
+`divide` follows Rust `/`; CoW on write; no `out`/`where`.
 
 Fill in modules phase-by-phase; Python bindings are Phase 8.
 

@@ -5,9 +5,10 @@ mod view;
 
 pub(crate) use view::insert_axis_view;
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::dtype::Scalar;
+use crate::dtype::{ArrayCast, Scalar};
 use crate::error::{Error, Result};
 use crate::shape::{
     c_order_strides, checked_size_of_shape, is_c_contiguous, size_of_shape,
@@ -194,6 +195,20 @@ impl<T: Scalar> Array<T> {
         }
     }
 
+    /// Cast every element to `Out` and return a new C-contiguous array.
+    ///
+    /// All conversions among `bool`, `i64`, `f64`, and
+    /// [`Complex64`](crate::Complex64) are supported. Narrowing follows Rust
+    /// `as` semantics; complex-to-real conversions use the real component.
+    /// Casting to the same dtype still returns a deep copy.
+    pub fn astype<Out>(&self) -> Result<Array<Out>>
+    where
+        Out: Scalar,
+        T: ArrayCast<Out>,
+    {
+        crate::ufunc::kernels::map_unary(self, T::array_cast)
+    }
+
     /// Collect logical elements in C-order into a new `Vec`.
     pub fn to_vec(&self) -> Vec<T> {
         self.to_vec_c_order()
@@ -201,12 +216,22 @@ impl<T: Scalar> Array<T> {
 
     /// Collect logical elements in C-order into a new `Vec`.
     pub(crate) fn to_vec_c_order(&self) -> Vec<T> {
+        self.to_c_order_cow().into_owned()
+    }
+
+    /// Borrow logical C-order elements when packed, otherwise materialize them.
+    pub(crate) fn to_c_order_cow(&self) -> Cow<'_, [T]> {
         if let Some(slice) = self.as_c_contiguous_slice() {
-            return slice.to_vec();
+            return Cow::Borrowed(slice);
         }
 
-        let plan = crate::run::RunPlan::new(&self.shape, [&self.strides]);
-        crate::run::collect_unary(&plan, &self.data, self.offset, |value| value)
+        let plan = crate::traversal::RunPlan::new(&self.shape, [&self.strides]);
+        Cow::Owned(crate::traversal::collect_unary(
+            &plan,
+            &self.data,
+            self.offset,
+            |value| value,
+        ))
     }
 }
 
@@ -227,7 +252,7 @@ mod tests {
         let a = Array::from_slice(&[42_i64], &[]).unwrap();
         assert_eq!(a.ndim(), 0);
         assert_eq!(a.size(), 1);
-        assert_eq!(a.strides(), &[]);
+        assert!(a.strides().is_empty());
         assert_eq!(a.item().unwrap(), 42);
         assert_eq!(a.get(&[]).unwrap(), 42);
     }

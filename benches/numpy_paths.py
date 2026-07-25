@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 SMALL_SIDE = 32
+LINALG_SIDE = 128
 MEDIUM_SIDE = 256
 SIDE = 1024
 ELEMENTS = SIDE * SIDE
@@ -83,6 +84,46 @@ def divide_i64(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return out
 
 
+def consume_ndindex(shape: tuple[int, ...]) -> int:
+    """Consume ``np.ndindex`` while retaining coordinate work."""
+    checksum = 0
+    for index in np.ndindex(shape):
+        checksum += index[0] + index[1]
+    return checksum
+
+
+def consume_ndenumerate(array: np.ndarray) -> float:
+    """Consume ``np.ndenumerate`` and retain both coordinates and values."""
+    checksum = 0.0
+    for index, value in np.ndenumerate(array):
+        checksum += float(value) + index[0] + index[1]
+    return checksum
+
+
+def consume_flat(array: np.ndarray) -> float:
+    """Consume an ndarray flat iterator in logical C-order."""
+    checksum = 0.0
+    for value in array.flat:
+        checksum += float(value)
+    return checksum
+
+
+def consume_nditer(left: np.ndarray, right: np.ndarray) -> float:
+    """Consume two broadcast operands through NumPy's read-only nditer."""
+    checksum = 0.0
+    for left_value, right_value in np.nditer((left, right)):
+        checksum += float(left_value) + float(right_value)
+    return checksum
+
+
+def consume_axis0(array: np.ndarray) -> int:
+    """Consume ndarray axis-0 iteration while retaining each row view."""
+    checksum = 0
+    for row in array:
+        checksum += row.size
+    return checksum
+
+
 def measure(operation: Callable[[], Any]) -> float:
     """Return median seconds per call with automatically calibrated batches."""
     for _ in range(3):
@@ -134,6 +175,11 @@ def build_benchmarks() -> dict[str, Benchmark]:
     right_t = right.T
     a = left
     a_nonzero = matrix(1)
+    squeezable = a.reshape(1, SIDE, SIDE, 1)
+    complex_input = a.astype(np.complex128)
+    complex_input.imag = 1.0
+    sparse_nan_input = a_nonzero.copy()
+    sparse_nan_input[::16, SIDE // 2] = np.nan
 
     small_left = shaped_f64((SMALL_SIDE, SMALL_SIDE), 0)
     small_right = shaped_f64((SMALL_SIDE, SMALL_SIDE), 17)
@@ -143,10 +189,18 @@ def build_benchmarks() -> dict[str, Benchmark]:
     one_d_right = shaped_f64((ELEMENTS,), 17)
     three_d_left = shaped_f64((64, 128, 128), 0)
     three_d_right = shaped_f64((64, 128, 128), 17)
+    linalg_left = shaped_f64((LINALG_SIDE, LINALG_SIDE), 0)
+    linalg_right = shaped_f64((LINALG_SIDE, LINALG_SIDE), 17)
+    batch_left = shaped_f64((8, 64, 64), 0)
+    batch_right = shaped_f64((8, 64, 64), 17)
+    diagonal_source = shaped_f64((SIDE,), 0)
 
     cube_values = np.arange(ELEMENTS, dtype=np.float64)
     cube = ((cube_values % 2048) * 0.5).reshape(64, 128, 128)
     permuted = cube.transpose(1, 0, 2)
+    cube_nan = cube.copy()
+    cube_nan.reshape(-1)[::257] = np.nan
+    permuted_nan = cube_nan.transpose(1, 0, 2)
 
     denominator_values = np.arange(ELEMENTS, dtype=np.float64)
     denominator = (
@@ -168,6 +222,10 @@ def build_benchmarks() -> dict[str, Benchmark]:
     product_input = (
         1.0 + (product_values % 7).astype(np.float64) * 0.000_001
     ).reshape(SIDE, SIDE)
+    product_nan_input = product_input.copy()
+    product_nan_input[::16, SIDE // 2] = np.nan
+    cumulative_nan_input = a.copy()
+    cumulative_nan_input.reshape(-1)[::257] = np.nan
     extremum_integer_input = (
         (np.arange(ELEMENTS, dtype=np.int64) * 17 + 31) % 4096
     ).reshape(SIDE, SIDE)
@@ -189,6 +247,8 @@ def build_benchmarks() -> dict[str, Benchmark]:
     source = np.s_[SIDE // 2 :, :]
     unshared_values = np.full((SIDE // 2, SIDE), 3.5, dtype=np.float64)
     strided_values = np.full((SIDE, SIDE // 2), 3.5, dtype=np.float64)
+    outer_left = shaped_f64((SIDE,), 0)
+    outer_right = shaped_f64((SIDE,), 17)
 
     return {
         "full_1024x1024_f64": lambda: measure(
@@ -220,6 +280,24 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "to_vec_transposed_f64": lambda: measure(
             lambda: np.array(left_t, order="C", copy=True)
         ),
+        "squeeze_all_view_f64": lambda: measure(
+            lambda: np.squeeze(squeezable)
+        ),
+        "squeeze_axis_view_f64": lambda: measure(
+            lambda: np.squeeze(squeezable, axis=(0, -1))
+        ),
+        "astype_contiguous_f64_to_i64": lambda: measure(
+            lambda: a.astype(np.int64, order="C", copy=True)
+        ),
+        "astype_strided_f64_to_i64": lambda: measure(
+            lambda: left_t.astype(np.int64, order="C", copy=True)
+        ),
+        "astype_same_f64": lambda: measure(
+            lambda: a.astype(np.float64, order="C", copy=True)
+        ),
+        "astype_complex_to_f64": lambda: measure(
+            lambda: complex_input.real.astype(np.float64, order="C", copy=True)
+        ),
         "sum_axis_last_contiguous_f64": lambda: measure(
             lambda: left.sum(axis=1)
         ),
@@ -230,11 +308,23 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "sum_multi_axis_general_f64": lambda: measure(
             lambda: permuted.sum(axis=(0, 2))
         ),
+        "sum_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nansum(sparse_nan_input, axis=1)
+        ),
+        "sum_ignore_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: np.nansum(sparse_nan_input, axis=0)
+        ),
+        "sum_ignore_multi_axis_general_f64": lambda: measure(
+            lambda: np.nansum(permuted_nan, axis=(0, 2))
+        ),
         "var_axis_last_contiguous_f64": lambda: measure(
             lambda: left.var(axis=1)
         ),
         "var_axis_first_fixed_stride_f64": lambda: measure(
             lambda: left.var(axis=0)
+        ),
+        "var_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nanvar(sparse_nan_input, axis=1)
         ),
         "min_axis_first_fixed_stride_f64": lambda: measure(
             lambda: a_nonzero.min(axis=0)
@@ -245,11 +335,17 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "prod_axis_first_fixed_stride_f64": lambda: measure(
             lambda: product_input.prod(axis=0)
         ),
+        "prod_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nanprod(product_nan_input, axis=1)
+        ),
         "min_axis_last_f64": lambda: measure(
             lambda: a_nonzero.min(axis=1)
         ),
         "max_axis_last_f64": lambda: measure(
             lambda: a_nonzero.max(axis=1)
+        ),
+        "min_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nanmin(sparse_nan_input, axis=1)
         ),
         "max_axis_first_fixed_stride_f64": lambda: measure(
             lambda: a_nonzero.max(axis=0)
@@ -284,6 +380,9 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "mean_axis_first_fixed_stride_f64": lambda: measure(
             lambda: a_nonzero.mean(axis=0)
         ),
+        "mean_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nanmean(sparse_nan_input, axis=1)
+        ),
         "std_axis_last_f64": lambda: measure(
             lambda: a_nonzero.std(axis=1)
         ),
@@ -296,11 +395,17 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "argmin_axis_last_f64": lambda: measure(
             lambda: a_nonzero.argmin(axis=1)
         ),
+        "argmin_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nanargmin(sparse_nan_input, axis=1)
+        ),
         "any_axis_last_f64": lambda: measure(
             lambda: a_nonzero.any(axis=1)
         ),
         "any_axis_first_fixed_stride_f64": lambda: measure(
             lambda: a_nonzero.any(axis=0)
+        ),
+        "any_axis_last_contiguous_bool": lambda: measure(
+            lambda: extremum_boolean_input.any(axis=1)
         ),
         "all_axis_last_f64": lambda: measure(
             lambda: a_nonzero.all(axis=1)
@@ -362,6 +467,9 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "divide_i64_contiguous": lambda: measure(
             lambda: divide_i64(integer_left, integer_denominator)
         ),
+        "divide_i64_strided": lambda: measure(
+            lambda: divide_i64(integer_left.T, integer_denominator.T)
+        ),
         "divide_contiguous_f64": lambda: measure(
             lambda: binary_c_order(np.divide, a_nonzero, denominator)
         ),
@@ -382,6 +490,12 @@ def build_benchmarks() -> dict[str, Benchmark]:
         ),
         "cumsum_axis_first_strided_f64": lambda: measure(
             lambda: left.cumsum(axis=0)
+        ),
+        "cumsum_ignore_axis_last_contiguous_f64": lambda: measure(
+            lambda: np.nancumsum(cumulative_nan_input, axis=1)
+        ),
+        "cumsum_ignore_axis_first_strided_f64": lambda: measure(
+            lambda: np.nancumsum(cumulative_nan_input, axis=0)
         ),
         "cumprod_axis_first_strided_f64": lambda: measure(
             lambda: product_input.cumprod(axis=0)
@@ -465,6 +579,62 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "scatter_scalar_fancy_f64": lambda: measure_batched(
             lambda: a.copy(),
             lambda destination: destination.__setitem__((rows, cols), 3.5),
+        ),
+        "dot_1d_contiguous_1m_f64": lambda: measure(
+            lambda: np.dot(one_d_left, one_d_right)
+        ),
+        "outer_1024x1024_f64": lambda: measure(
+            lambda: np.outer(outer_left, outer_right)
+        ),
+        "matmul_contiguous_32x32_f64": lambda: measure(
+            lambda: np.matmul(small_left, small_right)
+        ),
+        "matmul_contiguous_128x128_f64": lambda: measure(
+            lambda: np.matmul(linalg_left, linalg_right)
+        ),
+        "matmul_contiguous_256x256_f64": lambda: measure(
+            lambda: np.matmul(medium_left, medium_right)
+        ),
+        "matmul_strided_strided_128x128_f64": lambda: measure(
+            lambda: np.matmul(linalg_left.T, linalg_right.T)
+        ),
+        "matmul_batched_8x64x64_f64": lambda: measure(
+            lambda: np.matmul(batch_left, batch_right)
+        ),
+        "trace_1024x1024_f64": lambda: measure(lambda: np.trace(a)),
+        "tri_1024x1024_f64": lambda: measure(
+            lambda: np.tri(SIDE, SIDE, dtype=np.float64)
+        ),
+        "tril_1024x1024_contiguous_f64": lambda: measure(
+            lambda: np.tril(a)
+        ),
+        "tril_1024x1024_strided_f64": lambda: measure(
+            lambda: np.tril(a.T)
+        ),
+        "triu_1024x1024_contiguous_f64": lambda: measure(
+            lambda: np.triu(a)
+        ),
+        "diag_extract_1024x1024_f64": lambda: measure(lambda: np.diag(a)),
+        "diag_build_1024_f64": lambda: measure(
+            lambda: np.diag(diagonal_source)
+        ),
+        "ndindex_1024x1024": lambda: measure(
+            lambda: consume_ndindex((SIDE, SIDE))
+        ),
+        "ndenumerate_contiguous_1m_f64": lambda: measure(
+            lambda: consume_ndenumerate(a)
+        ),
+        "flat_contiguous_1m_f64": lambda: measure(
+            lambda: consume_flat(a)
+        ),
+        "flat_strided_1m_f64": lambda: measure(
+            lambda: consume_flat(a.T)
+        ),
+        "nditer_broadcast_1024x1024_f64": lambda: measure(
+            lambda: consume_nditer(column, row)
+        ),
+        "axis0_iter_1024x1024_f64": lambda: measure(
+            lambda: consume_axis0(a)
         ),
     }
 

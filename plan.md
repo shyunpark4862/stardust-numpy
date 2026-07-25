@@ -54,16 +54,17 @@ Python `PyArray`는 내부에 `enum { Bool(Array<bool>), I64(...), F64(...), C64
 
 ```mermaid
 flowchart BT
-  dtype[dtype: Scalar + Promote + CastTo + AsBool]
+  dtype[dtype: Scalar + Promote + CastTo + ArrayCast + AsBool]
   shape[shape: Shape Strides]
   array[array: Array T]
-  create[create]
+  create[creation]
   broadcast[broadcast]
   ufunc[ufunc + kernels + StrideIter]
-  reduce[reduce]
+  reduce[reduction]
   index[index]
   linalg[linalg]
-  rest[join select sort stride_iter format]
+  iteration[iteration]
+  rest[manipulation selection sorting traversal]
   pybind[Phase 8: PyO3 crate]
 
   dtype --> array
@@ -75,9 +76,11 @@ flowchart BT
   broadcast --> ufunc
   ufunc --> reduce
   array --> linalg
+  array --> iteration
   reduce --> rest
   index --> rest
   linalg --> rest
+  iteration --> pybind
   rest --> pybind
 ```
 
@@ -96,6 +99,7 @@ pub struct Array<T: Scalar> {
 ### 승격
 
 - `Scalar` / `Promote` / `CastTo` / `AsBool` (truthiness는 승격과 분리)
+- `ArrayCast`: 네 dtype 사이 명시적 `astype` 변환 (narrowing은 Rust `as`)
 - binary op: 승격 → 동일 타입 커널
 - `divide` = Rust `/` (NumPy true_divide 아님); 몫은 `trunc_divide`
 
@@ -131,8 +135,9 @@ stardust-numpy/          # Rust 코어 (crate: sdnp)
 | **3** | 인덱싱: basic(음수·step) + **`IndexSpec` 기반** boolean/fancy gather·scatter (NumPy shape) | **완료** |
 | **4** | reductions / cum\* (+ var/std/any/all) | **완료** |
 | **5** | join(concatenate/stack/vstack/hstack) + select(where/nonzero/clip) + sort + spaces/meshgrid; `transpose`/`reshape`/`permute_axes`는 `array/view`에 유지 | **완료** |
-| **6** | `dot`/`matmul`/trace + `tri`/`tril`/`triu`/`diag` | `tests/phase6.rs` |
-| **7** | 공개 iteration API + format + integration | 나머지 |
+| **6** | `dot`/`matmul`/`vdot`/`outer`/`diagonal`/`trace` + `tri`/`tril`/`triu`/`diag` | **완료** |
+| **7** | NumPy-style iteration: `ndindex`/`ndenumerate`/`nditer` + flat/axis-0 iteration | **완료** |
+| **7.5** | `squeeze`/`astype`, reduction `NanPolicy`, 모듈 구조·커널 최적화 정리 | **완료** |
 | **8** | **PyO3 바인딩**: `PyArray`, dtype 디스패치, dunder, `Error→PyErr`, read-only buffer(선택) | `import sdnp` 스모크 + 주요 연산 |
 
 **의존 원칙**: Phase 0–2가 뼈대. 바인딩(Phase 8)은 코어 API가 안정된 뒤.
@@ -140,13 +145,15 @@ stardust-numpy/          # Rust 코어 (crate: sdnp)
 **남은 생성·행렬 API**:
 
 - Phase 5 완료: `linspace` / `logspace` / `geomspace` / `meshgrid`
-- Phase 6 예정: `tri` / `tril` / `triu` / `diag`
+- Phase 6 완료: `tri` / `tril` / `triu` / `diag`
 
 ## PyO3를 전제로 한 코어 설계 지침 (Phase 3+)
 
 - Fancy/boolean: `a[py_obj]` 파싱은 Python; Rust는 `IndexSpec` / `&[Array<i64>]` / `&Array<bool>` 등 **이미 정규화된 입력**만 처리.
 - 에러는 계속 `sdnp::Error` enum 유지 → 바인딩에서 `impl From<Error> for PyErr`.
-- 버퍼 export: `as_c_contiguous_slice()` 우선; `as_buffer()` 전체를 writable로 노출하지 않음.
+- 0-D는 Rust 중간 표현으로만 사용하고 Python 반환 경계에서 즉시 스칼라로 unwrap한다. Python 사용자의 0-D 직접 생성과 `.item()` 호출은 노출하지 않는다.
+- `as_c_contiguous_slice`, writable/contiguous/shared-buffer 상태, broadcast helper, gather/scatter/IndexSpec, shape-stride helper는 Python 공개 API에서 제외하되 바인딩 내부 구현에는 사용한다.
+- writable zero-copy buffer export는 제공하지 않는다.
 - 제네릭 함수는 그대로 두고, Python은 타입별 래퍼만 추가 (Rust에 런타임 dtype enum을 **필수로 넣지 않음**).
 
 ## 테스트 전략

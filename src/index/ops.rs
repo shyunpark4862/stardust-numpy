@@ -10,9 +10,8 @@ use crate::index::prepare::{
     prepare_index, FancyLayout, PreparedEntry, PreparedIndex,
 };
 use crate::index::spec::IndexSpec;
-use crate::run::{RunKind, RunPlan};
 use crate::shape::{is_c_contiguous, offset_at, size_of_shape};
-use crate::stride_iter::StrideIter;
+use crate::traversal::{RunKind, RunPlan, StrideIter};
 
 /// Select elements by `index`.
 ///
@@ -21,31 +20,31 @@ use crate::stride_iter::StrideIter;
 /// C-contiguous copy. A fully integer index with no remaining axes yields a
 /// **0-D** array (size 1).
 pub fn gather<T: Scalar>(
-    a: &Array<T>,
+    array: &Array<T>,
     index: &[IndexSpec],
 ) -> Result<Array<T>> {
-    let prepared = prepare_index(a.shape(), index)?;
+    let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
-        gather_fancy(a, &prepared)
+        gather_fancy(array, &prepared)
     } else {
-        gather_basic(a, &prepared)
+        gather_basic(array, &prepared)
     }
 }
 
 /// Assign a scalar to every location selected by `index`.
 pub fn scatter<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     index: &[IndexSpec],
     value: T,
 ) -> Result<()> {
-    if !a.writable {
+    if !array.writable {
         return Err(Error::ReadOnly);
     }
-    let prepared = prepare_index(a.shape(), index)?;
+    let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
-        scatter_fancy_scalar(a, &prepared, value)
+        scatter_fancy_scalar(array, &prepared, value)
     } else {
-        scatter_basic_scalar(a, &prepared, value)
+        scatter_basic_scalar(array, &prepared, value)
     }
 }
 
@@ -54,18 +53,18 @@ pub fn scatter<T: Scalar>(
 ///
 /// Fancy assignment copies `values` first so overlapping reads/writes are safe.
 pub fn scatter_array<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     index: &[IndexSpec],
     values: &Array<T>,
 ) -> Result<()> {
-    if !a.writable {
+    if !array.writable {
         return Err(Error::ReadOnly);
     }
-    let prepared = prepare_index(a.shape(), index)?;
+    let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
-        scatter_fancy_array(a, &prepared, values)
+        scatter_fancy_array(array, &prepared, values)
     } else {
-        scatter_basic_array(a, &prepared, values)
+        scatter_basic_array(array, &prepared, values)
     }
 }
 
@@ -101,10 +100,10 @@ struct BasicViewMeta {
 }
 
 fn basic_view_meta<T: Scalar>(
-    a: &Array<T>,
+    array: &Array<T>,
     prepared: &PreparedIndex,
 ) -> Result<BasicViewMeta> {
-    let mut offset = a.offset() as isize;
+    let mut offset = array.offset() as isize;
     let mut shape = Vec::new();
     let mut strides = Vec::new();
     let mut source_axis = 0usize;
@@ -116,13 +115,13 @@ fn basic_view_meta<T: Scalar>(
                 strides.push(0);
             }
             PreparedEntry::Index(idx) => {
-                offset += *idx as isize * a.strides()[source_axis];
+                offset += *idx as isize * array.strides()[source_axis];
                 source_axis += 1;
             }
             PreparedEntry::Slice { start, len, step } => {
-                offset += *start * a.strides()[source_axis];
+                offset += *start * array.strides()[source_axis];
                 shape.push(*len);
-                strides.push(a.strides()[source_axis] * *step);
+                strides.push(array.strides()[source_axis] * *step);
                 source_axis += 1;
             }
             PreparedEntry::IntegerArray(_) => {
@@ -147,28 +146,29 @@ fn basic_view_meta<T: Scalar>(
 }
 
 fn gather_basic<T: Scalar>(
-    a: &Array<T>,
+    array: &Array<T>,
     prepared: &PreparedIndex,
 ) -> Result<Array<T>> {
-    let meta = basic_view_meta(a, prepared)?;
+    let meta = basic_view_meta(array, prepared)?;
     Array::from_shared_parts(
-        Arc::clone(&a.data),
+        Arc::clone(&array.data),
         meta.shape,
         meta.strides,
         meta.offset,
-        a.writable,
+        array.writable,
     )
 }
 
 fn scatter_basic_scalar<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     prepared: &PreparedIndex,
     value: T,
 ) -> Result<()> {
-    basic_view_meta(a, prepared)?;
-    a.ensure_unique_storage_for_write();
-    let meta = basic_view_meta(a, prepared)?;
-    let data = Arc::make_mut(&mut a.data);
+    let mut meta = basic_view_meta(array, prepared)?;
+    if array.ensure_unique_storage_for_write() {
+        meta = basic_view_meta(array, prepared)?;
+    }
+    let data = Arc::make_mut(&mut array.data);
 
     if is_c_contiguous(&meta.shape, &meta.strides) {
         let size = size_of_shape(&meta.shape);
@@ -192,18 +192,19 @@ fn scatter_basic_scalar<T: Scalar>(
 }
 
 fn scatter_basic_array<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     prepared: &PreparedIndex,
     values: &Array<T>,
 ) -> Result<()> {
-    let meta = basic_view_meta(a, prepared)?;
-    let aligned = prepare_scatter_source(a, values, &meta.shape)?;
+    let mut meta = basic_view_meta(array, prepared)?;
+    let aligned = prepare_scatter_source(array, values, &meta.shape)?;
 
-    a.ensure_unique_storage_for_write();
-    let meta = basic_view_meta(a, prepared)?;
+    if array.ensure_unique_storage_for_write() {
+        meta = basic_view_meta(array, prepared)?;
+    }
     let dest_c_contiguous = is_c_contiguous(&meta.shape, &meta.strides);
     let src_slice = aligned.as_c_contiguous_slice();
-    let data = Arc::make_mut(&mut a.data);
+    let data = Arc::make_mut(&mut array.data);
 
     if dest_c_contiguous {
         if let Some(src) = src_slice {
@@ -241,59 +242,63 @@ fn scatter_basic_array<T: Scalar>(
 }
 
 fn gather_fancy<T: Scalar>(
-    a: &Array<T>,
+    array: &Array<T>,
     prepared: &PreparedIndex,
 ) -> Result<Array<T>> {
     let layout = prepared.fancy.as_ref().unwrap();
     let mut out = Vec::with_capacity(size_of_shape(&layout.result_shape));
-    for buf_idx in iter_fancy_source_offsets(a.strides(), a.offset(), prepared)
+    for buffer_index in
+        iter_fancy_source_offsets(array.strides(), array.offset(), prepared)
     {
-        out.push(a.data[buf_idx]);
+        out.push(array.data[buffer_index]);
     }
     Array::from_vec(out, &layout.result_shape)
 }
 
 fn scatter_fancy_scalar<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     prepared: &PreparedIndex,
     value: T,
 ) -> Result<()> {
-    a.ensure_unique_storage_for_write();
-    let strides = a.strides().to_vec();
-    let base_offset = a.offset();
-    let data = Arc::make_mut(&mut a.data);
-    for buf_idx in iter_fancy_source_offsets(&strides, base_offset, prepared) {
-        data[buf_idx] = value;
+    let _ = array.ensure_unique_storage_for_write();
+    let strides = array.strides().to_vec();
+    let base_offset = array.offset();
+    let data = Arc::make_mut(&mut array.data);
+    for buffer_index in
+        iter_fancy_source_offsets(&strides, base_offset, prepared)
+    {
+        data[buffer_index] = value;
     }
     Ok(())
 }
 
 fn scatter_fancy_array<T: Scalar>(
-    a: &mut Array<T>,
+    array: &mut Array<T>,
     prepared: &PreparedIndex,
     values: &Array<T>,
 ) -> Result<()> {
     let result_shape = &prepared.fancy.as_ref().unwrap().result_shape;
-    let aligned = prepare_scatter_source(a, values, result_shape)?;
+    let aligned = prepare_scatter_source(array, values, result_shape)?;
 
-    a.ensure_unique_storage_for_write();
-    let strides = a.strides().to_vec();
-    let base_offset = a.offset();
-    let data = Arc::make_mut(&mut a.data);
-    let buf_idxs = iter_fancy_source_offsets(&strides, base_offset, prepared);
+    let _ = array.ensure_unique_storage_for_write();
+    let strides = array.strides().to_vec();
+    let base_offset = array.offset();
+    let data = Arc::make_mut(&mut array.data);
+    let buffer_indices =
+        iter_fancy_source_offsets(&strides, base_offset, prepared);
 
     if let Some(src) = aligned.as_c_contiguous_slice() {
-        for (buf_idx, &value) in buf_idxs.zip(src.iter()) {
-            data[buf_idx] = value;
+        for (buffer_index, &value) in buffer_indices.zip(src.iter()) {
+            data[buffer_index] = value;
         }
     } else {
-        let src_idxs = StrideIter::new(
+        let source_indices = StrideIter::new(
             aligned.shape(),
             aligned.strides(),
             aligned.offset(),
         );
-        for (buf_idx, src_idx) in buf_idxs.zip(src_idxs) {
-            data[buf_idx] = aligned.data[src_idx];
+        for (buffer_index, source_index) in buffer_indices.zip(source_indices) {
+            data[buffer_index] = aligned.data[source_index];
         }
     }
     Ok(())
@@ -411,8 +416,8 @@ impl FancyOffsetIter<'_> {
     }
 }
 
-fn read_fancy_usize(arr: &Array<i64>, indices: &[usize]) -> usize {
-    debug_assert_eq!(indices.len(), arr.ndim());
-    let buf = offset_at(indices, arr.strides(), arr.offset());
-    arr.data[buf] as usize
+fn read_fancy_usize(array: &Array<i64>, indices: &[usize]) -> usize {
+    debug_assert_eq!(indices.len(), array.ndim());
+    let buffer_index = offset_at(indices, array.strides(), array.offset());
+    array.data[buffer_index] as usize
 }

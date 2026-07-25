@@ -8,16 +8,37 @@ use sdnp::{
 #[test]
 fn sum_all_and_axes() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-    assert_eq!(sum(&a, None, false).unwrap().item().unwrap(), 21);
-    assert_eq!(sum(&a, Some(&[0]), false).unwrap().to_vec(), vec![5, 7, 9]);
-    assert_eq!(sum(&a, Some(&[1]), false).unwrap().to_vec(), vec![6, 15]);
-    assert_eq!(sum(&a, Some(&[-1]), false).unwrap().to_vec(), vec![6, 15]);
+    assert_eq!(
+        sum(&a, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        21
+    );
+    assert_eq!(
+        sum(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![5, 7, 9]
+    );
+    assert_eq!(
+        sum(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![6, 15]
+    );
+    assert_eq!(
+        sum(&a, Some(&[-1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![6, 15]
+    );
 }
 
 #[test]
 fn sum_keepdims_and_multi_axis() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
-    let k = sum(&a, Some(&[0]), true).unwrap();
+    let k = sum(&a, Some(&[0]), true, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(k.shape(), &[1, 3]);
     assert_eq!(k.to_vec(), vec![5, 7, 9]);
 
@@ -27,7 +48,7 @@ fn sum_keepdims_and_multi_axis() {
     )
     .unwrap();
     // sum over axes 0 and 2 → shape (3,)
-    let s = sum(&b, Some(&[0, 2]), false).unwrap();
+    let s = sum(&b, Some(&[0, 2]), false, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(s.shape(), &[3]);
     assert_eq!(s.to_vec(), vec![60, 92, 124]);
 }
@@ -35,13 +56,41 @@ fn sum_keepdims_and_multi_axis() {
 #[test]
 fn prod_min_max() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-    assert_eq!(prod(&a, None, false).unwrap().item().unwrap(), 24);
-    assert_eq!(prod(&a, Some(&[0]), false).unwrap().to_vec(), vec![3, 8]);
+    assert_eq!(
+        prod(&a, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        24
+    );
+    assert_eq!(
+        prod(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![3, 8]
+    );
 
     let b = Array::from_slice(&[-2_i64, 8, 3, 1], &[2, 2]).unwrap();
-    assert_eq!(min(&b, None, false).unwrap().item().unwrap(), -2);
-    assert_eq!(max(&b, None, false).unwrap().item().unwrap(), 8);
-    assert_eq!(min(&b, Some(&[0]), false).unwrap().to_vec(), vec![-2, 1]);
+    assert_eq!(
+        min(&b, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        -2
+    );
+    assert_eq!(
+        max(&b, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        min(&b, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![-2, 1]
+    );
 }
 
 #[test]
@@ -49,11 +98,15 @@ fn typed_min_max_kernels_preserve_semantics() {
     let booleans =
         Array::from_slice(&[true, true, false, true], &[2, 2]).unwrap();
     assert_eq!(
-        min(&booleans, Some(&[1]), false).unwrap().to_vec(),
+        min(&booleans, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![true, false]
     );
     assert_eq!(
-        max(&booleans, Some(&[1]), false).unwrap().to_vec(),
+        max(&booleans, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![true, true]
     );
 
@@ -65,11 +118,17 @@ fn typed_min_max_kernels_preserve_semantics() {
     )
     .unwrap();
     assert_eq!(
-        min(&floats, Some(&[1]), false).unwrap().to_vec()[0].to_bits(),
+        min(&floats, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec()[0]
+            .to_bits(),
         f64::NAN.to_bits()
     );
     assert_eq!(
-        max(&floats, Some(&[1]), false).unwrap().to_vec()[0].to_bits(),
+        max(&floats, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec()[0]
+            .to_bits(),
         f64::NAN.to_bits()
     );
 }
@@ -79,16 +138,26 @@ fn prefix_schedule_handles_multi_axis_keepdims_and_nan_order() {
     let values: Vec<i64> = (0..12).collect();
     let a = Array::from_vec(values, &[2, 2, 3]).unwrap();
     let axes = [0, 1];
-    let summed = sum(&a, Some(&axes), true).unwrap();
+    let summed =
+        sum(&a, Some(&axes), true, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(summed.shape(), &[1, 1, 3]);
     assert_eq!(summed.to_vec(), vec![18, 22, 26]);
-    assert_eq!(min(&a, Some(&axes), false).unwrap().to_vec(), vec![0, 1, 2]);
     assert_eq!(
-        max(&a, Some(&axes), false).unwrap().to_vec(),
+        min(&a, Some(&axes), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        max(&a, Some(&axes), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![9, 10, 11]
     );
     assert_eq!(
-        var(&a, Some(&axes), false).unwrap().to_vec(),
+        var(&a, Some(&axes), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![11.25; 3]
     );
 
@@ -99,7 +168,9 @@ fn prefix_schedule_handles_multi_axis_keepdims_and_nan_order() {
         &[3, 2],
     )
     .unwrap();
-    let result = min(&floats, Some(&[0]), false).unwrap().to_vec();
+    let result = min(&floats, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+        .unwrap()
+        .to_vec();
     assert!(result[0].is_nan());
     assert_eq!(result[1], 2.0);
 }
@@ -107,14 +178,26 @@ fn prefix_schedule_handles_multi_axis_keepdims_and_nan_order() {
 #[test]
 fn empty_sum_prod_ok_min_err() {
     let a = Array::from_slice(&[] as &[i64], &[0]).unwrap();
-    assert_eq!(sum(&a, None, false).unwrap().item().unwrap(), 0);
-    assert_eq!(prod(&a, None, false).unwrap().item().unwrap(), 1);
+    assert_eq!(
+        sum(&a, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        prod(&a, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        1
+    );
     assert!(matches!(
-        min(&a, None, false),
+        min(&a, None, false, sdnp::NanPolicy::Propagate),
         Err(Error::InvalidArgument(_))
     ));
     assert!(matches!(
-        mean(&a, None, false),
+        mean(&a, None, false, sdnp::NanPolicy::Propagate),
         Err(Error::InvalidArgument(_))
     ));
 }
@@ -123,38 +206,68 @@ fn empty_sum_prod_ok_min_err() {
 fn mean_var_std() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
     assert!(
-        (mean(&a, None, false).unwrap().item().unwrap() - 3.5).abs() < 1e-12
+        (mean(&a, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap()
+            - 3.5)
+            .abs()
+            < 1e-12
     );
     assert_eq!(
-        mean(&a, Some(&[0]), false).unwrap().to_vec(),
+        mean(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![2.5, 3.5, 4.5]
     );
 
     let b = Array::from_slice(&[1_i64, 2, 3, 4], &[4]).unwrap();
     assert!(
-        (var(&b, None, false).unwrap().item().unwrap() - 1.25).abs() < 1e-12
+        (var(&b, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap()
+            - 1.25)
+            .abs()
+            < 1e-12
     );
     assert!(
-        (std(&b, None, false).unwrap().item().unwrap() - 1.25_f64.sqrt()).abs()
+        (std(&b, None, false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap()
+            - 1.25_f64.sqrt())
+        .abs()
             < 1e-12
     );
 
     let c = Array::from_slice(&[1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
         .unwrap();
     assert_eq!(
-        sum(&c, Some(&[1]), false).unwrap().to_vec(),
+        sum(&c, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![6.0, 15.0]
     );
     assert_eq!(
-        mean(&c, Some(&[1]), false).unwrap().to_vec(),
+        mean(&c, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![2.0, 5.0]
     );
-    for actual in var(&c, Some(&[1]), false).unwrap().to_vec() {
+    for actual in var(&c, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+        .unwrap()
+        .to_vec()
+    {
         assert!((actual - 2.0 / 3.0).abs() < 1e-12);
     }
 
     let transposed = c.transpose();
-    for actual in var(&transposed, Some(&[1]), false).unwrap().to_vec() {
+    for actual in
+        var(&transposed, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec()
+    {
         assert!((actual - 2.25).abs() < 1e-12);
     }
 
@@ -163,7 +276,9 @@ fn mean_var_std() {
         &[2, 3, 4],
     )
     .unwrap();
-    let general = var(&cube, Some(&[0, 2]), false).unwrap().to_vec();
+    let general = var(&cube, Some(&[0, 2]), false, sdnp::NanPolicy::Propagate)
+        .unwrap()
+        .to_vec();
     for actual in general {
         assert!((actual - 37.25).abs() < 1e-12);
     }
@@ -183,7 +298,8 @@ fn general_strided_reduction_on_permuted_array() {
 
     // Reduce axes 0 and 2 (outer axis 1 survives) — matches direct
     // computation from the original cube for cross-checking.
-    let s = sum(&permuted, Some(&[0, 2]), false).unwrap();
+    let s = sum(&permuted, Some(&[0, 2]), false, sdnp::NanPolicy::Propagate)
+        .unwrap();
     assert_eq!(s.shape(), &[2]);
     let expected: Vec<i64> = (0..2)
         .map(|i| {
@@ -195,8 +311,10 @@ fn general_strided_reduction_on_permuted_array() {
         .collect();
     assert_eq!(s.to_vec(), expected);
 
-    let mn = min(&permuted, Some(&[0, 2]), false).unwrap();
-    let mx = max(&permuted, Some(&[0, 2]), false).unwrap();
+    let mn = min(&permuted, Some(&[0, 2]), false, sdnp::NanPolicy::Propagate)
+        .unwrap();
+    let mx = max(&permuted, Some(&[0, 2]), false, sdnp::NanPolicy::Propagate)
+        .unwrap();
     assert_eq!(mn.to_vec(), vec![0, 12]);
     assert_eq!(mx.to_vec(), vec![11, 23]);
 }
@@ -220,21 +338,58 @@ fn general_strided_reduction_reversed_axis() {
     assert!(!reversed_cols.is_c_contiguous());
     // Sum ignoring column order must match the un-reversed sum.
     assert_eq!(
-        sum(&reversed_cols, Some(&[1]), false).unwrap().to_vec(),
-        sum(&a, Some(&[1]), false).unwrap().to_vec()
+        sum(
+            &reversed_cols,
+            Some(&[1]),
+            false,
+            sdnp::NanPolicy::Propagate
+        )
+        .unwrap()
+        .to_vec(),
+        sum(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec()
     );
 }
 
 #[test]
 fn argmin_argmax() {
     let a = Array::from_slice(&[3_i64, 8, 1, 2, 5, 9], &[2, 3]).unwrap();
-    assert_eq!(argmin(&a, None).unwrap().item().unwrap(), 2);
-    assert_eq!(argmax(&a, None).unwrap().item().unwrap(), 5);
-    assert_eq!(argmin(&a, Some(0)).unwrap().to_vec(), vec![1, 1, 0]);
-    assert_eq!(argmax(&a, Some(1)).unwrap().to_vec(), vec![1, 2]);
+    assert_eq!(
+        argmin(&a, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        argmax(&a, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        argmin(&a, Some(0), sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 1, 0]
+    );
+    assert_eq!(
+        argmax(&a, Some(1), sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 2]
+    );
 
     let ties = Array::from_slice(&[3_i64, 1, 1, 2], &[4]).unwrap();
-    assert_eq!(argmin(&ties, None).unwrap().item().unwrap(), 1);
+    assert_eq!(
+        argmin(&ties, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -244,8 +399,20 @@ fn flat_argmin_argmax_on_strided_layouts() {
     let a = Array::from_slice(&[3_i64, 8, 1, 2, 5, 9], &[2, 3]).unwrap();
     let t = a.transpose();
     assert!(!t.is_c_contiguous());
-    assert_eq!(argmin(&t, None).unwrap().item().unwrap(), 4);
-    assert_eq!(argmax(&t, None).unwrap().item().unwrap(), 5);
+    assert_eq!(
+        argmin(&t, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        argmax(&t, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        5
+    );
 
     // Column step [::, ::2]: shape [2,2], strides [3,2] — partially coalescible.
     // Flat C-order: 3,1, 2,9 → argmin=1, argmax=3.
@@ -258,8 +425,20 @@ fn flat_argmin_argmax_on_strided_layouts() {
     )
     .unwrap();
     assert!(!cols.is_c_contiguous());
-    assert_eq!(argmin(&cols, None).unwrap().item().unwrap(), 1);
-    assert_eq!(argmax(&cols, None).unwrap().item().unwrap(), 3);
+    assert_eq!(
+        argmin(&cols, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        argmax(&cols, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        3
+    );
 
     // Reverse rows: negative stride, flat C-order 2,5,9, 3,8,1 → argmin=5, argmax=2.
     let rev = sdnp::gather(
@@ -271,17 +450,49 @@ fn flat_argmin_argmax_on_strided_layouts() {
     )
     .unwrap();
     assert!(!rev.is_c_contiguous());
-    assert_eq!(argmin(&rev, None).unwrap().item().unwrap(), 5);
-    assert_eq!(argmax(&rev, None).unwrap().item().unwrap(), 2);
+    assert_eq!(
+        argmin(&rev, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        argmax(&rev, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
 fn cumsum_cumprod() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-    assert_eq!(cumsum(&a, Some(1)).unwrap().to_vec(), vec![1, 3, 3, 7]);
-    assert_eq!(cumsum(&a, Some(0)).unwrap().to_vec(), vec![1, 2, 4, 6]);
-    assert_eq!(cumsum(&a, None).unwrap().to_vec(), vec![1, 3, 6, 10]);
-    assert_eq!(cumprod(&a, Some(1)).unwrap().to_vec(), vec![1, 2, 3, 12]);
+    assert_eq!(
+        cumsum(&a, Some(1), sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 3, 3, 7]
+    );
+    assert_eq!(
+        cumsum(&a, Some(0), sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 2, 4, 6]
+    );
+    assert_eq!(
+        cumsum(&a, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 3, 6, 10]
+    );
+    assert_eq!(
+        cumprod(&a, Some(1), sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 2, 3, 12]
+    );
 }
 
 #[test]
@@ -291,11 +502,15 @@ fn flat_cumsum_cumprod_on_strided_layouts() {
     let t = a.transpose();
     assert!(!t.is_c_contiguous());
     assert_eq!(
-        cumsum(&t, None).unwrap().to_vec(),
+        cumsum(&t, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![1, 5, 7, 12, 15, 21]
     );
     assert_eq!(
-        cumprod(&t, None).unwrap().to_vec(),
+        cumprod(&t, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![1, 4, 8, 40, 120, 720]
     );
 
@@ -308,7 +523,12 @@ fn flat_cumsum_cumprod_on_strided_layouts() {
         ],
     )
     .unwrap();
-    assert_eq!(cumsum(&cols, None).unwrap().to_vec(), vec![1, 4, 8, 14]);
+    assert_eq!(
+        cumsum(&cols, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 4, 8, 14]
+    );
 
     // Negative row step: flat C-order 4,5,6, 1,2,3.
     let rev = sdnp::gather(
@@ -320,7 +540,9 @@ fn flat_cumsum_cumprod_on_strided_layouts() {
     )
     .unwrap();
     assert_eq!(
-        cumsum(&rev, None).unwrap().to_vec(),
+        cumsum(&rev, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
         vec![4, 9, 15, 16, 18, 21]
     );
 }
@@ -343,31 +565,37 @@ fn any_all() {
 #[test]
 fn duplicate_axis_err() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-    assert!(sum(&a, Some(&[0, 0]), false).is_err());
+    assert!(sum(&a, Some(&[0, 0]), false, sdnp::NanPolicy::Propagate).is_err());
 }
 
 #[test]
 fn empty_outer_vs_empty_inner() {
     // shape (0, 3): reducing axis 1 → empty outer → empty result
     let a = Array::from_slice(&[] as &[i64], &[0, 3]).unwrap();
-    let s = sum(&a, Some(&[1]), false).unwrap();
+    let s = sum(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(s.shape(), &[0]);
     assert_eq!(s.to_vec(), Vec::<i64>::new());
 
-    let m = min(&a, Some(&[1]), false).unwrap();
+    let m = min(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(m.shape(), &[0]);
 
-    let mean_out = mean(&a, Some(&[1]), false).unwrap();
+    let mean_out =
+        mean(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(mean_out.shape(), &[0]);
 
     // reducing axis 0 → empty inner → identity / error
-    assert_eq!(sum(&a, Some(&[0]), false).unwrap().to_vec(), vec![0, 0, 0]);
+    assert_eq!(
+        sum(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![0, 0, 0]
+    );
     assert!(matches!(
-        min(&a, Some(&[0]), false),
+        min(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate),
         Err(Error::InvalidArgument(_))
     ));
     assert!(matches!(
-        mean(&a, Some(&[0]), false),
+        mean(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate),
         Err(Error::InvalidArgument(_))
     ));
 }
@@ -375,17 +603,42 @@ fn empty_outer_vs_empty_inner() {
 #[test]
 fn bool_cumsum_cumprod_promote() {
     let a = Array::from_slice(&[true, false, true], &[3]).unwrap();
-    assert_eq!(cumsum(&a, None).unwrap().to_vec(), vec![1_i64, 1, 2]);
-    assert_eq!(cumprod(&a, None).unwrap().to_vec(), vec![1_i64, 0, 0]);
+    assert_eq!(
+        cumsum(&a, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1_i64, 1, 2]
+    );
+    assert_eq!(
+        cumprod(&a, None, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1_i64, 0, 0]
+    );
 }
 
 #[test]
 fn noncontiguous_and_suffix_paths() {
     let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
     // last-axis / suffix contiguous path
-    assert_eq!(sum(&a, Some(&[1]), false).unwrap().to_vec(), vec![6, 15]);
+    assert_eq!(
+        sum(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![6, 15]
+    );
     // single non-suffix axis on a transpose → fixed-stride path
     let t = a.transpose();
-    assert_eq!(sum(&t, Some(&[0]), false).unwrap().to_vec(), vec![6, 15]);
-    assert_eq!(sum(&t, Some(&[1]), false).unwrap().to_vec(), vec![5, 7, 9]);
+    assert_eq!(
+        sum(&t, Some(&[0]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![6, 15]
+    );
+    assert_eq!(
+        sum(&t, Some(&[1]), false, sdnp::NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![5, 7, 9]
+    );
 }

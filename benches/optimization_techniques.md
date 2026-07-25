@@ -13,7 +13,7 @@ SDNP(stardust-numpy) 전역에서 사용하는 성능 전략을 서브시스템�
 
 #### 1.1 `CoalescedLayout` — 축 병합과 inner run 추출
 
-**파일:** `src/layout.rs`
+**파일:** `src/traversal/layout.rs`
 
 N차원 strided layout을 operand stride 배열들과 함께 정규화한다.
 
@@ -25,7 +25,7 @@ N차원 strided layout을 operand stride 배열들과 함께 정규화한다.
 
 #### 1.2 `RunPlan` + `RunKind` — prepared run dispatch
 
-**파일:** `src/run.rs`
+**파일:** `src/traversal/run.rs`
 
 `CoalescedLayout` 위에 reusable traversal plan을 구축한다. inner stride를 `RunKind`로 분류한다.
 
@@ -41,7 +41,7 @@ N차원 strided layout을 operand stride 배열들과 함께 정규화한다.
 
 #### 1.3 `StrideCursor` / `StrideIter` — incremental buffer index
 
-**파일:** `src/stride_iter.rs`
+**파일:** `src/traversal/stride_iter.rs`
 
 - **`StrideCursor<N>`:** multi-index + lane별 buffer offset. `advance()` carry, `reset()` 재사용. cumsum 등 input/output offset 동시 진행(`N>1`).
 - **`StrideIter`:** `StrideCursor<1>` 래퍼, `ExactSizeIterator`. indexing prepare, fancy scatter, `nonzero` 등 단순 1-operand walk.
@@ -58,7 +58,7 @@ Broadcast로 삽입된 size-1 축의 dummy stride가 contiguous 판정을 깨뜨
 
 #### 1.5 `#[inline]` hot-path marking
 
-trait method·buffer index·sort compare·run helper 등 hot loop 직전 helper에 `#[inline]` 밀집 (`shape.rs`, `array/mod.rs`, `reduce/traits.rs`, `ufunc/traits.rs`, `run.rs`, `sort.rs` 등).
+trait method·buffer index·sort compare·run helper 등 hot loop 직전 helper에 `#[inline]` 밀집 (`shape.rs`, `array/mod.rs`, `reduction/traits.rs`, `ufunc/traits.rs`, `traversal/run.rs`, `sorting/` 등).
 
 ---
 
@@ -74,11 +74,11 @@ View clone은 `Arc` refcount만 증가. write 시 `ensure_unique_storage_for_wri
 - 전체 buffer cover → `Arc::make_mut`
 - partial view → logical C-order만 materialize 후 write
 
-scatter, `Array::set`, in-place sort 교체 등에서 buffer alias 안전성과 copy 최소화.
+scatter와 `Array::set`에서 buffer alias 안전성과 copy 최소화.
 
 #### 2.2 Zero-copy view 연산
 
-**파일:** `src/array/view.rs`, `src/broadcast.rs`, `src/index/ops.rs`, `src/join.rs`, `src/create.rs`
+**파일:** `src/array/view.rs`, `src/broadcast.rs`, `src/index/ops.rs`, `src/manipulation/`, `src/creation/`
 
 `Arc::clone` + shape/stride/offset만 변경. 데이터 복사 없음.
 
@@ -86,6 +86,7 @@ scatter, `Array::set`, in-place sort 교체 등에서 buffer alias 안전성과 
 |------|----------|
 | `transpose`, `permute_axes` | stride 재배열 |
 | `reshape` (contiguous) | shape/strides 재해석 |
+| `squeeze` | size-1 shape/stride metadata 제거 |
 | `broadcast_to` | stretch 축 stride 0 |
 | basic gather (`IndexSpec`) | offset/shape 계산 |
 | `insert_axis_view` (stack) | size-1 축 + stride 0 |
@@ -97,6 +98,7 @@ scatter, `Array::set`, in-place sort 교체 등에서 buffer alias 안전성과 
 
 - **`copy` / `to_vec_c_order`:** contiguous → `slice.to_vec()`. else → `RunPlan` + `collect_unary`.
 - **`reshape` (non-contiguous):** view 불가 시 `to_vec_c_order` 후 새 allocation.
+- **`astype`:** contiguous flat map 또는 strided `RunPlan` map으로 4×4 dtype 변환 후 새 C-order output.
 
 ---
 
@@ -110,13 +112,13 @@ size-1 축을 target shape에 맞춰 **stride 0 view** 생성. `broadcast_arrays
 
 #### 3.2 Lazy binary alignment
 
-**파일:** `src/ufunc/kernels.rs`, `src/select.rs`
+**파일:** `src/ufunc/kernels.rs`, `src/selection/ops.rs`
 
 `align_binary`: shape이 이미 같으면 `None`(원본 그대로). 다를 때만 필요한 쪽 `broadcast_to`. `where_`는 condition/x/y 3-way broadcast.
 
 #### 3.3 Joint operand coalescing
 
-**파일:** `src/layout.rs`
+**파일:** `src/traversal/layout.rs`
 
 multi-operand layout merge 시 **모든 operand stride가 동시에 linear**해야 병합 (broadcast stride 0 포함). operand별 개별 merge보다 긴 inner run 확보.
 
@@ -149,7 +151,7 @@ non-contiguous operand는 coalesced run walk. broadcast×contiguous, contiguous�
 
 **파일:** `src/ufunc/kernels.rs`
 
-`map_binary`(infallible, `Result` 없음) vs `try_map_binary` + `try_collect_binary`(에러 가능 — 항상 generic stride loop). hot loop에서 `Result` branch 제거.
+`map_binary`(infallible, `Result` 없음) vs `try_map_binary` + `try_collect_binary`(에러 가능). 두 경로 모두 `UnitStride`/`Repeated` 조합을 먼저 특화하고 generic stride loop로 fallback한다.
 
 ---
 
@@ -157,13 +159,13 @@ non-contiguous operand는 coalesced run walk. broadcast×contiguous, contiguous�
 
 #### 5.1 `ReducePlan` — reduction geometry 사전 계산
 
-**파일:** `src/reduce/axis.rs`
+**파일:** `src/reduction/plan.rs`
 
 axis normalize, `output_len`, `reduction_len`, `kept_shape`, `reduced_shape`, `output_shape`를 한 번 계산. `mean` 등에서 plan 재사용.
 
 #### 5.2 `TraversalSchedule` — layout-aware 물리 순회 선택
 
-**파일:** `src/reduce/axis.rs`, `src/reduce/kernels/`
+**파일:** `src/reduction/plan.rs`, `src/reduction/kernels/`
 
 C-contiguous + reduced axis block 위치에 따라:
 
@@ -193,7 +195,7 @@ for row in slice.chunks_exact(plan.output_len) {
 
 #### 5.4 8-lane partial accumulator (ILP)
 
-**파일:** `src/reduce/kernels/`
+**파일:** `src/reduction/kernels/`
 
 loop-carried dependency 제거:
 
@@ -207,7 +209,7 @@ for block in chunk.chunks_exact(8) {
 // partial tree merge → remainder scalar
 ```
 
-**사용처:** `reduce_sum_with_plan`, f64 min/max suffix, `converted_sum_chunk`, `squared_deviation_sum_chunk`, `merge_eight_f64`.
+**사용처:** `reduce_associative_with_plan`(sum/prod), i64/f64 min/max suffix, `converted_sum_chunk`, `squared_deviation_sum_chunk`, `merge_eight_f64`.
 
 #### 5.5 `ReducedAxisRuns` — general strided reduction coalescing
 
@@ -221,12 +223,12 @@ reduced-axis shape/strides → `RunPlan<1>` coalesce → `(run_count, run_len, o
 
 #### 5.7 dtype별 min/max 전용 kernel
 
-**파일:** `src/reduce/kernels/`, `src/reduce/traits.rs`
+**파일:** `src/reduction/kernels/`, `src/reduction/traits.rs`
 
 | dtype | kernel | 핵심 |
 |-------|--------|------|
 | `bool` | `reduce_bool_extremum` | min = all (`&=`), max = any (OR-equals). comparison dispatch 없음 |
-| `i64` | `reduce_i64_min/max` | plain `Ord` compare, NaN 분기 없음 |
+| `i64` | `reduce_i64_min/max` | 8-lane `Ord` compare, NaN 분기 없음 |
 | `f64` | `reduce_f64_extremum` | 8-lane + NaN mask (아래) |
 
 `ExtremumReduce` trait이 dtype별 dedicated kernel로 dispatch.
@@ -238,7 +240,7 @@ reduced-axis shape/strides → `RunPlan<1>` coalesce → `(run_count, run_len, o
 - **Suffix contiguous:** chunk[0] NaN → 즉시 `NaN` push; NaN-free chunk → 8-lane partial + lane별 `nan_masks`; 결과 NaN 시 canonical `f64::NAN`.
 - **Prefix / general:** logical C-order first-NaN payload 보존 (`extremum_prefix_contiguous` + `f64::is_nan`).
 
-**Sort (`src/sort.rs`):** `SortElement for f64` — non-NaN < NaN, NaN끼리 equal (NaN-last stable ordering).
+**Sort (`src/sorting/`):** `SortElement for f64` — non-NaN < NaN, NaN끼리 equal (NaN-last stable ordering).
 
 #### 5.9 `var` / `std` two-pass + schedule별 경로
 
@@ -254,7 +256,7 @@ fresh C-contiguous reduction output에 `Arc::make_mut` 후 in-place map. `mean`(
 
 #### 5.11 `AxisTraversalPlan` — 단일 축 연산 geometry
 
-**파일:** `src/reduce/axis.rs`, `src/reduce/kernels/`
+**파일:** `src/reduction/plan.rs`, `src/reduction/kernels/`
 
 `argmin`/`argmax`/`cumsum`/`cumprod`용 kept shape/strides 사전 계산. last axis + contiguous → row chunk scan.
 
@@ -269,6 +271,18 @@ fresh C-contiguous reduction output에 `Arc::make_mut` 후 in-place map. `mean`(
 
 - contiguous: linear scan with index tracking.
 - strided: `RunPlan` + linear counter, NaN early exit (`try_for_each`).
+
+#### 5.14 `NanPolicy` 경계 dispatch
+
+`NanPolicy::Propagate`는 기존 dtype별 kernel body에 그대로 진입한다.
+`NanPolicy::Ignore`는 suffix/prefix/general별 별도 kernel family를 사용해
+NaN 검사와 valid-count 상태가 propagate hot loop에 섞이지 않는다.
+
+- suffix: 8-lane accumulator + lane별 valid count
+- prefix: output slot별 accumulator/count row scan
+- general: 기존 `ReducedAxisRuns` 재사용
+- var/std: valid 원소만 대상으로 기존 two-pass 유지
+- cumulative: contiguous/strided별 별도 순차 scan
 
 ---
 
@@ -320,7 +334,7 @@ values contiguous → offset iter zip assign. else `StrideIter` zip.
 
 #### 7.1 Concatenate outer-slab + bulk extend
 
-**파일:** `src/join.rs`
+**파일:** `src/manipulation/`
 
 concat axis 기준 outer index로 slab base 계산.
 
@@ -339,7 +353,7 @@ concat axis 기준 outer index로 slab base 계산.
 
 #### 8.1 `where_` triple contiguous fast path
 
-**파일:** `src/select.rs`
+**파일:** `src/selection/ops.rs`
 
 condition/x/y 모두 contiguous → 3-way nested zip. else `collect_ternary` RunKind specialization.
 
@@ -355,11 +369,13 @@ C-order `StrideIter::for_each` + true 원소 coordinate push.
 
 ### 9. Sorting
 
-#### 9.1 Materialize-then-sort
+#### 9.1 Single materialization then sort
 
-**파일:** `src/sort.rs`
+**파일:** `src/sorting/`
 
-strided view in-place sort 불가 → `to_vec()` materialize 후 flat 또는 axis-local sort.
+strided view는 `to_vec()`으로 한 번 materialize한 뒤 flat 또는 axis-local
+sort를 수행한다. 마지막 축은 output buffer의 contiguous chunk를 직접
+정렬해 별도 axis scratch gather/scatter를 건너뛴다.
 
 #### 9.2 Axis-local sort + scratch reuse
 
@@ -375,17 +391,11 @@ strided view in-place sort 불가 → `to_vec()` materialize 후 flat 또는 axi
 
 index sort by `unique_cmp` → single-pass group merge. NaN/complex-NaN equivalence.
 
-#### 9.5 In-place sort buffer replacement
-
-sorted C-contiguous array로 `Array` buffer 교체 → COW shared buffer 분리 (`sort_in_place`).
-
----
-
 ### 10. Creation / Spaces
 
 #### 10.1 `meshgrid` zero-copy broadcast
 
-**파일:** `src/create.rs`
+**파일:** `src/creation/grids.rs`, `src/creation/ranges.rs`
 
 1-D input reshape(view) + `broadcast_to`. contiguous input은 buffer 공유.
 
@@ -395,16 +405,105 @@ opposite-sign large bounds에서 `start*(1-f)+stop*f` form으로 overflow 방지
 
 ---
 
+### 11. Linear algebra / Diagonal
+
+#### 11.1 Prepared contraction geometry
+
+**파일:** `src/linalg/geometry.rs`, `src/linalg/kernels.rs`
+
+`MatmulPlan`이 1-D operand의 virtual matrix 축, contraction 길이, output
+shape, broadcast된 batch stride를 kernel 진입 전에 한 번 계산한다. Batch
+축은 `RunPlan<2>`로 함께 순회하므로 size-1 broadcast 축은 stride 0으로
+동일 matrix base를 재사용한다.
+
+#### 11.2 Boundary dispatch and contiguous matrix rows
+
+**파일:** `src/linalg/ops.rs`, `src/linalg/kernels.rs`
+
+`dot`/`matmul` 진입점은 right operand의 마지막 축이 unit-stride인지 한 번
+검사한다. 길이 1을 초과하는 non-unit-stride 축만 호출당 한 번 C-order로
+materialize하고, 이미 적합한 배열은 `Arc` clone만 수행한다.
+
+일반적인 C-order 경로는 `i-k-j` 순서로 순회한다. right row와 output row를
+연속 slice로 잘라 8-lane chunk로 갱신하므로 hot loop의 주소
+계산을 없애고 LLVM auto-vectorization을 유도한다. 진짜 strided 경로는
+기존 fixed-stride scalar walk를 유지한다.
+
+#### 11.3 Eight-lane vector contractions
+
+matrix-vector/vector-vector의 unit-stride contraction과 `vdot`은
+`chunks_exact(8)` 및 8개 독립 accumulator를 사용해 loop-carried
+dependency를 줄인다. partial 결과는 `ContractElement::add`로 병합하므로
+f64/i64/complex뿐 아니라 bool OR-of-AND semiring도 같은 kernel을 쓴다.
+
+`vdot`은 `Array::to_c_order_cow`로 각 operand를 독립 판정한다. contiguous
+입력은 slice를 그대로 빌리고 strided 입력만 `RunPlan`으로 logical
+C-order materialize하며, promoted left value의 conjugation은 lane loop
+안에서 적용한다.
+
+`outer`도 동일한 `to_c_order_cow` 경계를 사용하므로 contiguous operand는
+빌리고 strided operand만 C-order로 materialize한다.
+
+#### 11.4 Shared diagonal geometry and fixed-stride walk
+
+`DiagonalGeometry`가 `eye`, `diag`, `diagonal`, `trace`의 start/length
+계산을 공유한다. N-D `diagonal`/`trace`는 kept-axis base를 `RunPlan`으로
+순회하고 각 대각선은 `row_stride + column_stride` 고정 stride로 걷는다.
+`trace`는 중간 diagonal 배열을 만들지 않고 바로 `SumReduce` accumulator에
+fold한다.
+
+#### 11.5 Triangle single-pass materialization
+
+`tri`는 checked-size output을 한 번 할당해 row-major로 0/1을 생성한다.
+`tril`/`triu`는 입력을 논리 C-order로 한 번 materialize한 뒤 matrix, row,
+column counter로 마지막 두 축의 mask를 적용한다. hot loop에 linear-index
+division/modulo가 없으며 별도 boolean mask 배열도 만들지 않는다.
+
+---
+
+### 12. NumPy-style iteration
+
+#### 12.1 Lazy contiguous/strided dispatch
+
+**파일:** `src/iteration/`, `src/traversal/stride_iter.rs`
+
+`Array::flat`은 진입 시 `as_c_contiguous_slice`를 한 번 확인한다. contiguous
+입력은 slice iterator로 직접 읽고, transpose·negative-stride 입력은 기존
+`StrideIter`가 계산한 backing-buffer offset을 따라간다. 어떤 경로도 전체
+배열을 materialize하지 않는다.
+
+`ndenumerate`는 독립 순회 구현 대신 `NdIndex`와 `FlatIter`를 zip한다.
+`NdIndex`는 indexing에서 이미 쓰는 `advance_multi_index` odometer를
+재사용한다.
+
+#### 12.2 Broadcast-once multi-operand iteration
+
+`nditer`는 생성 시 operand를 공통 shape로 한 번 broadcast한다. 모든
+operand가 contiguous면 공통 linear position으로 읽고, stride-0 또는
+strided operand가 있으면 공통 multi-index에서 기존 `offset_at`으로 각
+buffer 위치를 계산한다. ufunc/reduce의 `RunPlan` hot path는 변경하지 않는다.
+
+#### 12.3 Axis-0 shared views
+
+axis-0 iterator는 trailing shape/strides metadata를 한 번 준비하고, 각
+step에서 axis-0 offset만 전진시켜 `Arc` backing buffer를 공유하는 view를
+만든다. 쓰기는 기존 `Array` CoW 정책에 따라 원본과 분리된다.
+
+---
+
 ### 벤치 카테고리와 기법 매핑 (참고)
 
 | 벤치 그룹 | 주로 exercise하는 기법 |
 |-----------|------------------------|
-| View·복사 | zero-copy view, broadcast stride 0, contiguous copy |
+| View·복사 | zero-copy squeeze, broadcast stride 0, contiguous copy, astype |
 | Ufunc | flat zip vs RunPlan + RunKind |
-| Reduction | TraversalSchedule, 8-lane, typed min/max, ReducedAxisRuns, two-pass var |
+| Reduction | TraversalSchedule, 8-lane, typed min/max, NanPolicy split, two-pass var |
 | Cumulative | row contiguous vs strided RunPlan<2> |
 | Join | `extend_from_slice` vs `extend_unary` |
 | Selection | ternary collect, ufunc inheritance |
 | Indexing | basic view (µs), fancy/boolean copy loops |
 | Sorting | materialize + axis scratch sort |
 | Spaces | meshgrid broadcast view |
+| Linalg | batch RunPlan, slice i-k-j, 8-lane dot/vdot, conditional materialization |
+| Triangle·Diagonal | shared geometry, fixed-stride diagonal, counter-based mask |
+| Iteration | slice/StrideIter dispatch, index-value zip, broadcast-once nditer, axis-0 views |

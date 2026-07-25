@@ -109,6 +109,54 @@ impl<T: Scalar> Array<T> {
         }
     }
 
+    /// Remove length-one axes as a zero-copy view.
+    ///
+    /// `None` removes every length-one axis. `Some(axes)` removes only the
+    /// requested axes; negative axes count from the end. Requested axes must
+    /// be unique and have length one. Removing every axis yields a valid 0-D
+    /// array.
+    pub fn squeeze(&self, axes: Option<&[isize]>) -> Result<Array<T>> {
+        let mut remove = vec![false; self.ndim()];
+        match axes {
+            None => {
+                for (axis, &length) in self.shape.iter().enumerate() {
+                    remove[axis] = length == 1;
+                }
+            }
+            Some(axes) => {
+                for axis in normalize_axis_list(axes, self.ndim())? {
+                    let length = self.shape[axis];
+                    if length != 1 {
+                        return Err(Error::InvalidArgument(format!(
+                            "cannot squeeze axis {axis} with length {length}"
+                        )));
+                    }
+                    remove[axis] = true;
+                }
+            }
+        }
+
+        let shape = self
+            .shape
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &length)| (!remove[axis]).then_some(length))
+            .collect();
+        let strides = self
+            .strides
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &stride)| (!remove[axis]).then_some(stride))
+            .collect();
+        Self::from_shared_parts(
+            Arc::clone(&self.data),
+            shape,
+            strides,
+            self.offset,
+            self.writable,
+        )
+    }
+
     /// Cheap view alias: same buffer, shape, strides, and offset.
     pub fn view(&self) -> Array<T> {
         Self::from_shared_parts(
@@ -221,5 +269,58 @@ mod tests {
         let negative = a.permute_axes(&[-1, -2]).unwrap();
         assert_eq!(negative.shape(), b.shape());
         assert!(a.permute_axes(&[0, -2]).is_err());
+    }
+
+    #[test]
+    fn squeeze_all_and_selected_axes_share_storage() {
+        let a = Array::from_slice(&[1_i64, 2, 3], &[1, 3, 1]).unwrap();
+        let all = a.squeeze(None).unwrap();
+        assert_eq!(all.shape(), &[3]);
+        assert_eq!(all.to_vec(), [1, 2, 3]);
+        assert!(all.shares_buffer_with(&a));
+
+        let selected = a.squeeze(Some(&[0])).unwrap();
+        assert_eq!(selected.shape(), &[3, 1]);
+        assert!(selected.shares_buffer_with(&a));
+
+        let negative = a.squeeze(Some(&[-1])).unwrap();
+        assert_eq!(negative.shape(), &[1, 3]);
+    }
+
+    #[test]
+    fn squeeze_validates_axes_and_allows_zero_dimensional_results() {
+        let a = Array::from_slice(&[7_i64], &[1]).unwrap();
+        let scalar = a.squeeze(None).unwrap();
+        assert_eq!(scalar.shape(), &[] as &[usize]);
+        assert_eq!(scalar.item().unwrap(), 7);
+
+        assert!(a.squeeze(Some(&[0, 0])).is_err());
+        assert!(Array::from_slice(&[1_i64, 2], &[2])
+            .unwrap()
+            .squeeze(Some(&[0]))
+            .is_err());
+
+        let zero_dimensional = Array::from_slice(&[9_i64], &[]).unwrap();
+        assert!(zero_dimensional.squeeze(None).unwrap().shape().is_empty());
+        assert!(zero_dimensional.squeeze(Some(&[0])).is_err());
+    }
+
+    #[test]
+    fn squeeze_preserves_empty_broadcast_and_copy_on_write_semantics() {
+        let empty = Array::from_slice(&[] as &[i64], &[0, 1]).unwrap();
+        assert_eq!(empty.squeeze(None).unwrap().shape(), &[0]);
+
+        let base = Array::from_slice(&[1_i64, 2, 3], &[1, 3, 1]).unwrap();
+        let broadcast = base.broadcast_to(&[2, 3, 1]).unwrap();
+        let squeezed = broadcast.squeeze(None).unwrap();
+        assert_eq!(squeezed.shape(), &[2, 3]);
+        assert!(!squeezed.is_writable());
+        assert!(squeezed.shares_buffer_with(&base));
+
+        let mut writable = base.squeeze(None).unwrap();
+        writable.set(&[0], 9).unwrap();
+        assert_eq!(writable.get(&[0]).unwrap(), 9);
+        assert_eq!(base.get(&[0, 0, 0]).unwrap(), 1);
+        assert!(!writable.shares_buffer_with(&base));
     }
 }

@@ -1,36 +1,38 @@
 //! Same-type and cross-type element-wise map kernels.
 //!
 //! Fully-contiguous operands use a flat zip; otherwise operand layouts are
-//! coalesced into [`crate::run::RunPlan`] and walked as fixed-stride runs.
+//! coalesced into [`crate::traversal::RunPlan`] and walked as fixed-stride runs.
 
 use crate::array::Array;
 use crate::broadcast::broadcast_shape;
 use crate::dtype::Scalar;
 use crate::error::Result;
-use crate::run::{collect_binary, collect_unary, try_collect_binary, RunPlan};
 use crate::shape::size_of_shape;
+use crate::traversal::{
+    collect_binary, collect_unary, try_collect_binary, RunPlan,
+};
 
-/// Apply `f` to every element of `a` (C-order), producing a new contiguous array.
-pub fn map_unary<A, Out, F>(a: &Array<A>, f: F) -> Result<Array<Out>>
+/// Apply `f` to every element (C-order), producing a new contiguous array.
+pub(crate) fn map_unary<A, Out, F>(array: &Array<A>, f: F) -> Result<Array<Out>>
 where
     A: Scalar,
     Out: Scalar,
     F: FnMut(A) -> Out,
 {
-    if let Some(xs) = a.as_c_contiguous_slice() {
-        let out = xs.iter().copied().map(f).collect();
-        return Array::from_vec(out, a.shape());
+    if let Some(values) = array.as_c_contiguous_slice() {
+        let output = values.iter().copied().map(f).collect();
+        return Array::from_vec(output, array.shape());
     }
 
-    let plan = RunPlan::new(a.shape(), [a.strides()]);
-    let out = collect_unary(&plan, &a.data, a.offset(), f);
-    Array::from_vec(out, a.shape())
+    let plan = RunPlan::new(array.shape(), [array.strides()]);
+    let output = collect_unary(&plan, &array.data, array.offset(), f);
+    Array::from_vec(output, array.shape())
 }
 
-/// Broadcast `a` and `b`, then apply infallible `f` element-wise.
-pub fn map_binary<A, B, Out, F>(
-    a: &Array<A>,
-    b: &Array<B>,
+/// Broadcast `left` and `right`, then apply infallible `f` element-wise.
+pub(super) fn map_binary<A, B, Out, F>(
+    left: &Array<A>,
+    right: &Array<B>,
     mut f: F,
 ) -> Result<Array<Out>>
 where
@@ -39,38 +41,38 @@ where
     Out: Scalar,
     F: FnMut(A, B) -> Out,
 {
-    let aligned = align_binary(a, b)?;
-    let left = aligned.left.as_ref().unwrap_or(a);
-    let right = aligned.right.as_ref().unwrap_or(b);
+    let aligned = align_binary(left, right)?;
+    let left = aligned.left.as_ref().unwrap_or(left);
+    let right = aligned.right.as_ref().unwrap_or(right);
     let shape = &aligned.shape;
 
-    if let (Some(xs), Some(ys)) =
+    if let (Some(left_values), Some(right_values)) =
         (left.as_c_contiguous_slice(), right.as_c_contiguous_slice())
     {
-        let out = xs
+        let output = left_values
             .iter()
             .copied()
-            .zip(ys.iter().copied())
-            .map(|(x, y)| f(x, y))
+            .zip(right_values.iter().copied())
+            .map(|(left, right)| f(left, right))
             .collect();
-        return Array::from_vec(out, shape);
+        return Array::from_vec(output, shape);
     }
 
     let plan = RunPlan::new(shape, [left.strides(), right.strides()]);
-    let out = collect_binary(
+    let output = collect_binary(
         &plan,
         &left.data,
         &right.data,
         [left.offset(), right.offset()],
         f,
     );
-    Array::from_vec(out, shape)
+    Array::from_vec(output, shape)
 }
 
-/// Broadcast `a` and `b`, then apply fallible `f` element-wise.
-pub fn try_map_binary<A, B, Out, F>(
-    a: &Array<A>,
-    b: &Array<B>,
+/// Broadcast `left` and `right`, then apply fallible `f` element-wise.
+pub(super) fn try_map_binary<A, B, Out, F>(
+    left: &Array<A>,
+    right: &Array<B>,
     mut f: F,
 ) -> Result<Array<Out>>
 where
@@ -79,29 +81,29 @@ where
     Out: Scalar,
     F: FnMut(A, B) -> Result<Out>,
 {
-    let aligned = align_binary(a, b)?;
-    let left = aligned.left.as_ref().unwrap_or(a);
-    let right = aligned.right.as_ref().unwrap_or(b);
+    let aligned = align_binary(left, right)?;
+    let left = aligned.left.as_ref().unwrap_or(left);
+    let right = aligned.right.as_ref().unwrap_or(right);
     let shape = &aligned.shape;
 
-    if let (Some(xs), Some(ys)) =
+    if let (Some(left_values), Some(right_values)) =
         (left.as_c_contiguous_slice(), right.as_c_contiguous_slice())
     {
-        let mut out = Vec::with_capacity(size_of_shape(shape));
-        for (&x, &y) in xs.iter().zip(ys) {
-            out.push(f(x, y)?);
+        let mut output = Vec::with_capacity(size_of_shape(shape));
+        for (&left, &right) in left_values.iter().zip(right_values) {
+            output.push(f(left, right)?);
         }
-        return Array::from_vec(out, shape);
+        return Array::from_vec(output, shape);
     }
     let plan = RunPlan::new(shape, [left.strides(), right.strides()]);
-    let out = try_collect_binary(
+    let output = try_collect_binary(
         &plan,
         &left.data,
         &right.data,
         [left.offset(), right.offset()],
         f,
     )?;
-    Array::from_vec(out, shape)
+    Array::from_vec(output, shape)
 }
 
 /// Result of aligning two operands for a binary map.
@@ -115,22 +117,22 @@ struct AlignedBinary<A: Scalar, B: Scalar> {
 }
 
 fn align_binary<A: Scalar, B: Scalar>(
-    a: &Array<A>,
-    b: &Array<B>,
+    left: &Array<A>,
+    right: &Array<B>,
 ) -> Result<AlignedBinary<A, B>> {
-    if a.shape() == b.shape() {
+    if left.shape() == right.shape() {
         return Ok(AlignedBinary {
             left: None,
             right: None,
-            shape: a.shape().to_vec(),
+            shape: left.shape().to_vec(),
         });
     }
-    let shape = broadcast_shape(a.shape(), b.shape())?;
-    let left = (a.shape() != shape.as_slice())
-        .then(|| a.broadcast_to(&shape))
+    let shape = broadcast_shape(left.shape(), right.shape())?;
+    let left = (left.shape() != shape.as_slice())
+        .then(|| left.broadcast_to(&shape))
         .transpose()?;
-    let right = (b.shape() != shape.as_slice())
-        .then(|| b.broadcast_to(&shape))
+    let right = (right.shape() != shape.as_slice())
+        .then(|| right.broadcast_to(&shape))
         .transpose()?;
     Ok(AlignedBinary { left, right, shape })
 }

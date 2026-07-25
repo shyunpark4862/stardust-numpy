@@ -5,8 +5,8 @@
 //! - [`ops`]: public free functions (`add`, `divide`, …)
 
 pub(crate) mod kernels;
-pub(crate) mod ops;
-pub(crate) mod traits;
+mod ops;
+mod traits;
 
 pub use ops::{
     absolute, add, conj, divide, equal, greater, greater_equal, imag, isfinite,

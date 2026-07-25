@@ -2,8 +2,8 @@
 
 use sdnp::{
     argsort, clip, concatenate, geomspace, hstack, linspace, logspace,
-    meshgrid, nonzero, sort, sort_in_place, stack, unique, unique_with, vstack,
-    where_, Array, MeshgridIndexing, UniqueOptions,
+    meshgrid, nonzero, sort, stack, unique, unique_with, vstack, where_, Array,
+    Complex64, MeshgridIndexing, UniqueOptions,
 };
 
 #[test]
@@ -52,16 +52,79 @@ fn selection_broadcast_nonzero_and_clip() {
 }
 
 #[test]
-fn sorting_axes_flatten_and_cow() {
+fn sorting_axes_and_flatten() {
     let a = Array::from_slice(&[3_i64, 1, 2, 6, 4, 5], &[2, 3]).unwrap();
     assert_eq!(sort(&a, Some(-1)).unwrap().to_vec(), vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(argsort(&a, None).unwrap().to_vec(), vec![1, 2, 0, 4, 5, 3]);
+}
 
-    let mut shared = a.clone();
-    sort_in_place(&mut shared, None).unwrap();
-    assert_eq!(shared.shape(), &[2, 3]);
-    assert_eq!(shared.to_vec(), vec![1, 2, 3, 4, 5, 6]);
-    assert_eq!(a.to_vec(), vec![3, 1, 2, 6, 4, 5]);
+#[test]
+fn squeeze_and_astype_cover_views_and_explicit_conversions() {
+    let source = Array::from_slice(
+        &[1.9_f64, -2.1, f64::NAN, f64::INFINITY],
+        &[1, 2, 2],
+    )
+    .unwrap();
+    let squeezed = source.squeeze(None).unwrap();
+    assert_eq!(squeezed.shape(), &[2, 2]);
+    assert!(squeezed.shares_buffer_with(&source));
+
+    let integers = squeezed.astype::<i64>().unwrap();
+    assert_eq!(integers.to_vec(), [1, -2, 0, i64::MAX]);
+    assert!(integers.is_c_contiguous());
+    assert!(!integers.shares_buffer_with(&squeezed.astype::<i64>().unwrap()));
+
+    let transposed = squeezed.transpose();
+    let booleans = transposed.astype::<bool>().unwrap();
+    assert_eq!(booleans.shape(), &[2, 2]);
+    assert_eq!(booleans.to_vec(), [true, true, true, true]);
+    assert!(booleans.is_c_contiguous());
+}
+
+#[test]
+fn astype_supports_all_sixteen_dtype_pairs() {
+    let booleans = Array::from_slice(&[false, true], &[2]).unwrap();
+    assert_eq!(booleans.astype::<bool>().unwrap().to_vec(), [false, true]);
+    assert_eq!(booleans.astype::<i64>().unwrap().to_vec(), [0, 1]);
+    assert_eq!(booleans.astype::<f64>().unwrap().to_vec(), [0.0, 1.0]);
+    assert_eq!(
+        booleans.astype::<Complex64>().unwrap().to_vec(),
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)]
+    );
+
+    let integers = Array::from_slice(&[0_i64, -2], &[2]).unwrap();
+    assert_eq!(integers.astype::<bool>().unwrap().to_vec(), [false, true]);
+    assert_eq!(integers.astype::<i64>().unwrap().to_vec(), [0, -2]);
+    assert_eq!(integers.astype::<f64>().unwrap().to_vec(), [0.0, -2.0]);
+    assert_eq!(
+        integers.astype::<Complex64>().unwrap().to_vec(),
+        [Complex64::new(0.0, 0.0), Complex64::new(-2.0, 0.0)]
+    );
+
+    let floats = Array::from_slice(&[0.0_f64, -2.9], &[2]).unwrap();
+    assert_eq!(floats.astype::<bool>().unwrap().to_vec(), [false, true]);
+    assert_eq!(floats.astype::<i64>().unwrap().to_vec(), [0, -2]);
+    assert_eq!(floats.astype::<f64>().unwrap().to_vec(), [0.0, -2.9]);
+    assert_eq!(
+        floats.astype::<Complex64>().unwrap().to_vec(),
+        [Complex64::new(0.0, 0.0), Complex64::new(-2.9, 0.0)]
+    );
+
+    let complex = Array::from_slice(
+        &[Complex64::new(0.0, 0.0), Complex64::new(-2.9, 7.0)],
+        &[2],
+    )
+    .unwrap();
+    assert_eq!(complex.astype::<bool>().unwrap().to_vec(), [false, true]);
+    assert_eq!(complex.astype::<i64>().unwrap().to_vec(), [0, -2]);
+    assert_eq!(complex.astype::<f64>().unwrap().to_vec(), [0.0, -2.9]);
+    assert_eq!(
+        complex.astype::<Complex64>().unwrap().to_vec(),
+        complex.to_vec()
+    );
+    assert!(
+        !complex.shares_buffer_with(&complex.astype::<Complex64>().unwrap())
+    );
 }
 
 #[test]

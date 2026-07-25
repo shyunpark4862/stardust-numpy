@@ -16,6 +16,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "benches" / "BENCHMARK_REPORT.md"
 
+PROPAGATE_PRIOR_US = {
+    "sum_axis_last_contiguous_f64": 80.167,
+    "sum_axis_first_fixed_stride_f64": 128.15,
+    "sum_multi_axis_general_f64": 575.92,
+    "prod_axis_last_f64": 762.63,
+    "prod_axis_first_fixed_stride_f64": 127.81,
+    "var_axis_last_contiguous_f64": 242.31,
+    "min_axis_last_f64": 155.19,
+    "argmin_axis_last_f64": 938.38,
+    "cumsum_axis_last_contiguous_f64": 1206.1,
+    "cumsum_axis_first_strided_f64": 6994.9,
+}
+
 
 def load_render_module():
     spec = importlib.util.spec_from_file_location(
@@ -94,6 +107,65 @@ def build_report(
     wins = sum(1 for r in rows if r["ratio"] <= 1.0)
     slower = sorted(rows, key=lambda r: -r["ratio"])[:10]
     faster = sorted(rows, key=lambda r: r["ratio"])[:10]
+    best = min(rows, key=lambda r: r["ratio"])
+    worst = max(rows, key=lambda r: r["ratio"])
+    linalg_rows = [
+        row for row in rows if row["group"] in {"Linalg", "Triangle", "Diagonal"}
+    ]
+    summary_lines = [
+        f"- **전체 최저 비율:** `{best['name']}` {best['ratio']:.2f}×.",
+        f"- **전체 최고 비율:** `{worst['name']}` {worst['ratio']:.2f}×.",
+    ]
+    if linalg_rows:
+        linalg_ratios = [row["ratio"] for row in linalg_rows]
+        summary_lines.append(
+            "- **Phase 6 선형대수·대각선:** "
+            f"{len(linalg_rows)}개 경로, 중앙값 {statistics.median(linalg_ratios):.2f}×, "
+            f"SDNP 우세·동률 {sum(ratio <= 1.0 for ratio in linalg_ratios)}개."
+        )
+    iteration_rows = [row for row in rows if row["group"] == "Iteration"]
+    if iteration_rows:
+        iteration_ratios = [row["ratio"] for row in iteration_rows]
+        summary_lines.append(
+            "- **Phase 7 iteration:** "
+            f"{len(iteration_rows)}개 경로, 중앙값 "
+            f"{statistics.median(iteration_ratios):.2f}×, "
+            f"SDNP 우세·동률 "
+            f"{sum(ratio <= 1.0 for ratio in iteration_ratios)}개."
+        )
+    for group, label in (
+        ("신규 기능", "squeeze·astype"),
+        ("NaN policy", "NanPolicy::Ignore"),
+    ):
+        selected = [row for row in rows if row["group"] == group]
+        if selected:
+            ratios = [row["ratio"] for row in selected]
+            summary_lines.append(
+                f"- **{label}:** {len(selected)}개 경로, 중앙값 "
+                f"{statistics.median(ratios):.2f}×, SDNP 우세·동률 "
+                f"{sum(ratio <= 1.0 for ratio in ratios)}개."
+            )
+    summary_text = "\n".join(summary_lines)
+
+    current_by_key = {row["key"]: row for row in rows}
+    regression_rows = []
+    for key, before in PROPAGATE_PRIOR_US.items():
+        row = current_by_key.get(key)
+        if row is None:
+            continue
+        after = row["sdnp"]
+        regression_rows.append(
+            [
+                row["name"],
+                fmt_us(before),
+                fmt_us(after),
+                f"{100 * (after / before - 1):+.1f}%",
+            ]
+        )
+    regression_table = md_table(
+        ["Propagate 경로", "정책 추가 전 (µs)", "현재 (µs)", "변화"],
+        regression_rows,
+    )
 
     by_group: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -172,9 +244,10 @@ def build_report(
 ### 측정 방법론
 
 - Rust와 NumPy 벤치는 **순차 실행**한다. 동시 실행 시 CPU 간섭으로 결과가 왜곡된다.
-- 표의 시간은 Criterion **median** / NumPy **단일 측정값**(초 → µs 변환)이다.
+- 표의 시간은 Criterion **median** / NumPy **7회 측정 median**(초 → µs 변환)이다.
 - **비율** = SDNP ÷ NumPy. **1.00× 이하**이면 SDNP가 같거나 빠름(✓).
 - View 계열은 allocator·복사 비용이 없어 µs 미만으로 매우 작게 나올 수 있다.
+- Iteration 계열은 iterator 생성뿐 아니라 전체 logical 원소를 checksum으로 소비한다.
 
 ## Executive Summary
 
@@ -186,11 +259,14 @@ def build_report(
 
 ### 주요 결과
 
-- **Reduction first axis:** prefix `TraversalSchedule` 덕분에 `sum/mean/prod · first axis`, `any/all · first axis`, `var/std · first axis`가 NumPy 대비 **0.28–0.97×**.
-- **Reduction last axis:** `sum · last axis` **0.66×**, `var/std · last axis` **~0.40×** — suffix 8-lane + two-pass var가 효과적.
-- **min/max:** f64/i64 last axis는 여전히 NumPy **~1.8×** 열세. first axis prefix는 f64 **~1.9×**, bool은 **0.77×**.
-- **최대 격차:** `sum · multi-axis general` **5.02×**, `scatter array · shared RHS` **4.12×**, `sort · last axis contiguous` **2.90×**.
-- **View·Spaces:** `meshgrid · 1024×1024 view` **0.06×**, broadcast/view 경로 전반 우세.
+{summary_text}
+
+## NanPolicy `Propagate` 회귀 확인
+
+정책 추가 전의 마지막 측정값과 같은 경로를 선택 재측정했다. 양수는 느려짐,
+음수는 빨라짐이며 작은 변동은 측정 노이즈 범위다.
+
+{regression_table}
 
 ## 카테고리별 요약
 

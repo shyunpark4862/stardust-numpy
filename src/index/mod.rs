@@ -1,7 +1,7 @@
 //! Indexing: [`IndexSpec`], [`gather`], [`scatter`], [`scatter_array`].
 //!
-//! User-facing Python objects are normalized into [`IndexSpec`] (Phase 8).
-//! Ellipsis and trailing full-slice padding are handled here for Rust tests.
+//! Index expressions are normalized into [`IndexSpec`]. Ellipsis and trailing
+//! full-slice padding are expanded during index preparation.
 
 mod bounds;
 mod ops;

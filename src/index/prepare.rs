@@ -33,24 +33,24 @@ pub(crate) enum PreparedEntry {
 #[derive(Clone, Debug)]
 pub(crate) struct FancyLayout {
     /// Full result shape (basic dims + fancy dims, order depends on adjacency).
-    pub result_shape: Vec<usize>,
+    pub(crate) result_shape: Vec<usize>,
     /// Start axis of the fancy block inside [`Self::result_shape`].
-    pub fancy_axis_start: usize,
+    pub(crate) fancy_axis_start: usize,
     /// Number of fancy axes (broadcast fancy ndim).
-    pub fancy_axis_len: usize,
+    pub(crate) fancy_axis_len: usize,
     /// Index-entry slot → result axis for basic `NewAxis` / `Slice` (else `None`).
-    pub slot_to_result_axis: Vec<Option<usize>>,
+    pub(crate) slot_to_result_axis: Vec<Option<usize>>,
 }
 
 /// Fully prepared index ready for basic or fancy gather/scatter.
 pub(crate) struct PreparedIndex {
-    pub entries: Vec<PreparedEntry>,
+    pub(crate) entries: Vec<PreparedEntry>,
     /// `Some` when any fancy entries are present.
-    pub fancy: Option<FancyLayout>,
+    pub(crate) fancy: Option<FancyLayout>,
 }
 
 impl PreparedIndex {
-    pub fn has_fancy(&self) -> bool {
+    pub(crate) fn has_fancy(&self) -> bool {
         self.fancy.is_some()
     }
 }
@@ -280,24 +280,26 @@ fn resolve_entries(
 }
 
 fn normalize_fancy_array(
-    arr: &Array<i64>,
+    array: &Array<i64>,
     axis_len: usize,
 ) -> Result<Array<i64>> {
-    let mut out = Vec::with_capacity(arr.size());
-    if let Some(xs) = arr.as_c_contiguous_slice() {
-        for &raw in xs {
-            out.push(normalize_element_index(raw, axis_len)? as i64);
+    let mut output = Vec::with_capacity(array.size());
+    if let Some(values) = array.as_c_contiguous_slice() {
+        for &raw in values {
+            output.push(normalize_element_index(raw, axis_len)? as i64);
         }
     } else {
-        use crate::stride_iter::StrideIter;
-        for buf_idx in StrideIter::new(arr.shape(), arr.strides(), arr.offset())
+        use crate::traversal::StrideIter;
+        for buffer_index in
+            StrideIter::new(array.shape(), array.strides(), array.offset())
         {
-            out.push(
-                normalize_element_index(arr.data[buf_idx], axis_len)? as i64
-            );
+            output.push(normalize_element_index(
+                array.data[buffer_index],
+                axis_len,
+            )? as i64);
         }
     }
-    Array::from_vec(out, arr.shape())
+    Array::from_vec(output, array.shape())
 }
 
 fn boolean_mask_to_integer_arrays(
@@ -317,7 +319,7 @@ fn boolean_mask_to_integer_arrays(
             advance_multi_index(&mut indices, mask.shape());
         }
     } else {
-        use crate::stride_iter::StrideIter;
+        use crate::traversal::StrideIter;
         StrideIter::new(mask.shape(), mask.strides(), mask.offset()).for_each(
             |buf_idx, indices| {
                 if mask.data[buf_idx] {

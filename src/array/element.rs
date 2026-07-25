@@ -26,7 +26,7 @@ impl<T: Scalar> Array<T> {
             return Err(crate::error::Error::ReadOnly);
         }
         self.checked_offset(indices)?;
-        self.ensure_unique_storage_for_write();
+        let _ = self.ensure_unique_storage_for_write();
         let buf_idx = offset_at(indices, &self.strides, self.offset);
         Arc::make_mut(&mut self.data)[buf_idx] = value;
         Ok(())
@@ -36,10 +36,12 @@ impl<T: Scalar> Array<T> {
     ///
     /// A non-trivial shared view materializes only its logical elements in
     /// C-order instead of cloning unrelated elements from the backing buffer.
-    pub(crate) fn ensure_unique_storage_for_write(&mut self) {
+    /// Returns whether detaching also changed the array's layout.
+    #[must_use]
+    pub(crate) fn ensure_unique_storage_for_write(&mut self) -> bool {
         debug_assert!(self.writable);
         if Arc::strong_count(&self.data) == 1 {
-            return;
+            return false;
         }
 
         let covers_entire_buffer = self.offset == 0
@@ -47,13 +49,14 @@ impl<T: Scalar> Array<T> {
             && self.size() == self.data.len();
         if covers_entire_buffer {
             Arc::make_mut(&mut self.data);
-            return;
+            return false;
         }
 
         let data = self.to_vec_c_order();
         self.data = Arc::new(data);
         self.strides = c_order_strides(&self.shape);
         self.offset = 0;
+        true
     }
 
     fn checked_offset(&self, indices: &[usize]) -> Result<usize> {

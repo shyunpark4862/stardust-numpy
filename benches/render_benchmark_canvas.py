@@ -19,6 +19,32 @@ CANVAS = (
 
 from benchmark_manifest import DIAGNOSTIC_KEYS, METADATA
 
+# SDNP µs before Phase 6 linalg optimization (2026-07-25 full run).
+PHASE6_PRIOR_US: dict[str, float] = {
+    "dot_1d_contiguous_1m_f64": 663.8,
+    "matmul_contiguous_32x32_f64": 12.21,
+    "matmul_contiguous_128x128_f64": 823.8,
+    "matmul_contiguous_256x256_f64": 6213.5,
+    "matmul_strided_strided_128x128_f64": 1037.7,
+    "matmul_batched_8x64x64_f64": 758.3,
+    "tril_1024x1024_contiguous_f64": 1016.5,
+    "tril_1024x1024_strided_f64": 2346.5,
+    "triu_1024x1024_contiguous_f64": 1001.3,
+}
+
+PROPAGATE_PRIOR_US: dict[str, float] = {
+    "sum_axis_last_contiguous_f64": 80.167,
+    "sum_axis_first_fixed_stride_f64": 128.15,
+    "sum_multi_axis_general_f64": 575.92,
+    "prod_axis_last_f64": 762.63,
+    "prod_axis_first_fixed_stride_f64": 127.81,
+    "var_axis_last_contiguous_f64": 242.31,
+    "min_axis_last_f64": 155.19,
+    "argmin_axis_last_f64": 938.38,
+    "cumsum_axis_last_contiguous_f64": 1206.1,
+    "cumsum_axis_first_strided_f64": 6994.9,
+}
+
 TIME_RE = re.compile(
     r"time:\s+\[[\d.]+\s+\S+\s+([\d.]+)\s+(\S+)"
 )
@@ -187,6 +213,208 @@ def render_canvas(
     python_version = numpy_meta.get("python_version", "?")
     machine = numpy_meta.get("machine", "?")
 
+    phase6_rows = []
+    for key, prior_us in PHASE6_PRIOR_US.items():
+        if key not in sdnp:
+            continue
+        _, name = METADATA[key]
+        after_us = sdnp[key]
+        phase6_rows.append(
+            {
+                "name": name,
+                "beforeUs": prior_us,
+                "afterUs": after_us,
+                "speedup": prior_us / after_us if after_us else 1.0,
+            }
+        )
+    phase6_rows.sort(key=lambda item: item["speedup"], reverse=True)
+    phase6_categories = json.dumps(
+        [r["name"] for r in phase6_rows], ensure_ascii=False
+    )
+    phase6_series = ",\n    ".join(
+        [
+            (
+                f'{{ name: {json.dumps("최적화 전 SDNP (µs)", ensure_ascii=False)}, '
+                f'data: {json.dumps([round(r["beforeUs"], 1) for r in phase6_rows])}, '
+                f'tone: "neutral" as const }}'
+            ),
+            (
+                f'{{ name: {json.dumps("최적화 후 SDNP (µs)", ensure_ascii=False)}, '
+                f'data: {json.dumps([round(r["afterUs"], 1) for r in phase6_rows])}, '
+                f'tone: "success" as const }}'
+            ),
+        ]
+    )
+    phase6_lines = []
+    for item in phase6_rows:
+        phase6_lines.append(
+            f'            <Text><Text weight="semibold">{item["name"]}</Text>'
+            f' — {item["speedup"]:.1f}× 빠름'
+            f' ({fmt_us(item["beforeUs"])} → {fmt_us(item["afterUs"])} µs)</Text>'
+        )
+
+    iteration_rows = [
+        {
+            "name": name,
+            "sdnpUs": sdnp_us,
+            "numpyUs": numpy_us,
+            "ratio": ratio(sdnp_us, numpy_us),
+        }
+        for group, name, _, sdnp_us, numpy_us in rows
+        if group == "Iteration"
+    ]
+    iteration_rows.sort(key=lambda item: item["ratio"])
+    iteration_categories = json.dumps(
+        [item["name"] for item in iteration_rows], ensure_ascii=False
+    )
+    iteration_data = json.dumps(
+        [round(item["ratio"], 3) for item in iteration_rows]
+    )
+    iteration_lines = [
+        (
+            f'            <Text><Text weight="semibold">{item["name"]}</Text>'
+            f' — SDNP {item["ratio"]:.3f}×'
+            f' ({fmt_us(item["sdnpUs"])} µs vs {fmt_us(item["numpyUs"])} µs)</Text>'
+        )
+        for item in iteration_rows
+    ]
+    iteration_section = ""
+    if iteration_rows:
+        iteration_section = f'''
+      <Stack gap={{12}}>
+        <H2>Phase 7 iteration · SDNP / NumPy</H2>
+        <Text tone="tertiary" size="small">
+          Y축: iterator 경로 · X축: SDNP 시간 ÷ NumPy 시간 (배, 낮을수록 빠름)
+        </Text>
+        <BarChart
+          categories={{{iteration_categories}}}
+          series={{[{{ name: "SDNP / NumPy 배율", data: {iteration_data}, tone: "info" as const }}]}}
+          horizontal
+          height={{280}}
+          beginAtZero
+          referenceLines={{[{{ value: 1, label: "동률", tone: "neutral" }}]}}
+          showValues
+        />
+        <Text tone="tertiary" size="small">
+          Source: Criterion median 및 NumPy median · 전체 logical 원소 checksum 소비 ·
+          {machine} · NumPy {numpy_version} / Python {python_version} · 2026-07-26
+        </Text>
+        <Stack gap={{6}}>
+{chr(10).join(iteration_lines)}
+        </Stack>
+      </Stack>
+'''
+
+    focused_sections = []
+    for group, title, caption in (
+        (
+            "신규 기능",
+            "신규 기능 · SDNP / NumPy",
+            "squeeze metadata view 및 astype C-order materialization",
+        ),
+        (
+            "NaN policy",
+            "NanPolicy::Ignore · SDNP / NumPy",
+            "NaN skip 전용 suffix/prefix/general/cumulative kernels",
+        ),
+    ):
+        selected = [
+            {
+                "name": name,
+                "sdnpUs": sdnp_us,
+                "numpyUs": numpy_us,
+                "ratio": ratio(sdnp_us, numpy_us),
+            }
+            for row_group, name, _, sdnp_us, numpy_us in rows
+            if row_group == group
+        ]
+        if not selected:
+            continue
+        selected.sort(key=lambda item: item["ratio"])
+        categories = json.dumps(
+            [item["name"] for item in selected], ensure_ascii=False
+        )
+        data = json.dumps([round(item["ratio"], 3) for item in selected])
+        focused_sections.append(
+            f'''
+      <Stack gap={{12}}>
+        <H2>{title}</H2>
+        <Text tone="tertiary" size="small">
+          Y축: 연산 경로 · X축: SDNP 시간 ÷ NumPy 시간 (배, 낮을수록 빠름)
+        </Text>
+        <BarChart
+          categories={{{categories}}}
+          series={{[{{ name: "SDNP / NumPy 배율", data: {data}, tone: "info" as const }}]}}
+          horizontal
+          height={{{max(240, len(selected) * 34)}}}
+          beginAtZero
+          referenceLines={{[{{ value: 1, label: "동률", tone: "neutral" }}]}}
+          showValues
+        />
+        <Text tone="tertiary" size="small">
+          Source: Criterion median 및 NumPy 7회 median · {caption} ·
+          {machine} · NumPy {numpy_version} / Python {python_version} · 2026-07-26
+        </Text>
+      </Stack>
+'''
+        )
+    focused_sections_text = "\n".join(focused_sections)
+
+    propagate_rows = []
+    for key, before_us in PROPAGATE_PRIOR_US.items():
+        if key not in sdnp:
+            continue
+        _, name = METADATA[key]
+        after_us = sdnp[key]
+        propagate_rows.append(
+            {
+                "name": name,
+                "beforeUs": before_us,
+                "afterUs": after_us,
+                "ratio": after_us / before_us,
+            }
+        )
+    propagate_categories = json.dumps(
+        [item["name"] for item in propagate_rows], ensure_ascii=False
+    )
+    propagate_data = json.dumps(
+        [round(item["ratio"], 3) for item in propagate_rows]
+    )
+    propagate_lines = [
+        (
+            f'            <Text><Text weight="semibold">{item["name"]}</Text>'
+            f' — {(item["ratio"] - 1) * 100:+.1f}%'
+            f' ({fmt_us(item["beforeUs"])} → {fmt_us(item["afterUs"])} µs)</Text>'
+        )
+        for item in propagate_rows
+    ]
+    propagate_section = ""
+    if propagate_rows:
+        propagate_section = f'''
+      <Stack gap={{12}}>
+        <H2>NanPolicy::Propagate · 정책 추가 전 대비</H2>
+        <Text tone="tertiary" size="small">
+          Y축: 동일 reduction 경로 · X축: 현재 시간 ÷ 정책 추가 전 시간 (배)
+        </Text>
+        <BarChart
+          categories={{{propagate_categories}}}
+          series={{[{{ name: "현재 / 이전", data: {propagate_data}, tone: "success" as const }}]}}
+          horizontal
+          height={{{max(300, len(propagate_rows) * 34)}}}
+          beginAtZero
+          referenceLines={{[{{ value: 1, label: "회귀 없음 기준", tone: "neutral" }}]}}
+          showValues
+        />
+        <Text tone="tertiary" size="small">
+          Source: 동일 Criterion 경로의 정책 추가 전 마지막 median과 현재 선택 재측정 ·
+          1.0 미만은 개선 · 2026-07-26
+        </Text>
+        <Stack gap={{6}}>
+{chr(10).join(propagate_lines)}
+        </Stack>
+      </Stack>
+'''
+
     return f'''import {{
   BarChart,
   Callout,
@@ -265,6 +493,10 @@ function PathsBenchmarkResults() {{
       tone: "danger" as const,
     }},
   ];
+  const phase6Categories = {phase6_categories};
+  const phase6Series = [
+    {phase6_series}
+  ];
 
   return (
     <Stack gap={{24}} style={{{{ padding: 24 }}}}>
@@ -274,8 +506,8 @@ function PathsBenchmarkResults() {{
         </Text>
         <H1>통합 경로 벤치 · SDNP vs NumPy</H1>
         <Text tone="secondary">
-          1,048,576개 f64 원소 기준 단일 스레드 실행 시간. 낮을수록 좋습니다.
-          Criterion mean과 NumPy median을 비교했습니다.
+          단일 스레드 실행 시간(median). 낮을수록 좋습니다.
+          SDNP는 Criterion median, NumPy는 7회 측정 median입니다.
         </Text>
       </Stack>
 
@@ -295,11 +527,32 @@ function PathsBenchmarkResults() {{
       </Grid>
 
       <Callout tone="info" title="요약">
-        Prefix TraversalSchedule과 branchless NaN mask 적용 후 전체 재측정입니다.
-        axis 0 reduction과 f64 suffix min/max가 크게 개선됐고, SDNP 우세·동률
-        경로는 {sdnp_wins}/{len(rows)}개입니다.
+        기존 전체 결과를 보존하고 squeeze·astype·NanPolicy 및 이번에 수정한
+        커널 경로만 선택 재측정해 병합했습니다. SDNP 우세·동률 경로는
+        {sdnp_wins}/{len(rows)}개입니다.
       </Callout>
 
+{focused_sections_text}
+{propagate_section}
+      <Stack gap={{12}}>
+        <H2>Phase 6 linalg · 최적화 전후 (SDNP 자체 시간)</H2>
+        <Text tone="tertiary" size="small">
+          Y축: 연산 경로 · X축: SDNP 실행 시간 (µs, median) · 2026-07-25 대비
+          2026-07-26 영향 경로만 재측정
+        </Text>
+        <BarChart
+          categories={{phase6Categories}}
+          series={{phase6Series}}
+          horizontal
+          height={{360}}
+          beginAtZero
+        />
+        <Stack gap={{6}}>
+{chr(10).join(phase6_lines)}
+        </Stack>
+      </Stack>
+
+{iteration_section}
       <Stack gap={{12}}>
         <H2>NumPy 대비 느린 compute 경로 (상위 10)</H2>
         <Text tone="tertiary" size="small">
@@ -314,8 +567,8 @@ function PathsBenchmarkResults() {{
           referenceLines={{[{{ value: 1, label: "동률", tone: "neutral" }}]}}
         />
         <Text tone="tertiary" size="small">
-          Source: Criterion mean 및 NumPy median · {machine} · NumPy {numpy_version}
-          / Python {python_version} · 전체 재측정 2026-07-25
+          Source: Criterion median 및 NumPy median · {machine} · NumPy {numpy_version}
+          / Python {python_version} · Phase 6 영향 경로 재측정 2026-07-26
         </Text>
       </Stack>
 
@@ -349,8 +602,8 @@ function PathsBenchmarkResults() {{
         />
         <Text tone="tertiary" size="small">
           Source: cargo bench --bench paths (Criterion 0.5.1) · NumPy {numpy_version}
-          / Python {python_version} · {machine} · 2026-07-25 · Rust: opt-level 3,
-          fat LTO, codegen-units 1, target-cpu=native
+          / Python {python_version} · {machine} · 2026-07-26 · Rust: opt-level 3,
+          fat LTO, codegen-units 1
         </Text>
       </Stack>
 
@@ -359,8 +612,9 @@ function PathsBenchmarkResults() {{
           <H2>우선 최적화 후보</H2>
 {chr(10).join(priority_lines)}
           <Text tone="tertiary" size="small">
-            prefix schedule과 branchless NaN mask로 주요 reduction 병목을 줄였습니다.
-            남은 후보는 general multi-axis와 sort/arg 계열입니다.
+            matmul은 NumPy(Accelerate GEMM) 대비 여전히 한 자릿수~두 자릿수 배
+            느립니다. 남은 후보는 BLAS급 GEMM, general multi-axis sum, sort/arg
+            계열입니다.
           </Text>
         </Stack>
         <Stack gap={{10}}>

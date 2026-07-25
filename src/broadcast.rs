@@ -104,7 +104,7 @@ impl<T: Scalar> Array<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create::zeros;
+    use crate::creation::zeros;
 
     #[test]
     fn broadcast_shape_basic() {
