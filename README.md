@@ -7,7 +7,7 @@ The project exists to **learn NumPy by rebuilding its core from first
 principles** — no `ndarray` crate, no shortcuts on the tricky parts (strides,
 broadcasting, fancy indexing, reductions, CoW views). At the same time, it is
 not a toy: every hot path is written to be genuinely fast, and the benchmark
-suite exists specifically to keep it honest against real NumPy on every push.
+suite exists to keep it honest against real NumPy when you run it locally.
 
 - **Educational**: `Array<T>` is implemented directly on flat buffers with
   explicit shape/stride bookkeeping, so every operation (broadcasting, views,
@@ -15,8 +15,8 @@ suite exists specifically to keep it honest against real NumPy on every push.
 - **Optimization-aware**: contiguous fast paths, coalesced stride runs, `Arc`
   copy-on-write buffers, and release-profile LTO builds are treated as
   first-class concerns, not an afterthought.
-- **Continuously measured**: [`BENCHMARK.md`](BENCHMARK.md) is regenerated
-  from a full sdnp-vs-NumPy benchmark matrix on every push to `main`.
+- **Measured on demand**: [`BENCHMARK.md`](BENCHMARK.md) is generated locally
+  from the sdnp-vs-NumPy benchmark matrix (`benches/benchmark.py run`).
 
 Behavioral reference: a sibling Python project (`../numpy`), with a documented
 set of intentional differences (see [Differences from NumPy](#differences-from-numpy)).
@@ -88,8 +88,8 @@ stardust-numpy/
 │   ├── tests/            # pytest: API contract, NumPy differential, property tests
 │   └── pyproject.toml
 ├── benches/              # sdnp-vs-NumPy benchmark runner (see Benchmarking)
-├── BENCHMARK.md          # generated report (kept up to date by CI)
-└── .github/workflows/    # CI: fmt/clippy/tests, full benchmark, report commit
+├── BENCHMARK.md          # generated report (local benchmark runs)
+└── .github/workflows/    # CI: fmt/clippy/tests
 ```
 
 ## Getting started
@@ -257,12 +257,10 @@ sdnp-py/.venv/bin/python benches/benchmark.py render
 
 1. **Rust job**: `cargo fmt --check`, `cargo clippy -- -D warnings`,
    `cargo test --release --workspace`.
-2. **Python job**: release-build the extension, run the full pytest suite,
-   then run the **full benchmark matrix** (`--profile full`).
+2. **Python job**: release-build the extension and run the full pytest suite.
 
-On pushes to `main`, the Python job commits the freshly generated
-`BENCHMARK.md` back to the repository (skipped if unchanged), so the report
-at the top of this README always reflects the latest `main`.
+Benchmarks are run locally only; CI does not execute the benchmark matrix or
+commit `BENCHMARK.md`.
 
 ## License
 

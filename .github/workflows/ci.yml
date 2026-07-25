@@ -3,12 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
-    paths-ignore:
-      - BENCHMARK.md
   pull_request:
-
-permissions:
-  contents: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -29,7 +24,6 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,7 +38,7 @@ jobs:
         working-directory: sdnp-py
         run: |
           .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/pip install maturin pytest numpy hypothesis tqdm
+          .venv/bin/pip install maturin pytest numpy hypothesis
 
       - name: Build sdnp-py
         working-directory: sdnp-py
@@ -59,24 +53,3 @@ jobs:
         run: |
           source .venv/bin/activate
           pytest
-      - name: Full benchmarks
-        run: |
-          sdnp-py/.venv/bin/python benches/benchmark.py run \
-            --profile full \
-            --warmups 1 \
-            --samples 5 \
-            --target-sample-ms 25
-      - name: Commit benchmark report
-        if: >-
-          github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add BENCHMARK.md
-          if git diff --staged --quiet; then
-            echo "Benchmark report unchanged"
-          else
-            git commit -m "chore: update BENCHMARK.md from CI benchmarks [skip ci]"
-            git push
-          fi
