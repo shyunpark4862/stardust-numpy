@@ -20,6 +20,7 @@ pub mod join;
 pub(crate) mod layout;
 pub(crate) mod linalg;
 pub mod reduce;
+pub(crate) mod run;
 pub mod select;
 pub mod shape;
 pub mod sort;

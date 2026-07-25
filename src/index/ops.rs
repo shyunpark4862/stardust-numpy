@@ -10,9 +10,9 @@ use crate::index::prepare::{
     prepare_index, FancyLayout, PreparedEntry, PreparedIndex,
 };
 use crate::index::spec::IndexSpec;
-use crate::layout::CoalescedLayout;
+use crate::run::{RunKind, RunPlan};
 use crate::shape::{buffer_index, is_c_contiguous, size_of_shape};
-use crate::stride_iter::{StrideCursor, StrideIter};
+use crate::stride_iter::StrideIter;
 
 /// Select elements by `index`.
 ///
@@ -176,37 +176,18 @@ fn scatter_basic_scalar<T: Scalar>(
         return Ok(());
     }
 
-    // General strided fallback: coalesce down to the fewest axes, then walk
-    // outer positions with a cursor and fill each innermost run with a
-    // fixed-stride loop instead of a per-element N-dimensional carry.
-    let layout = CoalescedLayout::new(&meta.shape, &[&meta.strides]);
-    let inner_len = layout.inner_len();
-    let outer_shape = layout.outer_shape();
-    let outer_n = layout.outer_len();
-    if inner_len == 0 || outer_n == 0 {
-        return Ok(());
-    }
-    let inner_stride = layout.inner_stride(0);
-    let mut outer = StrideCursor::new(
-        outer_shape,
-        [layout.outer_strides(0)],
-        [meta.offset as isize],
-    );
-    for outer_i in 0..outer_n {
-        let start = outer.buffer_index(0);
-        if inner_stride == 1 {
-            data[start..start + inner_len].fill(value);
+    let plan = RunPlan::new(&meta.shape, [&meta.strides]);
+    plan.for_each([meta.offset as isize], |run| {
+        if run.kinds[0] == RunKind::Contiguous {
+            data[run.bases[0]..run.bases[0] + run.len].fill(value);
         } else {
-            let mut pos = start as isize;
-            for _ in 0..inner_len {
+            let mut pos = run.bases[0] as isize;
+            for _ in 0..run.len {
                 data[pos as usize] = value;
-                pos += inner_stride;
+                pos += run.strides[0];
             }
         }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
-    }
+    });
     Ok(())
 }
 
@@ -232,36 +213,30 @@ fn scatter_basic_array<T: Scalar>(
         }
     }
 
-    // General strided fallback: dest (write) and aligned source (read) are
-    // two operands over the same logical shape. Coalesce jointly so a run
-    // is only used when *both* operands can walk it with a fixed stride.
-    let layout =
-        CoalescedLayout::new(&meta.shape, &[&meta.strides, aligned.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_shape = layout.outer_shape();
-    let outer_n = layout.outer_len();
-    if inner_len == 0 || outer_n == 0 {
-        return Ok(());
-    }
-    let dest_inner_stride = layout.inner_stride(0);
-    let src_inner_stride = layout.inner_stride(1);
-    let mut outer = StrideCursor::new(
-        outer_shape,
-        [layout.outer_strides(0), layout.outer_strides(1)],
-        [meta.offset as isize, aligned.offset() as isize],
-    );
-    for outer_i in 0..outer_n {
-        let mut dst = outer.buffer_index(0) as isize;
-        let mut src = outer.buffer_index(1) as isize;
-        for _ in 0..inner_len {
-            data[dst as usize] = aligned.data[src as usize];
-            dst += dest_inner_stride;
-            src += src_inner_stride;
+    let plan = RunPlan::new(&meta.shape, [&meta.strides, aligned.strides()]);
+    plan.for_each([meta.offset as isize, aligned.offset() as isize], |run| {
+        match (run.kinds[0], run.kinds[1]) {
+            (RunKind::Contiguous, RunKind::Contiguous) => {
+                let source =
+                    &aligned.data[run.bases[1]..run.bases[1] + run.len];
+                data[run.bases[0]..run.bases[0] + run.len]
+                    .copy_from_slice(source);
+            }
+            (RunKind::Contiguous, RunKind::Repeated) => {
+                data[run.bases[0]..run.bases[0] + run.len]
+                    .fill(aligned.data[run.bases[1]]);
+            }
+            _ => {
+                let mut dst = run.bases[0] as isize;
+                let mut src = run.bases[1] as isize;
+                for _ in 0..run.len {
+                    data[dst as usize] = aligned.data[src as usize];
+                    dst += run.strides[0];
+                    src += run.strides[1];
+                }
+            }
         }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
-    }
+    });
     Ok(())
 }
 

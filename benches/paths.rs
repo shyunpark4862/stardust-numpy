@@ -84,12 +84,36 @@ fn bench_views_and_materialization(c: &mut Criterion) {
 fn bench_reductions(c: &mut Criterion) {
     let a = matrix(0);
     let a_nonzero = matrix(1);
+    let mut first_nan_data = a_nonzero.to_vec();
+    for row in 0..SIDE {
+        first_nan_data[row * SIDE] = f64::NAN;
+    }
+    let first_nan_input =
+        Array::from_vec(first_nan_data, &[SIDE, SIDE]).unwrap();
+    let mut sparse_nan_data = a_nonzero.to_vec();
+    for row in (0..SIDE).step_by(16) {
+        sparse_nan_data[row * SIDE + SIDE / 2] = f64::NAN;
+    }
+    let sparse_nan_input =
+        Array::from_vec(sparse_nan_data, &[SIDE, SIDE]).unwrap();
     let axis_last = [1_isize];
     let axis_first = [0_isize];
     let product_data = (0..ELEMENTS)
         .map(|i| 1.0 + (i % 7) as f64 * 0.000_001)
         .collect();
     let product_input = Array::from_vec(product_data, &[SIDE, SIDE]).unwrap();
+    let integer_input = Array::from_vec(
+        (0..ELEMENTS)
+            .map(|i| ((i * 17 + 31) % 4096) as i64)
+            .collect(),
+        &[SIDE, SIDE],
+    )
+    .unwrap();
+    let boolean_input = Array::from_vec(
+        (0..ELEMENTS).map(|i| i % 3 != 0).collect(),
+        &[SIDE, SIDE],
+    )
+    .unwrap();
 
     c.bench_function("sum_axis_last_contiguous_f64", |b| {
         b.iter(|| {
@@ -145,6 +169,14 @@ fn bench_reductions(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("prod_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                prod(black_box(&product_input), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
     c.bench_function("min_axis_last_f64", |b| {
         b.iter(|| {
             black_box(
@@ -161,10 +193,122 @@ fn bench_reductions(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("min_axis_last_first_nan_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(
+                    black_box(&first_nan_input),
+                    Some(&axis_last),
+                    false,
+                )
+                .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_last_first_nan_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(
+                    black_box(&first_nan_input),
+                    Some(&axis_last),
+                    false,
+                )
+                .unwrap(),
+            )
+        })
+    });
+    c.bench_function("min_axis_last_sparse_nan_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(
+                    black_box(&sparse_nan_input),
+                    Some(&axis_last),
+                    false,
+                )
+                .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_last_sparse_nan_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(
+                    black_box(&sparse_nan_input),
+                    Some(&axis_last),
+                    false,
+                )
+                .unwrap(),
+            )
+        })
+    });
     c.bench_function("max_axis_first_fixed_stride_f64", |b| {
         b.iter(|| {
             black_box(
                 reduce_max(black_box(&a_nonzero), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("min_axis_last_contiguous_i64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(black_box(&integer_input), Some(&axis_last), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_last_contiguous_i64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(black_box(&integer_input), Some(&axis_last), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("min_axis_first_fixed_stride_i64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(black_box(&integer_input), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_first_fixed_stride_i64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(black_box(&integer_input), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("min_axis_last_contiguous_bool", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(black_box(&boolean_input), Some(&axis_last), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_last_contiguous_bool", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(black_box(&boolean_input), Some(&axis_last), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("min_axis_first_fixed_stride_bool", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_min(black_box(&boolean_input), Some(&axis_first), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("max_axis_first_fixed_stride_bool", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_max(black_box(&boolean_input), Some(&axis_first), false)
                     .unwrap(),
             )
         })
@@ -176,10 +320,25 @@ fn bench_reductions(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("mean_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                mean(black_box(&a_nonzero), Some(&axis_first), false).unwrap(),
+            )
+        })
+    });
     c.bench_function("std_axis_last_f64", |b| {
         b.iter(|| {
             black_box(
                 reduce_std(black_box(&a_nonzero), Some(&axis_last), false)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("std_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                reduce_std(black_box(&a_nonzero), Some(&axis_first), false)
                     .unwrap(),
             )
         })
@@ -197,10 +356,24 @@ fn bench_reductions(c: &mut Criterion) {
             )
         })
     });
+    c.bench_function("any_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                any(black_box(&a_nonzero), Some(&axis_first), false).unwrap(),
+            )
+        })
+    });
     c.bench_function("all_axis_last_f64", |b| {
         b.iter(|| {
             black_box(
                 all(black_box(&a_nonzero), Some(&axis_last), false).unwrap(),
+            )
+        })
+    });
+    c.bench_function("all_axis_first_fixed_stride_f64", |b| {
+        b.iter(|| {
+            black_box(
+                all(black_box(&a_nonzero), Some(&axis_first), false).unwrap(),
             )
         })
     });

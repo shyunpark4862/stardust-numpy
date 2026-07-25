@@ -4,9 +4,8 @@ use crate::array::Array;
 use crate::broadcast::broadcast_shapes;
 use crate::dtype::{AsBool, CastTo, Promote, Scalar};
 use crate::error::Result;
-use crate::layout::CoalescedLayout;
-use crate::shape::size_of_shape;
-use crate::stride_iter::{StrideCursor, StrideIter};
+use crate::run::{collect_ternary, RunPlan};
+use crate::stride_iter::StrideIter;
 use crate::ufunc::kernels::map_unary;
 
 /// Select elements from `x` or `y` according to a boolean `condition`.
@@ -52,55 +51,22 @@ where
         return Array::from_vec(out, &shape);
     }
 
-    let layout = CoalescedLayout::new(
-        &shape,
-        &[condition.strides(), x.strides(), y.strides()],
+    let plan =
+        RunPlan::new(&shape, [condition.strides(), x.strides(), y.strides()]);
+    let out = collect_ternary(
+        &plan,
+        condition.as_buffer(),
+        x.as_buffer(),
+        y.as_buffer(),
+        [condition.offset(), x.offset(), y.offset()],
+        |choose_x, x, y| {
+            if choose_x {
+                x.cast_to()
+            } else {
+                y.cast_to()
+            }
+        },
     );
-    let inner_len = layout.inner_len();
-    let outer_len = layout.outer_len();
-    let mut out = Vec::with_capacity(size_of_shape(&shape));
-
-    if inner_len > 0 && outer_len > 0 {
-        let condition_stride = layout.inner_stride(0);
-        let x_stride = layout.inner_stride(1);
-        let y_stride = layout.inner_stride(2);
-        let mut outer = StrideCursor::new(
-            layout.outer_shape(),
-            [
-                layout.outer_strides(0),
-                layout.outer_strides(1),
-                layout.outer_strides(2),
-            ],
-            [
-                condition.offset() as isize,
-                x.offset() as isize,
-                y.offset() as isize,
-            ],
-        );
-
-        for outer_index in 0..outer_len {
-            let mut condition_index = outer.buffer_index(0) as isize;
-            let mut x_index = outer.buffer_index(1) as isize;
-            let mut y_index = outer.buffer_index(2) as isize;
-
-            for _ in 0..inner_len {
-                let value = if condition.as_buffer()[condition_index as usize] {
-                    x.as_buffer()[x_index as usize].cast_to()
-                } else {
-                    y.as_buffer()[y_index as usize].cast_to()
-                };
-                out.push(value);
-                condition_index += condition_stride;
-                x_index += x_stride;
-                y_index += y_stride;
-            }
-
-            if outer_index + 1 < outer_len {
-                outer.advance();
-            }
-        }
-    }
-
     Array::from_vec(out, &shape)
 }
 

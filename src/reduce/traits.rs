@@ -1,6 +1,11 @@
 //! Type-specific reduction behaviour via traits.
 
+use crate::array::Array;
 use crate::dtype::{AsBool, CastTo, Complex64, Scalar};
+use crate::error::Result;
+use crate::reduce::kernels::{
+    reduce_bool_extremum, reduce_f64_extremum, reduce_i64_max, reduce_i64_min,
+};
 
 /// Associative sum fold: `Acc` may differ from `Self` (e.g. bool → i64).
 ///
@@ -34,6 +39,18 @@ pub trait ProdReduce: Scalar {
 
 /// Orderable element for min / max / argmin / argmax (NaN-aware).
 pub trait ExtremumReduce: Scalar + PartialOrd {
+    /// Type-specific minimum kernel.
+    fn reduce_min(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>>;
+    /// Type-specific maximum kernel.
+    fn reduce_max(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>>;
     /// Whether this value is NaN (only `f64` is true).
     fn is_nan(self) -> bool;
 }
@@ -148,6 +165,20 @@ impl ProdReduce for bool {
 }
 
 impl ExtremumReduce for i64 {
+    fn reduce_min(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_i64_min(a, axes, keepdims)
+    }
+    fn reduce_max(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_i64_max(a, axes, keepdims)
+    }
     #[inline]
     fn is_nan(self) -> bool {
         false
@@ -155,6 +186,20 @@ impl ExtremumReduce for i64 {
 }
 
 impl ExtremumReduce for bool {
+    fn reduce_min(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_bool_extremum::<true>(a, axes, keepdims)
+    }
+    fn reduce_max(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_bool_extremum::<false>(a, axes, keepdims)
+    }
     #[inline]
     fn is_nan(self) -> bool {
         false
@@ -162,6 +207,20 @@ impl ExtremumReduce for bool {
 }
 
 impl ExtremumReduce for f64 {
+    fn reduce_min(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_f64_extremum::<true>(a, axes, keepdims)
+    }
+    fn reduce_max(
+        a: &Array<Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Array<Self>> {
+        reduce_f64_extremum::<false>(a, axes, keepdims)
+    }
     #[inline]
     fn is_nan(self) -> bool {
         self.is_nan()

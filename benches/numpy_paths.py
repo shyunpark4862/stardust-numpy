@@ -168,6 +168,12 @@ def build_benchmarks() -> dict[str, Benchmark]:
     product_input = (
         1.0 + (product_values % 7).astype(np.float64) * 0.000_001
     ).reshape(SIDE, SIDE)
+    extremum_integer_input = (
+        (np.arange(ELEMENTS, dtype=np.int64) * 17 + 31) % 4096
+    ).reshape(SIDE, SIDE)
+    extremum_boolean_input = (
+        np.arange(ELEMENTS, dtype=np.int64) % 3 != 0
+    ).reshape(SIDE, SIDE)
 
     mask = (np.arange(ELEMENTS) % 4 == 0).reshape(SIDE, SIDE)
     condition = (np.arange(ELEMENTS) % 2 == 0).reshape(SIDE, SIDE)
@@ -236,6 +242,9 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "prod_axis_last_f64": lambda: measure(
             lambda: product_input.prod(axis=1)
         ),
+        "prod_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: product_input.prod(axis=0)
+        ),
         "min_axis_last_f64": lambda: measure(
             lambda: a_nonzero.min(axis=1)
         ),
@@ -245,11 +254,41 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "max_axis_first_fixed_stride_f64": lambda: measure(
             lambda: a_nonzero.max(axis=0)
         ),
+        "min_axis_last_contiguous_i64": lambda: measure(
+            lambda: extremum_integer_input.min(axis=1)
+        ),
+        "max_axis_last_contiguous_i64": lambda: measure(
+            lambda: extremum_integer_input.max(axis=1)
+        ),
+        "min_axis_first_fixed_stride_i64": lambda: measure(
+            lambda: extremum_integer_input.min(axis=0)
+        ),
+        "max_axis_first_fixed_stride_i64": lambda: measure(
+            lambda: extremum_integer_input.max(axis=0)
+        ),
+        "min_axis_last_contiguous_bool": lambda: measure(
+            lambda: extremum_boolean_input.min(axis=1)
+        ),
+        "max_axis_last_contiguous_bool": lambda: measure(
+            lambda: extremum_boolean_input.max(axis=1)
+        ),
+        "min_axis_first_fixed_stride_bool": lambda: measure(
+            lambda: extremum_boolean_input.min(axis=0)
+        ),
+        "max_axis_first_fixed_stride_bool": lambda: measure(
+            lambda: extremum_boolean_input.max(axis=0)
+        ),
         "mean_axis_last_f64": lambda: measure(
             lambda: a_nonzero.mean(axis=1)
         ),
+        "mean_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: a_nonzero.mean(axis=0)
+        ),
         "std_axis_last_f64": lambda: measure(
             lambda: a_nonzero.std(axis=1)
+        ),
+        "std_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: a_nonzero.std(axis=0)
         ),
         "argmax_axis_last_f64": lambda: measure(
             lambda: a_nonzero.argmax(axis=1)
@@ -260,8 +299,14 @@ def build_benchmarks() -> dict[str, Benchmark]:
         "any_axis_last_f64": lambda: measure(
             lambda: a_nonzero.any(axis=1)
         ),
+        "any_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: a_nonzero.any(axis=0)
+        ),
         "all_axis_last_f64": lambda: measure(
             lambda: a_nonzero.all(axis=1)
+        ),
+        "all_axis_first_fixed_stride_f64": lambda: measure(
+            lambda: a_nonzero.all(axis=0)
         ),
         "cumprod_axis_last_f64": lambda: measure(
             lambda: product_input.cumprod(axis=1)

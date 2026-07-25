@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::array::Array;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
-use crate::stride_iter::StrideIter;
+use crate::run::{extend_unary, RunPlan};
 
 fn insert_axis_view<T: Scalar>(a: &Array<T>, axis: isize) -> Result<Array<T>> {
     let axis = normalize_insert_axis(axis, a.ndim())?;
@@ -213,10 +213,8 @@ fn append_axis_slab<T: Scalar>(
     debug_assert!(base >= 0);
     let slab_shape = &array.shape()[axis..];
     let slab_strides = &array.strides()[axis..];
-    output.extend(
-        StrideIter::new(slab_shape, slab_strides, base as usize)
-            .map(|physical| array.data[physical]),
-    );
+    let plan = RunPlan::new(slab_shape, [slab_strides]);
+    extend_unary(&plan, &array.data, base as usize, output, |value| value);
     Ok(())
 }
 
@@ -254,12 +252,42 @@ mod tests {
     }
 
     #[test]
+    fn concatenate_strided_views_with_nonzero_offset() {
+        let view = Array::from_arc_raw_parts(
+            Arc::new(vec![0_i64, 1, 2, 3, 4, 5, 6, 7]),
+            vec![2, 2],
+            vec![3, -1],
+            4,
+            true,
+        )
+        .unwrap();
+        let joined = concatenate(&[&view, &view], 0).unwrap();
+
+        assert_eq!(joined.shape(), &[4, 2]);
+        assert_eq!(joined.to_vec(), vec![4, 3, 7, 6, 4, 3, 7, 6]);
+    }
+
+    #[test]
     fn stack_supports_scalars_and_negative_axis() {
         let a = Array::from_slice(&[1_i64], &[]).unwrap();
         let b = Array::from_slice(&[2_i64], &[]).unwrap();
         let joined = stack(&[&a, &b], -1).unwrap();
         assert_eq!(joined.shape(), &[2]);
         assert_eq!(joined.to_vec(), vec![1, 2]);
+    }
+
+    #[test]
+    fn inserted_singleton_axis_keeps_contiguous_storage() {
+        let a = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
+        let expanded = insert_axis_view(&a, 0).unwrap();
+
+        assert_eq!(expanded.shape(), &[1, 2, 3]);
+        assert_eq!(expanded.strides(), &[0, 3, 1]);
+        assert!(expanded.is_c_contiguous());
+        assert_eq!(
+            expanded.as_c_contiguous_slice(),
+            Some(&[1, 2, 3, 4, 5, 6][..])
+        );
     }
 
     #[test]

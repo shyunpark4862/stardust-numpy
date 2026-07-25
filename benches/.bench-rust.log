@@ -1,0 +1,975 @@
+    Finished `bench` profile [optimized] target(s) in 0.03s
+     Running benches/paths.rs (/var/folders/_x/p8wqqn_j53x8l_8r3kd5gfhc0000gn/T/cursor-sandbox-cache/bfc190fdf4116a850199d4df9bf73b14/cargo-target/release/deps/paths-9f9744484af390ac)
+Gnuplot not found, using plotters backend
+Benchmarking full_1024x1024_f64
+Benchmarking full_1024x1024_f64: Warming up for 1.0000 s
+Benchmarking full_1024x1024_f64: Collecting 20 samples in estimated 3.0040 s (46k iterations)
+Benchmarking full_1024x1024_f64: Analyzing
+full_1024x1024_f64      time:   [66.009 µs 67.015 µs 67.950 µs]
+                        change: [-0.1434% +2.1460% +4.5596%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+
+Benchmarking zeros_1024x1024_f64
+Benchmarking zeros_1024x1024_f64: Warming up for 1.0000 s
+Benchmarking zeros_1024x1024_f64: Collecting 20 samples in estimated 3.0031 s (92k iterations)
+Benchmarking zeros_1024x1024_f64: Analyzing
+zeros_1024x1024_f64     time:   [32.437 µs 32.818 µs 33.069 µs]
+                        change: [-4.7405% -3.3993% -2.0196%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) low mild
+
+Benchmarking ones_1024x1024_f64
+Benchmarking ones_1024x1024_f64: Warming up for 1.0000 s
+Benchmarking ones_1024x1024_f64: Collecting 20 samples in estimated 3.0036 s (46k iterations)
+Benchmarking ones_1024x1024_f64: Analyzing
+ones_1024x1024_f64      time:   [66.143 µs 67.181 µs 68.046 µs]
+                        change: [-0.8569% +0.9673% +2.8966%] (p = 0.34 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking eye_1024_f64
+Benchmarking eye_1024_f64: Warming up for 1.0000 s
+Benchmarking eye_1024_f64: Collecting 20 samples in estimated 3.0055 s (82k iterations)
+Benchmarking eye_1024_f64: Analyzing
+eye_1024_f64            time:   [35.963 µs 36.102 µs 36.239 µs]
+                        change: [-5.2518% -4.5342% -3.7318%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking transpose_view_f64
+Benchmarking transpose_view_f64: Warming up for 1.0000 s
+Benchmarking transpose_view_f64: Collecting 20 samples in estimated 3.0000 s (85M iterations)
+Benchmarking transpose_view_f64: Analyzing
+transpose_view_f64      time:   [35.281 ns 35.440 ns 35.576 ns]
+                        change: [-2.6309% -1.8845% -1.2054%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking reshape_contiguous_view_f64
+Benchmarking reshape_contiguous_view_f64: Warming up for 1.0000 s
+Benchmarking reshape_contiguous_view_f64: Collecting 20 samples in estimated 3.0000 s (79M iterations)
+Benchmarking reshape_contiguous_view_f64: Analyzing
+reshape_contiguous_view_f64
+                        time:   [37.698 ns 37.896 ns 38.183 ns]
+                        change: [-1.6027% -0.5384% +0.6446%] (p = 0.36 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking broadcast_to_view_f64
+Benchmarking broadcast_to_view_f64: Warming up for 1.0000 s
+Benchmarking broadcast_to_view_f64: Collecting 20 samples in estimated 3.0000 s (86M iterations)
+Benchmarking broadcast_to_view_f64: Analyzing
+broadcast_to_view_f64   time:   [34.702 ns 34.890 ns 35.016 ns]
+                        change: [+0.5376% +1.3707% +2.1818%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low severe
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking broadcast_arrays_f64
+Benchmarking broadcast_arrays_f64: Warming up for 1.0000 s
+Benchmarking broadcast_arrays_f64: Collecting 20 samples in estimated 3.0000 s (24M iterations)
+Benchmarking broadcast_arrays_f64: Analyzing
+broadcast_arrays_f64    time:   [124.18 ns 125.19 ns 126.38 ns]
+                        change: [-3.2674% -1.8969% -0.5630%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking copy_contiguous_f64
+Benchmarking copy_contiguous_f64: Warming up for 1.0000 s
+Benchmarking copy_contiguous_f64: Collecting 20 samples in estimated 3.0123 s (28k iterations)
+Benchmarking copy_contiguous_f64: Analyzing
+copy_contiguous_f64     time:   [106.23 µs 106.73 µs 107.19 µs]
+                        change: [-2.6971% -1.7766% -0.7911%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low mild
+  3 (15.00%) high mild
+
+Benchmarking copy_transposed_f64
+Benchmarking copy_transposed_f64: Warming up for 1.0000 s
+Benchmarking copy_transposed_f64: Collecting 20 samples in estimated 3.0301 s (1890 iterations)
+Benchmarking copy_transposed_f64: Analyzing
+copy_transposed_f64     time:   [1.5762 ms 1.5944 ms 1.6244 ms]
+                        change: [+0.8392% +2.6121% +4.3412%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking to_vec_transposed_f64
+Benchmarking to_vec_transposed_f64: Warming up for 1.0000 s
+Benchmarking to_vec_transposed_f64: Collecting 20 samples in estimated 3.0016 s (1890 iterations)
+Benchmarking to_vec_transposed_f64: Analyzing
+to_vec_transposed_f64   time:   [1.6461 ms 1.6481 ms 1.6506 ms]
+                        change: [+1.3811% +3.7580% +6.1838%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) low mild
+  1 (5.00%) high severe
+
+Benchmarking sum_axis_last_contiguous_f64
+Benchmarking sum_axis_last_contiguous_f64: Warming up for 1.0000 s
+Benchmarking sum_axis_last_contiguous_f64: Collecting 20 samples in estimated 3.0164 s (36k iterations)
+Benchmarking sum_axis_last_contiguous_f64: Analyzing
+sum_axis_last_contiguous_f64
+                        time:   [83.324 µs 83.488 µs 83.645 µs]
+                        change: [-1.0431% -0.6495% -0.3020%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking sum_axis_first_fixed_stride_f64
+Benchmarking sum_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking sum_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0031 s (23k iterations)
+Benchmarking sum_axis_first_fixed_stride_f64: Analyzing
+sum_axis_first_fixed_stride_f64
+                        time:   [131.62 µs 131.79 µs 131.92 µs]
+                        change: [-0.9082% -0.5745% -0.2693%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking sum_total_contiguous_f64
+Benchmarking sum_total_contiguous_f64: Warming up for 1.0000 s
+Benchmarking sum_total_contiguous_f64: Collecting 20 samples in estimated 3.0022 s (32k iterations)
+Benchmarking sum_total_contiguous_f64: Analyzing
+sum_total_contiguous_f64
+                        time:   [91.958 µs 92.455 µs 93.105 µs]
+                        change: [-0.4098% +0.8541% +2.0701%] (p = 0.18 > 0.05)
+                        No change in performance detected.
+
+Benchmarking sum_multi_axis_general_f64
+Benchmarking sum_multi_axis_general_f64: Warming up for 1.0000 s
+Benchmarking sum_multi_axis_general_f64: Collecting 20 samples in estimated 3.0709 s (5040 iterations)
+Benchmarking sum_multi_axis_general_f64: Analyzing
+sum_multi_axis_general_f64
+                        time:   [608.73 µs 611.70 µs 613.91 µs]
+                        change: [+5.5707% +6.4310% +7.2583%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking var_axis_last_contiguous_f64
+Benchmarking var_axis_last_contiguous_f64: Warming up for 1.0000 s
+Benchmarking var_axis_last_contiguous_f64: Collecting 20 samples in estimated 3.0203 s (12k iterations)
+Benchmarking var_axis_last_contiguous_f64: Analyzing
+var_axis_last_contiguous_f64
+                        time:   [262.60 µs 263.51 µs 264.27 µs]
+                        change: [+1.9444% +3.0731% +3.8745%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+
+Benchmarking var_axis_first_fixed_stride_f64
+Benchmarking var_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking var_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0284 s (10k iterations)
+Benchmarking var_axis_first_fixed_stride_f64: Analyzing
+var_axis_first_fixed_stride_f64
+                        time:   [284.65 µs 286.57 µs 288.13 µs]
+                        change: [-0.1315% +0.4263% +0.9299%] (p = 0.13 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low severe
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking min_axis_first_fixed_stride_f64
+Benchmarking min_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking min_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0466 s (12k iterations)
+Benchmarking min_axis_first_fixed_stride_f64: Analyzing
+min_axis_first_fixed_stride_f64
+                        time:   [263.13 µs 264.42 µs 265.24 µs]
+                        change: [-1.2186% -0.7422% -0.2685%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking prod_axis_last_f64
+Benchmarking prod_axis_last_f64: Warming up for 1.0000 s
+Benchmarking prod_axis_last_f64: Collecting 20 samples in estimated 3.1316 s (4200 iterations)
+Benchmarking prod_axis_last_f64: Analyzing
+prod_axis_last_f64      time:   [744.82 µs 751.00 µs 759.14 µs]
+                        change: [-0.5498% +1.0959% +3.4238%] (p = 0.38 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking prod_axis_first_fixed_stride_f64
+Benchmarking prod_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking prod_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0059 s (23k iterations)
+Benchmarking prod_axis_first_fixed_stride_f64: Analyzing
+prod_axis_first_fixed_stride_f64
+                        time:   [129.42 µs 129.72 µs 129.92 µs]
+                        change: [-1.1171% -0.4969% -0.0462%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+
+Benchmarking min_axis_last_f64
+Benchmarking min_axis_last_f64: Warming up for 1.0000 s
+Benchmarking min_axis_last_f64: Collecting 20 samples in estimated 3.0238 s (19k iterations)
+Benchmarking min_axis_last_f64: Analyzing
+min_axis_last_f64       time:   [159.85 µs 160.01 µs 160.18 µs]
+                        change: [+1.4019% +1.5810% +1.7730%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking max_axis_last_f64
+Benchmarking max_axis_last_f64: Warming up for 1.0000 s
+Benchmarking max_axis_last_f64: Collecting 20 samples in estimated 3.0190 s (19k iterations)
+Benchmarking max_axis_last_f64: Analyzing
+max_axis_last_f64       time:   [158.69 µs 158.90 µs 159.13 µs]
+                        change: [-0.4547% -0.2551% -0.0644%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking min_axis_last_first_nan_f64
+Benchmarking min_axis_last_first_nan_f64: Warming up for 1.0000 s
+Benchmarking min_axis_last_first_nan_f64: Collecting 20 samples in estimated 3.0001 s (2.7M iterations)
+Benchmarking min_axis_last_first_nan_f64: Analyzing
+min_axis_last_first_nan_f64
+                        time:   [1.0757 µs 1.0800 µs 1.0843 µs]
+                        change: [-2.4968% -2.1005% -1.6723%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking max_axis_last_first_nan_f64
+Benchmarking max_axis_last_first_nan_f64: Warming up for 1.0000 s
+Benchmarking max_axis_last_first_nan_f64: Collecting 20 samples in estimated 3.0001 s (2.7M iterations)
+Benchmarking max_axis_last_first_nan_f64: Analyzing
+max_axis_last_first_nan_f64
+                        time:   [1.0762 µs 1.0828 µs 1.0899 µs]
+                        change: [-2.5885% -2.2140% -1.8220%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking min_axis_last_sparse_nan_f64
+Benchmarking min_axis_last_sparse_nan_f64: Warming up for 1.0000 s
+Benchmarking min_axis_last_sparse_nan_f64: Collecting 20 samples in estimated 3.0137 s (19k iterations)
+Benchmarking min_axis_last_sparse_nan_f64: Analyzing
+min_axis_last_sparse_nan_f64
+                        time:   [159.19 µs 159.30 µs 159.40 µs]
+                        change: [-2.1636% -1.5043% -0.8845%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high severe
+
+Benchmarking max_axis_last_sparse_nan_f64
+Benchmarking max_axis_last_sparse_nan_f64: Warming up for 1.0000 s
+Benchmarking max_axis_last_sparse_nan_f64: Collecting 20 samples in estimated 3.0196 s (19k iterations)
+Benchmarking max_axis_last_sparse_nan_f64: Analyzing
+max_axis_last_sparse_nan_f64
+                        time:   [159.34 µs 159.52 µs 159.70 µs]
+                        change: [-4.4717% -3.9962% -3.4738%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+
+Benchmarking max_axis_first_fixed_stride_f64
+Benchmarking max_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking max_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0385 s (11k iterations)
+Benchmarking max_axis_first_fixed_stride_f64: Analyzing
+max_axis_first_fixed_stride_f64
+                        time:   [266.60 µs 266.78 µs 266.96 µs]
+                        change: [-6.6119% -4.3254% -2.3181%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking min_axis_last_contiguous_i64
+Benchmarking min_axis_last_contiguous_i64: Warming up for 1.0000 s
+Benchmarking min_axis_last_contiguous_i64: Collecting 20 samples in estimated 3.0200 s (25k iterations)
+Benchmarking min_axis_last_contiguous_i64: Analyzing
+min_axis_last_contiguous_i64
+                        time:   [119.63 µs 120.01 µs 120.28 µs]
+                        change: [+0.2894% +0.7077% +1.1101%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking max_axis_last_contiguous_i64
+Benchmarking max_axis_last_contiguous_i64: Warming up for 1.0000 s
+Benchmarking max_axis_last_contiguous_i64: Collecting 20 samples in estimated 3.0120 s (25k iterations)
+Benchmarking max_axis_last_contiguous_i64: Analyzing
+max_axis_last_contiguous_i64
+                        time:   [121.19 µs 121.37 µs 121.60 µs]
+                        change: [+1.9793% +2.3041% +2.6333%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking min_axis_first_fixed_stride_i64
+Benchmarking min_axis_first_fixed_stride_i64: Warming up for 1.0000 s
+Benchmarking min_axis_first_fixed_stride_i64: Collecting 20 samples in estimated 3.0009 s (11k iterations)
+Benchmarking min_axis_first_fixed_stride_i64: Analyzing
+min_axis_first_fixed_stride_i64
+                        time:   [265.87 µs 267.59 µs 270.20 µs]
+                        change: [+1.7803% +3.0479% +3.9968%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking max_axis_first_fixed_stride_i64
+Benchmarking max_axis_first_fixed_stride_i64: Warming up for 1.0000 s
+Benchmarking max_axis_first_fixed_stride_i64: Collecting 20 samples in estimated 3.0429 s (12k iterations)
+Benchmarking max_axis_first_fixed_stride_i64: Analyzing
+max_axis_first_fixed_stride_i64
+                        time:   [261.52 µs 262.32 µs 263.37 µs]
+                        change: [+1.2949% +2.2075% +2.9386%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking min_axis_last_contiguous_bool
+Benchmarking min_axis_last_contiguous_bool: Warming up for 1.0000 s
+Benchmarking min_axis_last_contiguous_bool: Collecting 20 samples in estimated 3.0008 s (282k iterations)
+Benchmarking min_axis_last_contiguous_bool: Analyzing
+min_axis_last_contiguous_bool
+                        time:   [10.834 µs 10.845 µs 10.856 µs]
+                        change: [+3.6667% +3.9573% +4.2354%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking max_axis_last_contiguous_bool
+Benchmarking max_axis_last_contiguous_bool: Warming up for 1.0000 s
+Benchmarking max_axis_last_contiguous_bool: Collecting 20 samples in estimated 3.0015 s (284k iterations)
+Benchmarking max_axis_last_contiguous_bool: Analyzing
+max_axis_last_contiguous_bool
+                        time:   [10.641 µs 10.679 µs 10.706 µs]
+                        change: [+2.7374% +3.9077% +4.7137%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking min_axis_first_fixed_stride_bool
+Benchmarking min_axis_first_fixed_stride_bool: Warming up for 1.0000 s
+Benchmarking min_axis_first_fixed_stride_bool: Collecting 20 samples in estimated 3.0011 s (178k iterations)
+Benchmarking min_axis_first_fixed_stride_bool: Analyzing
+min_axis_first_fixed_stride_bool
+                        time:   [16.916 µs 16.936 µs 16.956 µs]
+                        change: [+1.8962% +2.2300% +2.5230%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking max_axis_first_fixed_stride_bool
+Benchmarking max_axis_first_fixed_stride_bool: Warming up for 1.0000 s
+Benchmarking max_axis_first_fixed_stride_bool: Collecting 20 samples in estimated 3.0007 s (178k iterations)
+Benchmarking max_axis_first_fixed_stride_bool: Analyzing
+max_axis_first_fixed_stride_bool
+                        time:   [16.642 µs 16.690 µs 16.743 µs]
+                        change: [+0.6820% +1.0399% +1.3603%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+
+Benchmarking mean_axis_last_f64
+Benchmarking mean_axis_last_f64: Warming up for 1.0000 s
+Benchmarking mean_axis_last_f64: Collecting 20 samples in estimated 3.0096 s (33k iterations)
+Benchmarking mean_axis_last_f64: Analyzing
+mean_axis_last_f64      time:   [87.629 µs 87.666 µs 87.727 µs]
+                        change: [-0.7507% -0.2118% +0.3130%] (p = 0.46 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking mean_axis_first_fixed_stride_f64
+Benchmarking mean_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking mean_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0241 s (23k iterations)
+Benchmarking mean_axis_first_fixed_stride_f64: Analyzing
+mean_axis_first_fixed_stride_f64
+                        time:   [130.32 µs 130.65 µs 130.92 µs]
+                        change: [-0.5693% -0.0987% +0.3398%] (p = 0.68 > 0.05)
+                        No change in performance detected.
+
+Benchmarking std_axis_last_f64
+Benchmarking std_axis_last_f64: Warming up for 1.0000 s
+Benchmarking std_axis_last_f64: Collecting 20 samples in estimated 3.0272 s (12k iterations)
+Benchmarking std_axis_last_f64: Analyzing
+std_axis_last_f64       time:   [256.11 µs 257.06 µs 258.95 µs]
+                        change: [+0.4930% +1.0399% +1.6297%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking std_axis_first_fixed_stride_f64
+Benchmarking std_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking std_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0476 s (11k iterations)
+Benchmarking std_axis_first_fixed_stride_f64: Analyzing
+std_axis_first_fixed_stride_f64
+                        time:   [284.02 µs 285.18 µs 286.64 µs]
+                        change: [-4.1156% -1.2952% +0.6870%] (p = 0.42 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) low mild
+
+Benchmarking argmax_axis_last_f64
+Benchmarking argmax_axis_last_f64: Warming up for 1.0000 s
+Benchmarking argmax_axis_last_f64: Collecting 20 samples in estimated 3.0458 s (3150 iterations)
+Benchmarking argmax_axis_last_f64: Analyzing
+argmax_axis_last_f64    time:   [959.00 µs 962.68 µs 966.12 µs]
+                        change: [-3.1844% -1.9093% -0.6957%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking argmin_axis_last_f64
+Benchmarking argmin_axis_last_f64: Warming up for 1.0000 s
+Benchmarking argmin_axis_last_f64: Collecting 20 samples in estimated 3.0100 s (3150 iterations)
+Benchmarking argmin_axis_last_f64: Analyzing
+argmin_axis_last_f64    time:   [951.24 µs 955.40 µs 960.43 µs]
+                        change: [-6.1762% -5.4859% -4.6459%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking any_axis_last_f64
+Benchmarking any_axis_last_f64: Warming up for 1.0000 s
+Benchmarking any_axis_last_f64: Collecting 20 samples in estimated 3.0103 s (39k iterations)
+Benchmarking any_axis_last_f64: Analyzing
+any_axis_last_f64       time:   [76.925 µs 77.147 µs 77.389 µs]
+                        change: [-2.0245% -1.7415% -1.4549%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking any_axis_first_fixed_stride_f64
+Benchmarking any_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking any_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0095 s (37k iterations)
+Benchmarking any_axis_first_fixed_stride_f64: Analyzing
+any_axis_first_fixed_stride_f64
+                        time:   [80.147 µs 80.276 µs 80.509 µs]
+                        change: [-1.5678% -1.1751% -0.7866%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking all_axis_last_f64
+Benchmarking all_axis_last_f64: Warming up for 1.0000 s
+Benchmarking all_axis_last_f64: Collecting 20 samples in estimated 3.0039 s (38k iterations)
+Benchmarking all_axis_last_f64: Analyzing
+all_axis_last_f64       time:   [77.119 µs 78.188 µs 80.228 µs]
+                        change: [-2.4868% -1.2307% +0.6001%] (p = 0.18 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking all_axis_first_fixed_stride_f64
+Benchmarking all_axis_first_fixed_stride_f64: Warming up for 1.0000 s
+Benchmarking all_axis_first_fixed_stride_f64: Collecting 20 samples in estimated 3.0068 s (37k iterations)
+Benchmarking all_axis_first_fixed_stride_f64: Analyzing
+all_axis_first_fixed_stride_f64
+                        time:   [79.523 µs 79.648 µs 79.867 µs]
+                        change: [-3.4192% -2.3401% -1.1852%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking cumprod_axis_last_f64
+Benchmarking cumprod_axis_last_f64: Warming up for 1.0000 s
+Benchmarking cumprod_axis_last_f64: Collecting 20 samples in estimated 3.1298 s (2310 iterations)
+Benchmarking cumprod_axis_last_f64: Analyzing
+cumprod_axis_last_f64   time:   [1.3441 ms 1.3532 ms 1.3648 ms]
+                        change: [+1.7504% +3.9844% +6.1307%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking add_contiguous_contiguous_32x32_f64
+Benchmarking add_contiguous_contiguous_32x32_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_contiguous_32x32_f64: Collecting 20 samples in estimated 3.0000 s (15M iterations)
+Benchmarking add_contiguous_contiguous_32x32_f64: Analyzing
+add_contiguous_contiguous_32x32_f64
+                        time:   [204.44 ns 206.16 ns 207.24 ns]
+                        change: [+0.7642% +1.8465% +2.9805%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking add_contiguous_contiguous_256x256_f64
+Benchmarking add_contiguous_contiguous_256x256_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_contiguous_256x256_f64: Collecting 20 samples in estimated 3.0007 s (232k iterations)
+Benchmarking add_contiguous_contiguous_256x256_f64: Analyzing
+add_contiguous_contiguous_256x256_f64
+                        time:   [11.942 µs 12.221 µs 12.644 µs]
+                        change: [-8.1931% -4.9071% -1.4647%] (p = 0.01 < 0.05)
+                        Performance has improved.
+
+Benchmarking add_contiguous_contiguous_f64
+Benchmarking add_contiguous_contiguous_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_contiguous_f64: Collecting 20 samples in estimated 3.0079 s (15k iterations)
+Benchmarking add_contiguous_contiguous_f64: Analyzing
+add_contiguous_contiguous_f64
+                        time:   [196.10 µs 204.17 µs 212.82 µs]
+                        change: [-13.061% -8.0934% -2.5879%] (p = 0.01 < 0.05)
+                        Performance has improved.
+
+Benchmarking add_contiguous_contiguous_1m_1d_f64
+Benchmarking add_contiguous_contiguous_1m_1d_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_contiguous_1m_1d_f64: Collecting 20 samples in estimated 3.0365 s (16k iterations)
+Benchmarking add_contiguous_contiguous_1m_1d_f64: Analyzing
+add_contiguous_contiguous_1m_1d_f64
+                        time:   [193.42 µs 201.51 µs 207.83 µs]
+                        change: [-10.621% -5.3139% +0.4937%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+
+Benchmarking add_contiguous_contiguous_64x128x128_f64
+Benchmarking add_contiguous_contiguous_64x128x128_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_contiguous_64x128x128_f64: Collecting 20 samples in estimated 3.0280 s (16k iterations)
+Benchmarking add_contiguous_contiguous_64x128x128_f64: Analyzing
+add_contiguous_contiguous_64x128x128_f64
+                        time:   [194.50 µs 205.89 µs 213.80 µs]
+                        change: [-8.8495% -3.7506% +1.7964%] (p = 0.19 > 0.05)
+                        No change in performance detected.
+
+Benchmarking subtract_contiguous_contiguous_f64
+Benchmarking subtract_contiguous_contiguous_f64: Warming up for 1.0000 s
+Benchmarking subtract_contiguous_contiguous_f64: Collecting 20 samples in estimated 3.0107 s (15k iterations)
+Benchmarking subtract_contiguous_contiguous_f64: Analyzing
+subtract_contiguous_contiguous_f64
+                        time:   [195.91 µs 204.55 µs 210.93 µs]
+                        change: [-9.9489% -6.3302% -1.9841%] (p = 0.01 < 0.05)
+                        Performance has improved.
+
+Benchmarking add_strided_strided_f64
+Benchmarking add_strided_strided_f64: Warming up for 1.0000 s
+Benchmarking add_strided_strided_f64: Collecting 20 samples in estimated 3.4173 s (1260 iterations)
+Benchmarking add_strided_strided_f64: Analyzing
+add_strided_strided_f64 time:   [3.0596 ms 3.1634 ms 3.2254 ms]
+                        change: [-0.3618% +3.8767% +8.2069%] (p = 0.10 > 0.05)
+                        No change in performance detected.
+
+Benchmarking add_contiguous_strided_f64
+Benchmarking add_contiguous_strided_f64: Warming up for 1.0000 s
+Benchmarking add_contiguous_strided_f64: Collecting 20 samples in estimated 3.1868 s (2310 iterations)
+Benchmarking add_contiguous_strided_f64: Analyzing
+add_contiguous_strided_f64
+                        time:   [1.4370 ms 1.4500 ms 1.4618 ms]
+                        change: [+8.5655% +12.039% +14.652%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking subtract_strided_strided_f64
+Benchmarking subtract_strided_strided_f64: Warming up for 1.0000 s
+Benchmarking subtract_strided_strided_f64: Collecting 20 samples in estimated 3.5175 s (1050 iterations)
+Benchmarking subtract_strided_strided_f64: Analyzing
+subtract_strided_strided_f64
+                        time:   [3.1991 ms 3.2438 ms 3.2971 ms]
+                        change: [+11.968% +14.869% +17.976%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking negative_contiguous_f64
+Benchmarking negative_contiguous_f64: Warming up for 1.0000 s
+Benchmarking negative_contiguous_f64: Collecting 20 samples in estimated 3.0004 s (23k iterations)
+Benchmarking negative_contiguous_f64: Analyzing
+negative_contiguous_f64 time:   [140.71 µs 142.18 µs 142.96 µs]
+                        change: [-0.8035% +0.6204% +1.9692%] (p = 0.44 > 0.05)
+                        No change in performance detected.
+
+Benchmarking absolute_contiguous_f64
+Benchmarking absolute_contiguous_f64: Warming up for 1.0000 s
+Benchmarking absolute_contiguous_f64: Collecting 20 samples in estimated 3.0022 s (21k iterations)
+Benchmarking absolute_contiguous_f64: Analyzing
+absolute_contiguous_f64 time:   [143.01 µs 143.87 µs 144.46 µs]
+                        change: [+11.419% +13.324% +14.969%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking isnan_contiguous_f64
+Benchmarking isnan_contiguous_f64: Warming up for 1.0000 s
+Benchmarking isnan_contiguous_f64: Collecting 20 samples in estimated 3.0006 s (38k iterations)
+Benchmarking isnan_contiguous_f64: Analyzing
+isnan_contiguous_f64    time:   [79.785 µs 80.119 µs 80.504 µs]
+                        change: [+1.5621% +4.1438% +8.2606%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Found 6 outliers among 20 measurements (30.00%)
+  1 (5.00%) low severe
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking multiply_row_broadcast_f64
+Benchmarking multiply_row_broadcast_f64: Warming up for 1.0000 s
+Benchmarking multiply_row_broadcast_f64: Collecting 20 samples in estimated 3.0295 s (15k iterations)
+Benchmarking multiply_row_broadcast_f64: Analyzing
+multiply_row_broadcast_f64
+                        time:   [203.77 µs 206.49 µs 208.63 µs]
+                        change: [+39.644% +40.990% +42.522%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking multiply_column_broadcast_f64
+Benchmarking multiply_column_broadcast_f64: Warming up for 1.0000 s
+Benchmarking multiply_column_broadcast_f64: Collecting 20 samples in estimated 3.0194 s (21k iterations)
+Benchmarking multiply_column_broadcast_f64: Analyzing
+multiply_column_broadcast_f64
+                        time:   [146.57 µs 147.12 µs 147.47 µs]
+                        change: [+4.4845% +5.2168% +5.9190%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+
+Benchmarking multiply_scalar_broadcast_f64
+Benchmarking multiply_scalar_broadcast_f64: Warming up for 1.0000 s
+Benchmarking multiply_scalar_broadcast_f64: Collecting 20 samples in estimated 3.0202 s (22k iterations)
+Benchmarking multiply_scalar_broadcast_f64: Analyzing
+multiply_scalar_broadcast_f64
+                        time:   [144.83 µs 145.51 µs 145.97 µs]
+                        change: [+3.2234% +4.0116% +4.7178%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking add_i64_f64_contiguous
+Benchmarking add_i64_f64_contiguous: Warming up for 1.0000 s
+Benchmarking add_i64_f64_contiguous: Collecting 20 samples in estimated 3.0063 s (14k iterations)
+Benchmarking add_i64_f64_contiguous: Analyzing
+add_i64_f64_contiguous  time:   [213.75 µs 214.52 µs 215.28 µs]
+                        change: [+0.2744% +1.2330% +2.2621%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking divide_i64_contiguous
+Benchmarking divide_i64_contiguous: Warming up for 1.0000 s
+Benchmarking divide_i64_contiguous: Collecting 20 samples in estimated 3.1805 s (2730 iterations)
+Benchmarking divide_i64_contiguous: Analyzing
+divide_i64_contiguous   time:   [1.0828 ms 1.1113 ms 1.1351 ms]
+                        change: [-6.8512% -1.5683% +4.8962%] (p = 0.62 > 0.05)
+                        No change in performance detected.
+
+Benchmarking divide_contiguous_f64
+Benchmarking divide_contiguous_f64: Warming up for 1.0000 s
+Benchmarking divide_contiguous_f64: Collecting 20 samples in estimated 3.0359 s (14k iterations)
+Benchmarking divide_contiguous_f64: Analyzing
+divide_contiguous_f64   time:   [215.24 µs 216.01 µs 216.79 µs]
+                        change: [+1.4000% +1.6743% +1.9444%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking trunc_divide_contiguous_f64
+Benchmarking trunc_divide_contiguous_f64: Warming up for 1.0000 s
+Benchmarking trunc_divide_contiguous_f64: Collecting 20 samples in estimated 3.0014 s (14k iterations)
+Benchmarking trunc_divide_contiguous_f64: Analyzing
+trunc_divide_contiguous_f64
+                        time:   [215.51 µs 215.81 µs 216.20 µs]
+                        change: [+0.9477% +1.3928% +1.8034%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking remainder_contiguous_f64
+Benchmarking remainder_contiguous_f64: Warming up for 1.0000 s
+Benchmarking remainder_contiguous_f64: Collecting 20 samples in estimated 3.2522 s (1890 iterations)
+Benchmarking remainder_contiguous_f64: Analyzing
+remainder_contiguous_f64
+                        time:   [1.7156 ms 1.7180 ms 1.7209 ms]
+                        change: [-0.8299% -0.4874% -0.1311%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking power_contiguous_f64
+Benchmarking power_contiguous_f64: Warming up for 1.0000 s
+Benchmarking power_contiguous_f64: Collecting 20 samples in estimated 3.3679 s (840 iterations)
+Benchmarking power_contiguous_f64: Analyzing
+power_contiguous_f64    time:   [4.0121 ms 4.0164 ms 4.0212 ms]
+                        change: [-1.2858% -1.0340% -0.7686%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking greater_contiguous_f64
+Benchmarking greater_contiguous_f64: Warming up for 1.0000 s
+Benchmarking greater_contiguous_f64: Collecting 20 samples in estimated 3.0107 s (21k iterations)
+Benchmarking greater_contiguous_f64: Analyzing
+greater_contiguous_f64  time:   [145.93 µs 146.21 µs 146.53 µs]
+                        change: [-2.7933% -2.3883% -1.9746%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking cumsum_axis_last_contiguous_f64
+Benchmarking cumsum_axis_last_contiguous_f64: Warming up for 1.0000 s
+Benchmarking cumsum_axis_last_contiguous_f64: Collecting 20 samples in estimated 3.0501 s (2520 iterations)
+Benchmarking cumsum_axis_last_contiguous_f64: Analyzing
+cumsum_axis_last_contiguous_f64
+                        time:   [1.2028 ms 1.2143 ms 1.2244 ms]
+                        change: [+0.2917% +2.8345% +5.6232%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking cumsum_axis_first_strided_f64
+Benchmarking cumsum_axis_first_strided_f64: Warming up for 1.0000 s
+Benchmarking cumsum_axis_first_strided_f64: Collecting 20 samples in estimated 4.1393 s (630 iterations)
+Benchmarking cumsum_axis_first_strided_f64: Analyzing
+cumsum_axis_first_strided_f64
+                        time:   [6.4836 ms 6.5105 ms 6.5445 ms]
+                        change: [+6.9135% +9.7676% +12.451%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking cumprod_axis_first_strided_f64
+Benchmarking cumprod_axis_first_strided_f64: Warming up for 1.0000 s
+Benchmarking cumprod_axis_first_strided_f64: Collecting 20 samples in estimated 4.2787 s (630 iterations)
+Benchmarking cumprod_axis_first_strided_f64: Analyzing
+cumprod_axis_first_strided_f64
+                        time:   [6.2502 ms 6.4563 ms 6.7306 ms]
+                        change: [+4.0024% +7.0632% +10.027%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 6 outliers among 20 measurements (30.00%)
+  4 (20.00%) low severe
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking concatenate_axis0_contiguous_f64
+Benchmarking concatenate_axis0_contiguous_f64: Warming up for 1.0000 s
+Benchmarking concatenate_axis0_contiguous_f64: Collecting 20 samples in estimated 3.0421 s (14k iterations)
+Benchmarking concatenate_axis0_contiguous_f64: Analyzing
+concatenate_axis0_contiguous_f64
+                        time:   [217.04 µs 217.71 µs 218.67 µs]
+                        change: [-2.5016% -0.5585% +0.7666%] (p = 0.63 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking concatenate_axis0_strided_f64
+Benchmarking concatenate_axis0_strided_f64: Warming up for 1.0000 s
+Benchmarking concatenate_axis0_strided_f64: Collecting 20 samples in estimated 3.4762 s (1260 iterations)
+Benchmarking concatenate_axis0_strided_f64: Analyzing
+concatenate_axis0_strided_f64
+                        time:   [2.7576 ms 2.7725 ms 2.7915 ms]
+                        change: [+2.8612% +3.8737% +4.9832%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking concatenate_axis1_contiguous_f64
+Benchmarking concatenate_axis1_contiguous_f64: Warming up for 1.0000 s
+Benchmarking concatenate_axis1_contiguous_f64: Collecting 20 samples in estimated 3.0283 s (11k iterations)
+Benchmarking concatenate_axis1_contiguous_f64: Analyzing
+concatenate_axis1_contiguous_f64
+                        time:   [281.70 µs 282.98 µs 285.19 µs]
+                        change: [-6.1947% -2.7071% -0.4058%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high severe
+
+Benchmarking concatenate_axis1_strided_f64
+Benchmarking concatenate_axis1_strided_f64: Warming up for 1.0000 s
+Benchmarking concatenate_axis1_strided_f64: Collecting 20 samples in estimated 3.2202 s (840 iterations)
+Benchmarking concatenate_axis1_strided_f64: Analyzing
+concatenate_axis1_strided_f64
+                        time:   [3.8205 ms 3.8669 ms 3.9163 ms]
+                        change: [+3.0393% +5.1913% +7.2836%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking stack_axis0_contiguous_f64
+Benchmarking stack_axis0_contiguous_f64: Warming up for 1.0000 s
+Benchmarking stack_axis0_contiguous_f64: Collecting 20 samples in estimated 3.0174 s (14k iterations)
+Benchmarking stack_axis0_contiguous_f64: Analyzing
+stack_axis0_contiguous_f64
+                        time:   [218.52 µs 219.11 µs 219.75 µs]
+                        change: [+0.5703% +1.3311% +2.1873%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking where_contiguous_f64
+Benchmarking where_contiguous_f64: Warming up for 1.0000 s
+Benchmarking where_contiguous_f64: Collecting 20 samples in estimated 3.0009 s (13k iterations)
+Benchmarking where_contiguous_f64: Analyzing
+where_contiguous_f64    time:   [238.56 µs 238.81 µs 239.28 µs]
+                        change: [+0.0645% +0.2556% +0.4836%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking where_strided_f64
+Benchmarking where_strided_f64: Warming up for 1.0000 s
+Benchmarking where_strided_f64: Collecting 20 samples in estimated 3.0348 s (1260 iterations)
+Benchmarking where_strided_f64: Analyzing
+where_strided_f64       time:   [2.3964 ms 2.4276 ms 2.4782 ms]
+                        change: [-7.3320% -2.3321% +1.8307%] (p = 0.41 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking where_scalar_broadcast_f64
+Benchmarking where_scalar_broadcast_f64: Warming up for 1.0000 s
+Benchmarking where_scalar_broadcast_f64: Collecting 20 samples in estimated 3.0315 s (15k iterations)
+Benchmarking where_scalar_broadcast_f64: Analyzing
+where_scalar_broadcast_f64
+                        time:   [200.03 µs 200.32 µs 200.64 µs]
+                        change: [-0.4474% -0.1700% +0.1116%] (p = 0.26 > 0.05)
+                        No change in performance detected.
+
+Benchmarking clip_contiguous_f64
+Benchmarking clip_contiguous_f64: Warming up for 1.0000 s
+Benchmarking clip_contiguous_f64: Collecting 20 samples in estimated 3.0028 s (21k iterations)
+Benchmarking clip_contiguous_f64: Analyzing
+clip_contiguous_f64     time:   [140.39 µs 140.57 µs 140.75 µs]
+                        change: [-0.1513% +0.1429% +0.4288%] (p = 0.35 > 0.05)
+                        No change in performance detected.
+
+Benchmarking nonzero_bool_contiguous
+Benchmarking nonzero_bool_contiguous: Warming up for 1.0000 s
+Benchmarking nonzero_bool_contiguous: Collecting 20 samples in estimated 3.0464 s (1470 iterations)
+Benchmarking nonzero_bool_contiguous: Analyzing
+nonzero_bool_contiguous time:   [2.0426 ms 2.0565 ms 2.0723 ms]
+                        change: [-4.3246% -3.1427% -1.8246%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking sort_axis_last_contiguous_f64
+Benchmarking sort_axis_last_contiguous_f64: Warming up for 1.0000 s
+Benchmarking sort_axis_last_contiguous_f64: Collecting 20 samples in estimated 3.1603 s (2730 iterations)
+Benchmarking sort_axis_last_contiguous_f64: Analyzing
+sort_axis_last_contiguous_f64
+                        time:   [1.1474 ms 1.1525 ms 1.1584 ms]
+                        change: [-4.5889% -3.9013% -3.2642%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking sort_axis_last_strided_f64
+Benchmarking sort_axis_last_strided_f64: Warming up for 1.0000 s
+Benchmarking sort_axis_last_strided_f64: Collecting 20 samples in estimated 3.7573 s (840 iterations)
+Benchmarking sort_axis_last_strided_f64: Analyzing
+sort_axis_last_strided_f64
+                        time:   [4.4489 ms 4.4632 ms 4.4825 ms]
+                        change: [-5.8925% -5.3245% -4.7498%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking argsort_axis_last_contiguous_f64
+Benchmarking argsort_axis_last_contiguous_f64: Warming up for 1.0000 s
+Benchmarking argsort_axis_last_contiguous_f64: Collecting 20 samples in estimated 3.1656 s (2520 iterations)
+Benchmarking argsort_axis_last_contiguous_f64: Analyzing
+argsort_axis_last_contiguous_f64
+                        time:   [1.2464 ms 1.2487 ms 1.2523 ms]
+                        change: [-13.824% -13.150% -12.464%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking unique_flatten_f64
+Benchmarking unique_flatten_f64: Warming up for 1.0000 s
+Benchmarking unique_flatten_f64: Collecting 20 samples in estimated 5.8862 s (420 iterations)
+Benchmarking unique_flatten_f64: Analyzing
+unique_flatten_f64      time:   [13.938 ms 14.011 ms 14.095 ms]
+                        change: [-11.787% -11.087% -10.283%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking linspace_1m_f64
+Benchmarking linspace_1m_f64: Warming up for 1.0000 s
+Benchmarking linspace_1m_f64: Collecting 20 samples in estimated 3.0847 s (3990 iterations)
+Benchmarking linspace_1m_f64: Analyzing
+linspace_1m_f64         time:   [741.82 µs 756.39 µs 772.66 µs]
+                        change: [-7.7124% -3.7631% +0.0564%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking meshgrid_1024x1024_view_f64
+Benchmarking meshgrid_1024x1024_view_f64: Warming up for 1.0000 s
+Benchmarking meshgrid_1024x1024_view_f64: Collecting 20 samples in estimated 3.0000 s (14M iterations)
+Benchmarking meshgrid_1024x1024_view_f64: Analyzing
+meshgrid_1024x1024_view_f64
+                        time:   [204.35 ns 206.61 ns 208.83 ns]
+                        change: [-2.9677% -1.8678% -0.8379%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+Benchmarking fancy_gather_multidim_f64
+Benchmarking fancy_gather_multidim_f64: Warming up for 1.0000 s
+Benchmarking fancy_gather_multidim_f64: Collecting 20 samples in estimated 3.0408 s (2100 iterations)
+Benchmarking fancy_gather_multidim_f64: Analyzing
+fancy_gather_multidim_f64
+                        time:   [1.4868 ms 1.5046 ms 1.5179 ms]
+                        change: [-8.5957% -7.0362% -5.4819%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking gather_basic_half_view_f64
+Benchmarking gather_basic_half_view_f64: Warming up for 1.0000 s
+Benchmarking gather_basic_half_view_f64: Collecting 20 samples in estimated 3.0000 s (23M iterations)
+Benchmarking gather_basic_half_view_f64: Analyzing
+gather_basic_half_view_f64
+                        time:   [129.09 ns 129.55 ns 130.11 ns]
+                        change: [-0.5066% +0.2079% +0.9876%] (p = 0.61 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking gather_reverse_view_f64
+Benchmarking gather_reverse_view_f64: Warming up for 1.0000 s
+Benchmarking gather_reverse_view_f64: Collecting 20 samples in estimated 3.0000 s (23M iterations)
+Benchmarking gather_reverse_view_f64: Analyzing
+gather_reverse_view_f64 time:   [128.24 ns 128.80 ns 129.40 ns]
+                        change: [-1.0808% -0.5129% +0.0321%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high severe
+
+Benchmarking gather_boolean_mask_f64
+Benchmarking gather_boolean_mask_f64: Warming up for 1.0000 s
+Benchmarking gather_boolean_mask_f64: Collecting 20 samples in estimated 3.1453 s (1260 iterations)
+Benchmarking gather_boolean_mask_f64: Analyzing
+gather_boolean_mask_f64 time:   [2.4537 ms 2.4620 ms 2.4717 ms]
+                        change: [-4.9332% -3.8105% -2.6684%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking scatter_array_f64/unshared_rhs
+Benchmarking scatter_array_f64/unshared_rhs: Warming up for 1.0000 s
+Benchmarking scatter_array_f64/unshared_rhs: Collecting 20 samples in estimated 3.0162 s (19k iterations)
+Benchmarking scatter_array_f64/unshared_rhs: Analyzing
+scatter_array_f64/unshared_rhs
+                        time:   [53.519 µs 54.139 µs 54.540 µs]
+                        change: [-10.049% -7.9024% -5.8628%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking scatter_array_f64/shared_rhs
+Benchmarking scatter_array_f64/shared_rhs: Warming up for 1.0000 s
+Benchmarking scatter_array_f64/shared_rhs: Collecting 20 samples in estimated 3.0332 s (8610 iterations)
+Benchmarking scatter_array_f64/shared_rhs: Analyzing
+scatter_array_f64/shared_rhs
+                        time:   [214.83 µs 215.30 µs 215.91 µs]
+                        change: [-14.402% -13.878% -13.303%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking scatter_array_strided_basic_f64
+Benchmarking scatter_array_strided_basic_f64: Warming up for 1.0000 s
+Benchmarking scatter_array_strided_basic_f64: Collecting 20 samples in estimated 3.0487 s (8820 iterations)
+Benchmarking scatter_array_strided_basic_f64: Analyzing
+scatter_array_strided_basic_f64
+                        time:   [230.11 µs 230.67 µs 231.33 µs]
+                        change: [-3.7189% -3.2953% -2.9312%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Benchmarking scatter_scalar_strided_f64
+Benchmarking scatter_scalar_strided_f64: Warming up for 1.0000 s
+Benchmarking scatter_scalar_strided_f64: Collecting 20 samples in estimated 3.0441 s (12k iterations)
+Benchmarking scatter_scalar_strided_f64: Analyzing
+scatter_scalar_strided_f64
+                        time:   [129.26 µs 129.57 µs 129.87 µs]
+                        change: [-4.8024% -4.0816% -3.2766%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking scatter_scalar_fancy_f64
+Benchmarking scatter_scalar_fancy_f64: Warming up for 1.0000 s
+Benchmarking scatter_scalar_fancy_f64: Collecting 20 samples in estimated 3.2113 s (2100 iterations)
+Benchmarking scatter_scalar_fancy_f64: Analyzing
+scatter_scalar_fancy_f64
+                        time:   [1.3936 ms 1.4032 ms 1.4157 ms]
+                        change: [+0.3399% +1.1172% +1.8745%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+

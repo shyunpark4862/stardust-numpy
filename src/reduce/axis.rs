@@ -167,6 +167,21 @@ pub(crate) struct ReducePlan {
     pub inner_n: usize,
 }
 
+/// Physical traversal selected from reduction geometry and input layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TraversalSchedule {
+    /// Every output slot owns one contiguous suffix chunk.
+    SuffixContiguous,
+    /// Reduced prefix rows are scanned in memory order while all output slots
+    /// are accumulated together.
+    PrefixContiguous {
+        reduced_len: usize,
+        output_len: usize,
+    },
+    /// Arbitrary layout handled by `RunPlan` and reduced-axis cursors.
+    GeneralStrided,
+}
+
 impl ReducePlan {
     pub fn new(
         shape: &[usize],
@@ -214,6 +229,37 @@ impl ReducePlan {
             .iter()
             .enumerate()
             .all(|(i, &ax)| ax == start + i)
+    }
+
+    /// True when reduced axes form a leading block (`[0, …, k-1]`).
+    #[inline]
+    pub fn is_prefix_reduction(&self) -> bool {
+        self.reduced
+            .iter()
+            .enumerate()
+            .all(|(axis, &reduced)| axis == reduced)
+    }
+
+    /// Choose a physical traversal without embedding operation semantics.
+    #[inline]
+    pub fn traversal_schedule(
+        &self,
+        ndim: usize,
+        is_c_contiguous: bool,
+    ) -> TraversalSchedule {
+        if !is_c_contiguous {
+            return TraversalSchedule::GeneralStrided;
+        }
+        if self.is_suffix_reduction(ndim) {
+            return TraversalSchedule::SuffixContiguous;
+        }
+        if self.is_prefix_reduction() {
+            return TraversalSchedule::PrefixContiguous {
+                reduced_len: self.inner_n,
+                output_len: self.outer_n,
+            };
+        }
+        TraversalSchedule::GeneralStrided
     }
 
     /// Source strides along outer and reduced axes, respectively.
@@ -283,5 +329,33 @@ mod tests {
         assert!(!mid.is_suffix_reduction(3));
         let skip = ReducePlan::new(&[2, 3, 4], Some(&[0, 2]), false).unwrap();
         assert!(!skip.is_suffix_reduction(3));
+    }
+
+    #[test]
+    fn traversal_schedule_classifies_prefix_suffix_and_general() {
+        let prefix = ReducePlan::new(&[2, 3, 4], Some(&[0, 1]), false).unwrap();
+        assert_eq!(
+            prefix.traversal_schedule(3, true),
+            TraversalSchedule::PrefixContiguous {
+                reduced_len: 6,
+                output_len: 4,
+            }
+        );
+
+        let suffix = ReducePlan::new(&[2, 3, 4], Some(&[1, 2]), false).unwrap();
+        assert_eq!(
+            suffix.traversal_schedule(3, true),
+            TraversalSchedule::SuffixContiguous
+        );
+
+        let middle = ReducePlan::new(&[2, 3, 4], Some(&[1]), false).unwrap();
+        assert_eq!(
+            middle.traversal_schedule(3, true),
+            TraversalSchedule::GeneralStrided
+        );
+        assert_eq!(
+            prefix.traversal_schedule(3, false),
+            TraversalSchedule::GeneralStrided
+        );
     }
 }

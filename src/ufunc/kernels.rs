@@ -1,20 +1,17 @@
 //! Same-type and cross-type element-wise map kernels.
 //!
 //! Fully-contiguous operands use a flat zip; otherwise operand layouts are
-//! coalesced with [`crate::layout::CoalescedLayout`] and walked as an outer
-//! traversal ([`crate::stride_iter::StrideCursor`]) over fixed-stride inner
-//! runs.
+//! coalesced into [`crate::run::RunPlan`] and walked as fixed-stride runs.
 
 use crate::array::Array;
 use crate::broadcast::broadcast_shape;
 use crate::dtype::Scalar;
 use crate::error::Result;
-use crate::layout::CoalescedLayout;
+use crate::run::{collect_binary, collect_unary, try_collect_binary, RunPlan};
 use crate::shape::size_of_shape;
-use crate::stride_iter::StrideCursor;
 
 /// Apply `f` to every element of `a` (C-order), producing a new contiguous array.
-pub fn map_unary<A, Out, F>(a: &Array<A>, mut f: F) -> Result<Array<Out>>
+pub fn map_unary<A, Out, F>(a: &Array<A>, f: F) -> Result<Array<Out>>
 where
     A: Scalar,
     Out: Scalar,
@@ -25,30 +22,8 @@ where
         return Array::from_vec(out, a.shape());
     }
 
-    let mut out = Vec::with_capacity(a.size());
-    let layout = CoalescedLayout::new(a.shape(), &[a.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_shape = layout.outer_shape();
-    let outer_n = layout.outer_len();
-    if inner_len > 0 && outer_n > 0 {
-        let inner_stride = layout.inner_stride(0);
-        let mut outer = StrideCursor::new(
-            outer_shape,
-            [layout.outer_strides(0)],
-            [a.offset() as isize],
-        );
-        for outer_i in 0..outer_n {
-            let mut pos = outer.buffer_index(0) as isize;
-            for _ in 0..inner_len {
-                out.push(f(a.data[pos as usize]));
-                pos += inner_stride;
-            }
-            if outer_i + 1 < outer_n {
-                outer.advance();
-            }
-        }
-    }
-
+    let plan = RunPlan::new(a.shape(), [a.strides()]);
+    let out = collect_unary(&plan, &a.data, a.offset(), f);
     Array::from_vec(out, a.shape())
 }
 
@@ -81,11 +56,14 @@ where
         return Array::from_vec(out, shape);
     }
 
-    let mut out = Vec::with_capacity(size_of_shape(shape));
-    map_binary_strided(left, right, shape, |x, y| {
-        out.push(f(x, y));
-        Ok(())
-    })?;
+    let plan = RunPlan::new(shape, [left.strides(), right.strides()]);
+    let out = collect_binary(
+        &plan,
+        &left.data,
+        &right.data,
+        [left.offset(), right.offset()],
+        f,
+    );
     Array::from_vec(out, shape)
 }
 
@@ -106,63 +84,24 @@ where
     let right = aligned.right.as_ref().unwrap_or(b);
     let shape = &aligned.shape;
 
-    let mut out = Vec::with_capacity(size_of_shape(shape));
-
     if let (Some(xs), Some(ys)) =
         (left.as_c_contiguous_slice(), right.as_c_contiguous_slice())
     {
+        let mut out = Vec::with_capacity(size_of_shape(shape));
         for (&x, &y) in xs.iter().zip(ys) {
             out.push(f(x, y)?);
         }
         return Array::from_vec(out, shape);
     }
-    map_binary_strided(left, right, shape, |x, y| {
-        out.push(f(x, y)?);
-        Ok(())
-    })?;
+    let plan = RunPlan::new(shape, [left.strides(), right.strides()]);
+    let out = try_collect_binary(
+        &plan,
+        &left.data,
+        &right.data,
+        [left.offset(), right.offset()],
+        f,
+    )?;
     Array::from_vec(out, shape)
-}
-
-/// Coalesce `left` and `right`'s strides jointly against `shape`, then walk
-/// outer positions with a two-lane cursor and a fixed-stride inner run.
-fn map_binary_strided<A, B>(
-    left: &Array<A>,
-    right: &Array<B>,
-    shape: &[usize],
-    mut visit: impl FnMut(A, B) -> Result<()>,
-) -> Result<()>
-where
-    A: Scalar,
-    B: Scalar,
-{
-    let layout =
-        CoalescedLayout::new(shape, &[left.strides(), right.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_shape = layout.outer_shape();
-    let outer_n = layout.outer_len();
-    if inner_len == 0 || outer_n == 0 {
-        return Ok(());
-    }
-    let left_inner_stride = layout.inner_stride(0);
-    let right_inner_stride = layout.inner_stride(1);
-    let mut outer = StrideCursor::new(
-        outer_shape,
-        [layout.outer_strides(0), layout.outer_strides(1)],
-        [left.offset() as isize, right.offset() as isize],
-    );
-    for outer_i in 0..outer_n {
-        let mut lhs = outer.buffer_index(0) as isize;
-        let mut rhs = outer.buffer_index(1) as isize;
-        for _ in 0..inner_len {
-            visit(left.data[lhs as usize], right.data[rhs as usize])?;
-            lhs += left_inner_stride;
-            rhs += right_inner_stride;
-        }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
-    }
-    Ok(())
 }
 
 /// Result of aligning two operands for a binary map.
@@ -236,6 +175,49 @@ mod tests {
         // ones contiguous, t not — swapped argument order vs previous test
         let c = map_binary(&ones, &t, |x, y| x + y).unwrap();
         assert_eq!(c.get(&[0, 1]).unwrap(), 14);
+    }
+
+    #[test]
+    fn try_map_binary_stops_on_strided_error() {
+        use crate::error::Error;
+
+        let values =
+            Array::from_slice(&[6_i64, 12, 18, 24, 30, 36], &[2, 3]).unwrap();
+        let divisors =
+            Array::from_slice(&[1_i64, 1, 1, 0, 1, 1], &[2, 3]).unwrap();
+        let mut calls = 0;
+        let error = try_map_binary(
+            &values.transpose(),
+            &divisors.transpose(),
+            |x, y| {
+                calls += 1;
+                if y == 0 {
+                    Err(Error::DivideByZero)
+                } else {
+                    Ok(x / y)
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, Error::DivideByZero);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn map_binary_mixed_types_on_transposed_operands() {
+        let integers =
+            Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
+        let floats =
+            Array::from_slice(&[0.5_f64, 1.0, 1.5, 2.0, 2.5, 3.0], &[2, 3])
+                .unwrap();
+        let out =
+            map_binary(&integers.transpose(), &floats.transpose(), |x, y| {
+                x as f64 + y
+            })
+            .unwrap();
+
+        assert_eq!(out.to_vec(), vec![1.5, 6.0, 3.0, 7.5, 4.5, 9.0]);
     }
 
     #[test]

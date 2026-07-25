@@ -39,15 +39,15 @@ pub fn c_order_strides(shape: &[usize]) -> Vec<isize> {
 /// Whether layout is C-contiguous (row-major, unit stride on the last axis).
 ///
 /// The array may sit at a non-zero buffer offset; callers that scan memory
-/// must start at that offset (see ufunc contiguous fast-path).
+/// must start at that offset (see ufunc contiguous fast-path). Strides on
+/// singleton axes are ignored because their only valid coordinate is zero.
 pub(crate) fn is_c_contiguous(shape: &[usize], strides: &[isize]) -> bool {
     if shape.len() != strides.len() {
         return false;
     }
     let mut expected = 1_isize;
     for i in (0..shape.len()).rev() {
-        // Size-0 / size-1 axes: NumPy still requires the nominal C stride.
-        if strides[i] != expected {
+        if shape[i] != 1 && strides[i] != expected {
             return false;
         }
         expected *= shape[i] as isize;
@@ -93,5 +93,17 @@ mod tests {
         // Contiguity is about strides; offset is the caller's base index.
         assert!(is_c_contiguous(&[2, 3], &[3, 1]));
         assert!(!is_c_contiguous(&[2, 3], &[1, 3]));
+    }
+
+    #[test]
+    fn c_contiguous_ignores_singleton_axis_strides() {
+        assert!(is_c_contiguous(&[1, 2, 3], &[0, 3, 1]));
+        assert!(is_c_contiguous(&[2, 1, 3], &[3, -99, 1]));
+        assert!(is_c_contiguous(&[2, 3, 1], &[3, 1, 42]));
+    }
+
+    #[test]
+    fn c_contiguous_rejects_expanded_zero_stride_axis() {
+        assert!(!is_c_contiguous(&[2, 3], &[0, 1]));
     }
 }

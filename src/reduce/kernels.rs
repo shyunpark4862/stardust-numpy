@@ -15,13 +15,16 @@ use std::sync::Arc;
 use crate::array::Array;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
-use crate::layout::CoalescedLayout;
-use crate::reduce::axis::{normalize_axis, AxisTraversalPlan, ReducePlan};
+use crate::reduce::axis::{
+    normalize_axis, AxisTraversalPlan, ReducePlan, TraversalSchedule,
+};
+use crate::run::RunPlan;
 use crate::shape::c_order_strides;
 use crate::stride_iter::StrideCursor;
 
 enum ReductionPath<'a, T> {
-    Contiguous(&'a [T]),
+    SuffixContiguous(&'a [T]),
+    PrefixContiguous(&'a [T]),
     GeneralStrided,
 }
 
@@ -30,12 +33,21 @@ fn reduction_path<'a, T: Scalar>(
     a: &'a Array<T>,
     plan: &ReducePlan,
 ) -> ReductionPath<'a, T> {
-    if plan.is_suffix_reduction(a.ndim()) {
-        if let Some(slice) = a.as_c_contiguous_slice() {
-            return ReductionPath::Contiguous(slice);
+    let contiguous = a.as_c_contiguous_slice();
+    match plan.traversal_schedule(a.ndim(), contiguous.is_some()) {
+        TraversalSchedule::SuffixContiguous => {
+            ReductionPath::SuffixContiguous(contiguous.unwrap())
         }
+        TraversalSchedule::PrefixContiguous {
+            reduced_len,
+            output_len,
+        } => {
+            debug_assert_eq!(reduced_len, plan.inner_n);
+            debug_assert_eq!(output_len, plan.outer_n);
+            ReductionPath::PrefixContiguous(contiguous.unwrap())
+        }
+        TraversalSchedule::GeneralStrided => ReductionPath::GeneralStrided,
     }
-    ReductionPath::GeneralStrided
 }
 
 /// Fold over selected axes starting from `initial`.
@@ -72,13 +84,38 @@ where
     }
 
     match reduction_path(a, plan) {
-        ReductionPath::Contiguous(slice) => {
+        ReductionPath::SuffixContiguous(slice) => {
             fold_contiguous_chunks(slice, plan, initial, &mut accumulate)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            fold_prefix_contiguous(slice, plan, initial, &mut accumulate)
         }
         ReductionPath::GeneralStrided => {
             fold_strided_general(a, plan, initial, &mut accumulate)
         }
     }
+}
+
+fn fold_prefix_contiguous<T, Acc, F>(
+    slice: &[T],
+    plan: &ReducePlan,
+    initial: Acc,
+    accumulate: &mut F,
+) -> Result<Array<Acc>>
+where
+    T: Scalar,
+    Acc: Scalar,
+    F: FnMut(Acc, T) -> Acc,
+{
+    let mut out = vec![initial; plan.outer_n];
+    if plan.inner_n > 0 {
+        for row in slice.chunks_exact(plan.outer_n) {
+            for (acc, &value) in out.iter_mut().zip(row) {
+                *acc = accumulate(*acc, value);
+            }
+        }
+    }
+    Array::from_vec(out, &plan.out_shape)
 }
 
 fn fold_contiguous_chunks<T, Acc, F>(
@@ -148,8 +185,8 @@ where
         return Array::from_vec(Vec::new(), &plan.out_shape);
     }
 
-    if plan.is_suffix_reduction(a.ndim()) {
-        if let Some(slice) = a.as_c_contiguous_slice() {
+    match reduction_path(a, plan) {
+        ReductionPath::SuffixContiguous(slice) => {
             let mut out = Vec::with_capacity(plan.outer_n);
             if plan.inner_n == 0 {
                 out.resize(plan.outer_n, initial);
@@ -176,11 +213,15 @@ where
                 out.push(acc);
             }
             debug_assert_eq!(out.len(), plan.outer_n);
-            return Array::from_vec(out, &plan.out_shape);
+            Array::from_vec(out, &plan.out_shape)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            fold_prefix_contiguous(slice, plan, initial, &mut accumulate)
+        }
+        ReductionPath::GeneralStrided => {
+            fold_strided_general(a, plan, initial, &mut accumulate)
         }
     }
-
-    reduce_fold_plan(a, plan, initial, accumulate)
 }
 
 fn fold_strided_general<T, Acc, F>(
@@ -197,18 +238,14 @@ where
     let mut out = Vec::with_capacity(plan.outer_n);
     let (outer_strides, reduced_strides) =
         plan.outer_reduced_strides(a.strides());
-    let mut outer_cursor = StrideCursor::new(
-        &plan.outer_shape,
-        [&outer_strides],
-        [a.offset() as isize],
-    );
+    let outer_runs = RunPlan::new(&plan.outer_shape, [&outer_strides]);
     let reduced = ReducedRuns::new(&plan.reduced_shape, &reduced_strides);
     let mut reduced_cursor = reduced.cursor(a.offset() as isize);
 
-    for outer_i in 0..plan.outer_n {
+    outer_runs.for_each_element([a.offset() as isize], |[outer_base]| {
         let mut acc = initial;
         if plan.inner_n > 0 {
-            reduced_cursor.reset([outer_cursor.buffer_index(0) as isize]);
+            reduced_cursor.reset([outer_base as isize]);
             for run_i in 0..reduced.outer_n {
                 let mut pos = reduced_cursor.buffer_index(0) as isize;
                 for _ in 0..reduced.inner_len {
@@ -221,10 +258,7 @@ where
             }
         }
         out.push(acc);
-        if outer_i + 1 < plan.outer_n {
-            outer_cursor.advance();
-        }
-    }
+    });
 
     Array::from_vec(out, &plan.out_shape)
 }
@@ -239,7 +273,7 @@ where
 /// N-dimensional carry with an outer traversal over far fewer axes (often
 /// exactly one) plus a linear inner run.
 struct ReducedRuns {
-    layout: CoalescedLayout,
+    plan: RunPlan<1>,
     outer_n: usize,
     inner_len: usize,
     inner_stride: isize,
@@ -247,39 +281,43 @@ struct ReducedRuns {
 
 impl ReducedRuns {
     fn new(reduced_shape: &[usize], reduced_strides: &[isize]) -> Self {
-        let layout = CoalescedLayout::new(reduced_shape, &[reduced_strides]);
-        let outer_n = layout.outer_len();
-        let inner_len = layout.inner_len();
-        let inner_stride = layout.inner_stride(0);
+        let plan = RunPlan::new(reduced_shape, [reduced_strides]);
+        let outer_n = plan.outer_len();
+        let inner_len = plan.inner_len();
+        let inner_stride = plan.inner_stride(0);
         Self {
-            layout,
+            plan,
             outer_n,
             inner_len,
             inner_stride,
         }
     }
 
-    fn outer_shape(&self) -> &[usize] {
-        self.layout.outer_shape()
-    }
-
-    fn outer_strides(&self) -> &[isize] {
-        self.layout.outer_strides(0)
-    }
-
     /// A cursor over [`Self::outer_shape`], ready to be `reset()` to each
     /// output position's base offset.
     fn cursor(&self, offset: isize) -> StrideCursor<'_, 1> {
-        StrideCursor::new(self.outer_shape(), [self.outer_strides()], [offset])
+        self.plan.cursor([offset])
     }
 }
 
-/// Min/max over axes with NaN propagation.
-pub(crate) fn reduce_extremum<T, F, N>(
+fn extremum_plan<T: Scalar>(
     a: &Array<T>,
     axes: Option<&[isize]>,
     keepdims: bool,
     op_name: &str,
+) -> Result<ReducePlan> {
+    let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
+    if plan.outer_n > 0 && plan.inner_is_empty() {
+        return Err(Error::InvalidArgument(format!(
+            "{op_name} of empty array / empty axis"
+        )));
+    }
+    Ok(plan)
+}
+
+fn extremum_prefix_contiguous<T, F, N>(
+    slice: &[T],
+    plan: &ReducePlan,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<T>>
@@ -288,63 +326,248 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
+    let (first_row, remaining) = slice.split_at(plan.outer_n);
+    let mut out = first_row.to_vec();
+    for row in remaining.chunks_exact(plan.outer_n) {
+        for (best, &candidate) in out.iter_mut().zip(row) {
+            if !is_nan(*best)
+                && (is_nan(candidate) || is_better(candidate, *best))
+            {
+                *best = candidate;
+            }
+        }
+    }
+    Array::from_vec(out, &plan.out_shape)
+}
+
+/// Boolean min/max is all/any respectively. The contiguous kernel uses
+/// bitwise accumulation so there is no comparison or generic dispatch in the
+/// hot loop.
+pub(crate) fn reduce_bool_extremum<const MIN: bool>(
+    a: &Array<bool>,
+    axes: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<Array<bool>> {
+    let op_name = if MIN { "min" } else { "max" };
+    let plan = extremum_plan(a, axes, keepdims, op_name)?;
     if plan.outer_n == 0 {
         return Array::from_vec(Vec::new(), &plan.out_shape);
     }
-    if plan.inner_is_empty() {
-        return Err(Error::InvalidArgument(format!(
-            "{op_name} of empty array / empty axis"
-        )));
-    }
-
     match reduction_path(a, &plan) {
-        ReductionPath::Contiguous(slice) => {
-            extremum_contiguous_chunks(slice, &plan, &mut is_better, &is_nan)
+        ReductionPath::SuffixContiguous(slice) => {
+            let mut out = Vec::with_capacity(plan.outer_n);
+            for chunk in slice.chunks_exact(plan.inner_n) {
+                let mut best = MIN;
+                if MIN {
+                    for &candidate in chunk {
+                        best &= candidate;
+                    }
+                } else {
+                    for &candidate in chunk {
+                        best |= candidate;
+                    }
+                }
+                out.push(best);
+            }
+            Array::from_vec(out, &plan.out_shape)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            let mut out = vec![MIN; plan.outer_n];
+            for row in slice.chunks_exact(plan.outer_n) {
+                if MIN {
+                    for (best, &candidate) in out.iter_mut().zip(row) {
+                        *best &= candidate;
+                    }
+                } else {
+                    for (best, &candidate) in out.iter_mut().zip(row) {
+                        *best |= candidate;
+                    }
+                }
+            }
+            Array::from_vec(out, &plan.out_shape)
         }
         ReductionPath::GeneralStrided => {
-            extremum_strided_general(a, &plan, &mut is_better, &is_nan)
+            if MIN {
+                extremum_strided_general(
+                    a,
+                    &plan,
+                    &mut |candidate, best| !candidate && best,
+                    &|_| false,
+                )
+            } else {
+                extremum_strided_general(
+                    a,
+                    &plan,
+                    &mut |candidate, best| candidate && !best,
+                    &|_| false,
+                )
+            }
         }
     }
 }
 
-fn extremum_from_chunk<T, F, N>(chunk: &[T], is_better: &mut F, is_nan: &N) -> T
-where
-    T: Scalar,
-    F: FnMut(T, T) -> bool,
-    N: Fn(T) -> bool,
-{
-    let mut best = chunk[0];
-    if is_nan(best) {
-        return best;
-    }
-    for &candidate in &chunk[1..] {
-        if is_nan(candidate) {
-            return candidate;
-        }
-        if is_better(candidate, best) {
-            best = candidate;
-        }
-    }
-    best
+pub(crate) fn reduce_i64_min(
+    a: &Array<i64>,
+    axes: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<Array<i64>> {
+    reduce_i64_extremum(a, axes, keepdims, "min", |candidate, best| {
+        candidate < best
+    })
 }
 
-fn extremum_contiguous_chunks<T, F, N>(
-    slice: &[T],
-    plan: &ReducePlan,
-    is_better: &mut F,
-    is_nan: &N,
-) -> Result<Array<T>>
+pub(crate) fn reduce_i64_max(
+    a: &Array<i64>,
+    axes: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<Array<i64>> {
+    reduce_i64_extremum(a, axes, keepdims, "max", |candidate, best| {
+        candidate > best
+    })
+}
+
+/// Integer min/max uses a concrete `Ord` kernel with no NaN branch.
+fn reduce_i64_extremum<F>(
+    a: &Array<i64>,
+    axes: Option<&[isize]>,
+    keepdims: bool,
+    op_name: &str,
+    mut is_better: F,
+) -> Result<Array<i64>>
 where
-    T: Scalar,
-    F: FnMut(T, T) -> bool,
-    N: Fn(T) -> bool,
+    F: FnMut(i64, i64) -> bool,
 {
-    let mut out = Vec::with_capacity(plan.outer_n);
-    for chunk in slice.chunks_exact(plan.inner_n) {
-        out.push(extremum_from_chunk(chunk, is_better, is_nan));
+    let plan = extremum_plan(a, axes, keepdims, op_name)?;
+    if plan.outer_n == 0 {
+        return Array::from_vec(Vec::new(), &plan.out_shape);
     }
-    Array::from_vec(out, &plan.out_shape)
+    match reduction_path(a, &plan) {
+        ReductionPath::SuffixContiguous(slice) => {
+            let mut out = Vec::with_capacity(plan.outer_n);
+            for chunk in slice.chunks_exact(plan.inner_n) {
+                let mut best = chunk[0];
+                for &candidate in &chunk[1..] {
+                    if is_better(candidate, best) {
+                        best = candidate;
+                    }
+                }
+                out.push(best);
+            }
+            Array::from_vec(out, &plan.out_shape)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            extremum_prefix_contiguous(slice, &plan, &mut is_better, |_| false)
+        }
+        ReductionPath::GeneralStrided => {
+            extremum_strided_general(a, &plan, &mut is_better, &|_| false)
+        }
+    }
+}
+
+/// Floating min/max keeps NaN propagation while using independent comparison
+/// chains for NaN-free contiguous chunks. NaNs are still observed in logical
+/// C order, so the first NaN value is propagated as before.
+pub(crate) fn reduce_f64_extremum<const MIN: bool>(
+    a: &Array<f64>,
+    axes: Option<&[isize]>,
+    keepdims: bool,
+) -> Result<Array<f64>> {
+    let op_name = if MIN { "min" } else { "max" };
+    let plan = extremum_plan(a, axes, keepdims, op_name)?;
+    if plan.outer_n == 0 {
+        return Array::from_vec(Vec::new(), &plan.out_shape);
+    }
+    match reduction_path(a, &plan) {
+        ReductionPath::SuffixContiguous(slice) => {
+            let mut out = Vec::with_capacity(plan.outer_n);
+            for chunk in slice.chunks_exact(plan.inner_n) {
+                if chunk[0].is_nan() {
+                    out.push(f64::NAN);
+                    continue;
+                }
+                let identity = if MIN {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let mut partials = [identity; 8];
+                let mut nan_masks = [false; 8];
+                let mut blocks = chunk.chunks_exact(8);
+                for block in &mut blocks {
+                    for lane in 0..8 {
+                        let candidate = block[lane];
+                        nan_masks[lane] |= candidate.is_nan();
+                        if if MIN {
+                            candidate < partials[lane]
+                        } else {
+                            candidate > partials[lane]
+                        } {
+                            partials[lane] = candidate;
+                        }
+                    }
+                }
+
+                let mut best = identity;
+                for candidate in partials {
+                    if if MIN {
+                        candidate < best
+                    } else {
+                        candidate > best
+                    } {
+                        best = candidate;
+                    }
+                }
+                let mut has_nan =
+                    nan_masks.into_iter().fold(false, |acc, flag| acc | flag);
+                for &candidate in blocks.remainder() {
+                    has_nan |= candidate.is_nan();
+                    if if MIN {
+                        candidate < best
+                    } else {
+                        candidate > best
+                    } {
+                        best = candidate;
+                    }
+                }
+                out.push(if has_nan { f64::NAN } else { best });
+            }
+            Array::from_vec(out, &plan.out_shape)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            if MIN {
+                extremum_prefix_contiguous(
+                    slice,
+                    &plan,
+                    |candidate, best| candidate < best,
+                    f64::is_nan,
+                )
+            } else {
+                extremum_prefix_contiguous(
+                    slice,
+                    &plan,
+                    |candidate, best| candidate > best,
+                    f64::is_nan,
+                )
+            }
+        }
+        ReductionPath::GeneralStrided => {
+            if MIN {
+                extremum_strided_general(
+                    a,
+                    &plan,
+                    &mut |candidate, best| candidate < best,
+                    &f64::is_nan,
+                )
+            } else {
+                extremum_strided_general(
+                    a,
+                    &plan,
+                    &mut |candidate, best| candidate > best,
+                    &f64::is_nan,
+                )
+            }
+        }
+    }
 }
 
 fn extremum_strided_general<T, F, N>(
@@ -361,11 +584,7 @@ where
     let mut out = Vec::with_capacity(plan.outer_n);
     let (outer_strides, reduced_strides) =
         plan.outer_reduced_strides(a.strides());
-    let mut outer_cursor = StrideCursor::new(
-        &plan.outer_shape,
-        [&outer_strides],
-        [a.offset() as isize],
-    );
+    let outer_runs = RunPlan::new(&plan.outer_shape, [&outer_strides]);
     let reduced = ReducedRuns::new(&plan.reduced_shape, &reduced_strides);
     let mut reduced_cursor = reduced.cursor(a.offset() as isize);
 
@@ -377,8 +596,8 @@ where
     if reduced.outer_n == 1 {
         let inner_len = reduced.inner_len;
         let inner_stride = reduced.inner_stride;
-        for outer_i in 0..plan.outer_n {
-            let mut pos = outer_cursor.buffer_index(0) as isize;
+        outer_runs.for_each_element([a.offset() as isize], |[outer_base]| {
+            let mut pos = outer_base as isize;
             let mut best = a.data[pos as usize];
             if !is_nan(best) {
                 for _ in 1..inner_len {
@@ -394,15 +613,12 @@ where
                 }
             }
             out.push(best);
-            if outer_i + 1 < plan.outer_n {
-                outer_cursor.advance();
-            }
-        }
+        });
         return Array::from_vec(out, &plan.out_shape);
     }
 
-    for outer_i in 0..plan.outer_n {
-        reduced_cursor.reset([outer_cursor.buffer_index(0) as isize]);
+    outer_runs.for_each_element([a.offset() as isize], |[outer_base]| {
+        reduced_cursor.reset([outer_base as isize]);
         let mut best = a.data[reduced_cursor.buffer_index(0)];
 
         if !is_nan(best) {
@@ -425,10 +641,7 @@ where
             }
         }
         out.push(best);
-        if outer_i + 1 < plan.outer_n {
-            outer_cursor.advance();
-        }
-    }
+    });
 
     Array::from_vec(out, &plan.out_shape)
 }
@@ -498,18 +711,9 @@ where
     // Flat C-order walk over a non-contiguous buffer: coalesce the full
     // shape into outer runs + a fixed-stride inner loop, then keep a single
     // linear counter across runs (the argmin/argmax result is a flat index).
-    let layout = CoalescedLayout::new(a.shape(), &[a.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_n = layout.outer_len();
-    debug_assert!(inner_len > 0 && outer_n > 0);
-    let inner_stride = layout.inner_stride(0);
-    let mut outer = StrideCursor::new(
-        layout.outer_shape(),
-        [layout.outer_strides(0)],
-        [a.offset() as isize],
-    );
-
-    let mut best_value = a.data[outer.buffer_index(0)];
+    let run_plan = RunPlan::new(a.shape(), [a.strides()]);
+    debug_assert!(run_plan.inner_len() > 0 && run_plan.outer_len() > 0);
+    let mut best_value = a.data[a.offset()];
     if is_nan(best_value) {
         return Array::from_vec(vec![0], &[]);
     }
@@ -517,27 +721,31 @@ where
     let mut linear = 0_i64;
     let mut skip_first = true;
 
-    for outer_i in 0..outer_n {
-        let mut pos = outer.buffer_index(0) as isize;
-        for _ in 0..inner_len {
-            if skip_first {
-                skip_first = false;
-            } else {
-                let candidate = a.data[pos as usize];
-                if is_nan(candidate) {
-                    return Array::from_vec(vec![linear], &[]);
+    let nan_index = run_plan.try_for_each(
+        [a.offset() as isize],
+        |run| -> std::result::Result<(), i64> {
+            let mut pos = run.bases[0] as isize;
+            for _ in 0..run.len {
+                if skip_first {
+                    skip_first = false;
+                } else {
+                    let candidate = a.data[pos as usize];
+                    if is_nan(candidate) {
+                        return Err(linear);
+                    }
+                    if is_better(candidate, best_value) {
+                        best_value = candidate;
+                        best_linear = linear;
+                    }
                 }
-                if is_better(candidate, best_value) {
-                    best_value = candidate;
-                    best_linear = linear;
-                }
+                linear += 1;
+                pos += run.strides[0];
             }
-            linear += 1;
-            pos += inner_stride;
-        }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
+            Ok(())
+        },
+    );
+    if let Err(index) = nan_index {
+        return Array::from_vec(vec![index], &[]);
     }
 
     Array::from_vec(vec![best_linear], &[])
@@ -628,13 +836,9 @@ where
     let axis_stride = a.strides()[plan.axis];
     let outer_strides = plan.outer_strides(a.strides());
 
-    let mut outer_cursor = StrideCursor::new(
-        &plan.outer_shape,
-        [&outer_strides],
-        [a.offset() as isize],
-    );
-    for outer_i in 0..plan.outer_n {
-        let mut buf = outer_cursor.buffer_index(0) as isize;
+    let outer_runs = RunPlan::new(&plan.outer_shape, [&outer_strides]);
+    outer_runs.for_each_element([a.offset() as isize], |[outer_base]| {
+        let mut buf = outer_base as isize;
         let mut best_value = a.data[buf as usize];
         let mut best_axis_index = 0_i64;
 
@@ -653,10 +857,7 @@ where
             }
         }
         out.push(best_axis_index);
-        if outer_i + 1 < plan.outer_n {
-            outer_cursor.advance();
-        }
-    }
+    });
 
     Array::from_vec(out, &plan.outer_shape)
 }
@@ -740,36 +941,24 @@ where
     // outer/inner decomposition as [`arg_extremum_flat_strided`]; the running
     // accumulator is carried across every run so visitation stays C-order.
     let mut out = Vec::with_capacity(n);
-    let layout = CoalescedLayout::new(a.shape(), &[a.strides()]);
-    let inner_len = layout.inner_len();
-    let outer_n = layout.outer_len();
-    debug_assert!(inner_len > 0 && outer_n > 0);
-    let inner_stride = layout.inner_stride(0);
-    let mut outer = StrideCursor::new(
-        layout.outer_shape(),
-        [layout.outer_strides(0)],
-        [a.offset() as isize],
-    );
-
-    let mut acc = to_acc(a.data[outer.buffer_index(0)]);
+    let run_plan = RunPlan::new(a.shape(), [a.strides()]);
+    debug_assert!(run_plan.inner_len() > 0 && run_plan.outer_len() > 0);
+    let mut acc = to_acc(a.data[a.offset()]);
     out.push(acc);
     let mut skip_first = true;
 
-    for outer_i in 0..outer_n {
-        let mut pos = outer.buffer_index(0) as isize;
-        for _ in 0..inner_len {
+    run_plan.for_each([a.offset() as isize], |run| {
+        let mut pos = run.bases[0] as isize;
+        for _ in 0..run.len {
             if skip_first {
                 skip_first = false;
             } else {
                 acc = accumulate(acc, a.data[pos as usize]);
                 out.push(acc);
             }
-            pos += inner_stride;
+            pos += run.strides[0];
         }
-        if outer_i + 1 < outer_n {
-            outer.advance();
-        }
-    }
+    });
 
     debug_assert_eq!(out.len(), n);
     Array::from_vec(out, &[n])
@@ -857,27 +1046,26 @@ where
     let mut out = Vec::with_capacity(n);
     out.resize(n, to_acc(a.data[a.offset]));
 
-    let mut outer_cursor = StrideCursor::new(
+    let outer_runs = RunPlan::new(
         &plan.outer_shape,
         [&in_outer_strides, &out_outer_strides],
-        [a.offset() as isize, 0],
     );
-    for outer_i in 0..plan.outer_n {
-        let mut in_buf = outer_cursor.buffer_index(0) as isize;
-        let mut out_buf = outer_cursor.buffer_index(1) as isize;
-        let mut acc = to_acc(a.data[in_buf as usize]);
-        out[out_buf as usize] = acc;
-
-        for _ in 1..plan.axis_len {
-            in_buf += in_stride;
-            out_buf += out_stride;
-            acc = accumulate(acc, a.data[in_buf as usize]);
+    outer_runs.for_each_element(
+        [a.offset() as isize, 0],
+        |[input_base, output_base]| {
+            let mut in_buf = input_base as isize;
+            let mut out_buf = output_base as isize;
+            let mut acc = to_acc(a.data[in_buf as usize]);
             out[out_buf as usize] = acc;
-        }
-        if outer_i + 1 < plan.outer_n {
-            outer_cursor.advance();
-        }
-    }
+
+            for _ in 1..plan.axis_len {
+                in_buf += in_stride;
+                out_buf += out_stride;
+                acc = accumulate(acc, a.data[in_buf as usize]);
+                out[out_buf as usize] = acc;
+            }
+        },
+    );
 
     Array::from_vec(out, a.shape())
 }
@@ -904,8 +1092,11 @@ where
     }
 
     match reduction_path(a, &plan) {
-        ReductionPath::Contiguous(slice) => {
+        ReductionPath::SuffixContiguous(slice) => {
             var_contiguous_chunks(slice, &plan, &to_f64)
+        }
+        ReductionPath::PrefixContiguous(slice) => {
+            var_prefix_contiguous(slice, &plan, &to_f64)
         }
         ReductionPath::GeneralStrided => var_strided_general(a, &plan, &to_f64),
     }
@@ -989,6 +1180,40 @@ where
     Array::from_vec(out, &plan.out_shape)
 }
 
+fn var_prefix_contiguous<T, C>(
+    slice: &[T],
+    plan: &ReducePlan,
+    to_f64: &C,
+) -> Result<Array<f64>>
+where
+    T: Scalar,
+    C: Fn(T) -> f64,
+{
+    let count = plan.inner_n as f64;
+    let mut means = vec![0.0; plan.outer_n];
+    for row in slice.chunks_exact(plan.outer_n) {
+        for (sum, &value) in means.iter_mut().zip(row) {
+            *sum += to_f64(value);
+        }
+    }
+    for mean in &mut means {
+        *mean /= count;
+    }
+
+    let mut variances = vec![0.0; plan.outer_n];
+    for row in slice.chunks_exact(plan.outer_n) {
+        for ((sum, &mean), &value) in variances.iter_mut().zip(&means).zip(row)
+        {
+            let delta = to_f64(value) - mean;
+            *sum += delta * delta;
+        }
+    }
+    for variance in &mut variances {
+        *variance /= count;
+    }
+    Array::from_vec(variances, &plan.out_shape)
+}
+
 fn var_strided_general<T, C>(
     a: &Array<T>,
     plan: &ReducePlan,
@@ -1002,16 +1227,12 @@ where
     let mut out = Vec::with_capacity(plan.outer_n);
     let (outer_strides, reduced_strides) =
         plan.outer_reduced_strides(a.strides());
-    let mut outer_cursor = StrideCursor::new(
-        &plan.outer_shape,
-        [&outer_strides],
-        [a.offset() as isize],
-    );
+    let outer_runs = RunPlan::new(&plan.outer_shape, [&outer_strides]);
     let reduced = ReducedRuns::new(&plan.reduced_shape, &reduced_strides);
     let mut reduced_cursor = reduced.cursor(a.offset() as isize);
 
-    for outer_i in 0..plan.outer_n {
-        let base = outer_cursor.buffer_index(0) as isize;
+    outer_runs.for_each_element([a.offset() as isize], |[outer_base]| {
+        let base = outer_base as isize;
 
         reduced_cursor.reset([base]);
         let mut sum = 0.0;
@@ -1041,10 +1262,7 @@ where
             }
         }
         out.push(squared_deviation_sum / count);
-        if outer_i + 1 < plan.outer_n {
-            outer_cursor.advance();
-        }
-    }
+    });
 
     Array::from_vec(out, &plan.out_shape)
 }

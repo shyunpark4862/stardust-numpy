@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::reduce::axis::ReducePlan;
 use crate::reduce::kernels::{
     arg_extremum_axis, arg_extremum_flat, cumulate, map_owned_contiguous,
-    reduce_extremum, reduce_fold, reduce_sum, reduce_sum_plan, reduce_var,
+    reduce_fold, reduce_sum, reduce_sum_plan, reduce_var,
 };
 use crate::reduce::traits::{
     ExtremumReduce, LogicalReduce, MeanReduce, ProdReduce, SumReduce, VarReduce,
@@ -35,7 +35,7 @@ pub fn min<T: ExtremumReduce>(
     axes: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<Array<T>> {
-    reduce_extremum(a, axes, keepdims, "min", |c, b| c < b, T::is_nan)
+    T::reduce_min(a, axes, keepdims)
 }
 
 /// Maximum along `axes` (NaN propagates for `f64`).
@@ -44,7 +44,7 @@ pub fn max<T: ExtremumReduce>(
     axes: Option<&[isize]>,
     keepdims: bool,
 ) -> Result<Array<T>> {
-    reduce_extremum(a, axes, keepdims, "max", |c, b| c > b, T::is_nan)
+    T::reduce_max(a, axes, keepdims)
 }
 
 /// Arithmetic mean along `axes`.

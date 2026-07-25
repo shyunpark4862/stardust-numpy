@@ -45,6 +45,66 @@ fn prod_min_max() {
 }
 
 #[test]
+fn typed_min_max_kernels_preserve_semantics() {
+    let booleans =
+        Array::from_slice(&[true, true, false, true], &[2, 2]).unwrap();
+    assert_eq!(
+        min(&booleans, Some(&[1]), false).unwrap().to_vec(),
+        vec![true, false]
+    );
+    assert_eq!(
+        max(&booleans, Some(&[1]), false).unwrap().to_vec(),
+        vec![true, true]
+    );
+
+    let first_nan = f64::from_bits(0x7ff8_0000_0000_0123);
+    let second_nan = f64::from_bits(0x7ff8_0000_0000_0456);
+    let floats = Array::from_slice(
+        &[3.0, first_nan, -1.0, second_nan, 5.0, 2.0, 8.0, 1.0],
+        &[1, 8],
+    )
+    .unwrap();
+    assert_eq!(
+        min(&floats, Some(&[1]), false).unwrap().to_vec()[0].to_bits(),
+        f64::NAN.to_bits()
+    );
+    assert_eq!(
+        max(&floats, Some(&[1]), false).unwrap().to_vec()[0].to_bits(),
+        f64::NAN.to_bits()
+    );
+}
+
+#[test]
+fn prefix_schedule_handles_multi_axis_keepdims_and_nan_order() {
+    let values: Vec<i64> = (0..12).collect();
+    let a = Array::from_vec(values, &[2, 2, 3]).unwrap();
+    let axes = [0, 1];
+    let summed = sum(&a, Some(&axes), true).unwrap();
+    assert_eq!(summed.shape(), &[1, 1, 3]);
+    assert_eq!(summed.to_vec(), vec![18, 22, 26]);
+    assert_eq!(min(&a, Some(&axes), false).unwrap().to_vec(), vec![0, 1, 2]);
+    assert_eq!(
+        max(&a, Some(&axes), false).unwrap().to_vec(),
+        vec![9, 10, 11]
+    );
+    assert_eq!(
+        var(&a, Some(&axes), false).unwrap().to_vec(),
+        vec![11.25; 3]
+    );
+
+    let first_nan = f64::from_bits(0x7ff8_0000_0000_0123);
+    let second_nan = f64::from_bits(0x7ff8_0000_0000_0456);
+    let floats = Array::from_slice(
+        &[3.0, 4.0, first_nan, 2.0, second_nan, 8.0],
+        &[3, 2],
+    )
+    .unwrap();
+    let result = min(&floats, Some(&[0]), false).unwrap().to_vec();
+    assert!(result[0].is_nan());
+    assert_eq!(result[1], 2.0);
+}
+
+#[test]
 fn empty_sum_prod_ok_min_err() {
     let a = Array::from_slice(&[] as &[i64], &[0]).unwrap();
     assert_eq!(sum(&a, None, false).unwrap().item().unwrap(), 0);

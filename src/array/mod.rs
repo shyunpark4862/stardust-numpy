@@ -201,11 +201,8 @@ impl<T: Scalar> Array<T> {
             return slice.to_vec();
         }
 
-        use crate::stride_iter::StrideIter;
-
-        StrideIter::new(&self.shape, &self.strides, self.offset)
-            .map(|physical| self.data[physical])
-            .collect()
+        let plan = crate::run::RunPlan::new(&self.shape, [&self.strides]);
+        crate::run::collect_unary(&plan, &self.data, self.offset, |value| value)
     }
 }
 
@@ -241,5 +238,19 @@ mod tests {
         let a = Array::from_vec(vec![1_i64, 2, 3, 4], &[2, 2]).unwrap();
         assert_eq!(a.shape(), &[2, 2]);
         assert_eq!(a.get(&[1, 0]).unwrap(), 3);
+    }
+
+    #[test]
+    fn to_vec_handles_negative_stride_and_nonzero_offset() {
+        let a = Array::from_arc_raw_parts(
+            Arc::new(vec![0_i64, 1, 2, 3, 4, 5, 6, 7]),
+            vec![2, 2],
+            vec![3, -1],
+            4,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(a.to_vec(), vec![4, 3, 7, 6]);
     }
 }
