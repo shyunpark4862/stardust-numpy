@@ -83,6 +83,7 @@ impl<T: Scalar> Array<T> {
                 strides_ndim: strides.len(),
             });
         }
+        validate_layout_bounds(data.len(), &shape, &strides, offset)?;
         Ok(Self {
             data,
             shape,
@@ -94,12 +95,7 @@ impl<T: Scalar> Array<T> {
 
     /// Return the single element of a 0-D array.
     pub fn item(&self) -> Result<T> {
-        if self.ndim() != 0 {
-            return Err(Error::InvalidArgument(format!(
-                "item() requires a 0-D array, got ndim={}",
-                self.ndim()
-            )));
-        }
+        debug_assert_eq!(self.ndim(), 0, "item() requires a 0-D array");
         Ok(self.data[self.offset])
     }
 
@@ -235,6 +231,39 @@ impl<T: Scalar> Array<T> {
     }
 }
 
+fn validate_layout_bounds(
+    buffer_len: usize,
+    shape: &[usize],
+    strides: &[isize],
+    offset: usize,
+) -> Result<()> {
+    if shape.contains(&0) {
+        if offset > buffer_len {
+            return Err(Error::InvalidArgument(
+                "empty array offset exceeds backing buffer".into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut minimum = offset as i128;
+    let mut maximum = offset as i128;
+    for (&length, &stride) in shape.iter().zip(strides) {
+        let extent = (length - 1) as i128 * stride as i128;
+        if extent < 0 {
+            minimum += extent;
+        } else {
+            maximum += extent;
+        }
+    }
+    if minimum < 0 || maximum >= buffer_len as i128 {
+        return Err(Error::InvalidArgument(format!(
+            "array layout [{minimum}, {maximum}] exceeds backing buffer of length {buffer_len}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +310,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(a.to_vec(), vec![4, 3, 7, 6]);
+    }
+
+    #[test]
+    fn shared_layout_must_stay_inside_backing_buffer() {
+        let data = Arc::new(vec![1_i64, 2, 3]);
+        assert!(Array::from_shared_parts(
+            Arc::clone(&data),
+            vec![3],
+            vec![1],
+            1,
+            true,
+        )
+        .is_err());
+        assert!(
+            Array::from_shared_parts(data, vec![3], vec![-1], 1, true).is_err()
+        );
     }
 }

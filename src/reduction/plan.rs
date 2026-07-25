@@ -1,19 +1,15 @@
 //! Reduction-axis geometry helpers.
 
 use crate::axis::normalize_axis_list;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::shape::size_of_shape;
 
-/// Normalize one or more axes; rejects duplicates. Returns sorted unique axes.
-fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Result<Vec<usize>> {
-    if axes.is_empty() {
-        return Err(Error::InvalidArgument(
-            "axes tuple must be non-empty".into(),
-        ));
-    }
-    let mut out = normalize_axis_list(axes, ndim)?;
+/// Normalize one or more axes. Returns sorted unique axes.
+fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Vec<usize> {
+    let mut out = normalize_axis_list(axes, ndim);
     out.sort_unstable();
-    Ok(out)
+    out.dedup();
+    out
 }
 
 /// Axes to reduce: `None` → all axes; otherwise normalized and sorted.
@@ -21,10 +17,11 @@ pub(crate) fn resolve_reduced_axes(
     ndim: usize,
     axes: Option<&[isize]>,
 ) -> Result<Vec<usize>> {
-    match axes {
-        None => Ok((0..ndim).collect()),
+    Ok(match axes {
+        None => (0..ndim).collect(),
+        Some([]) => vec![],
         Some(axes) => normalize_reduction_axes(axes, ndim),
-    }
+    })
 }
 
 /// Shape after removing `reduced` axes (ascending).
@@ -248,10 +245,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_negative_and_dup() {
-        assert_eq!(normalize_reduction_axes(&[-1, 0], 3).unwrap(), vec![0, 2]);
-        assert!(normalize_reduction_axes(&[0, 0], 2).is_err());
-        assert!(normalize_reduction_axes(&[3], 2).is_err());
+    fn normalize_negative_axes() {
+        assert_eq!(normalize_reduction_axes(&[-1, 0], 3), vec![0, 2]);
     }
 
     #[test]

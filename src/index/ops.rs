@@ -125,18 +125,15 @@ fn basic_view_meta<T: Scalar>(
                 source_axis += 1;
             }
             PreparedEntry::IntegerArray(_) => {
-                return Err(Error::InvalidArgument(
-                    "internal error: fancy entry on basic path".into(),
-                ));
+                debug_assert!(
+                    false,
+                    "internal error: fancy entry on basic path"
+                );
             }
         }
     }
 
-    if offset < 0 {
-        return Err(Error::InvalidArgument(
-            "indexing produced a negative buffer offset".into(),
-        ));
-    }
+    debug_assert!(offset >= 0, "indexing produced a negative buffer offset");
 
     Ok(BasicViewMeta {
         shape,
@@ -312,17 +309,11 @@ fn prepare_scatter_source<T: Scalar>(
     target_shape: &[usize],
 ) -> Result<Array<T>> {
     let aligned = if destination.shares_buffer_with(values) {
-        values.copy().broadcast_to(target_shape)
+        values.copy().broadcast_to(target_shape)?
     } else {
-        values.broadcast_to(target_shape)
+        values.broadcast_to(target_shape)?
     };
-    aligned.map_err(|_| {
-        Error::InvalidArgument(format!(
-            "could not broadcast assignment from {:?} onto {:?}",
-            values.shape(),
-            target_shape
-        ))
-    })
+    Ok(aligned)
 }
 
 /// Yields buffer offsets into the source array for each fancy-result element.

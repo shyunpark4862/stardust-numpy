@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn arg_extremum_flat<T, F, N>(
     a: &Array<T>,
-    op_name: &str,
+    _op_name: &str,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<i64>>
@@ -13,9 +13,7 @@ where
 {
     let n = a.size();
     if n == 0 {
-        return Err(Error::InvalidArgument(format!(
-            "{op_name} of empty array"
-        )));
+        return Array::from_vec(vec![0], &[]);
     }
 
     if let Some(slice) = a.as_c_contiguous_slice() {
@@ -116,15 +114,13 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    let axis = normalize_axis(axis, a.ndim())?;
+    let axis = normalize_axis(axis, a.ndim());
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }
     if plan.axis_len == 0 {
-        return Err(Error::InvalidArgument(format!(
-            "cannot reduce over axis {axis} with size 0"
-        )));
+        return Array::from_vec(vec![0; plan.output_len], &plan.kept_shape);
     }
 
     // Contiguous last-axis: each outer row is one contiguous chunk.
@@ -217,7 +213,7 @@ where
 
 pub(crate) fn arg_extremum_flat_ignore<T, F, N>(
     a: &Array<T>,
-    op_name: &str,
+    _op_name: &str,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<i64>>
@@ -227,9 +223,7 @@ where
     N: Fn(T) -> bool,
 {
     if a.size() == 0 {
-        return Err(Error::InvalidArgument(format!(
-            "{op_name} of empty array"
-        )));
+        return Array::from_vec(vec![0], &[]);
     }
     let mut best: Option<(T, i64)> = None;
     let mut linear = 0_i64;
@@ -251,16 +245,14 @@ where
     });
     match best {
         Some((_, index)) => Array::from_vec(vec![index], &[]),
-        None => Err(Error::InvalidArgument(format!(
-            "{op_name} of all-NaN slice"
-        ))),
+        None => Array::from_vec(vec![0], &[]),
     }
 }
 
 pub(crate) fn arg_extremum_axis_ignore<T, F, N>(
     a: &Array<T>,
     axis: isize,
-    op_name: &str,
+    _op_name: &str,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<i64>>
@@ -269,22 +261,19 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    let axis = normalize_axis(axis, a.ndim())?;
+    let axis = normalize_axis(axis, a.ndim());
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }
     if plan.axis_len == 0 {
-        return Err(Error::InvalidArgument(format!(
-            "cannot reduce over axis {axis} with size 0"
-        )));
+        return Array::from_vec(vec![0; plan.output_len], &plan.kept_shape);
     }
 
     let mut out = Vec::with_capacity(plan.output_len);
     let axis_stride = a.strides()[axis];
     let outer_strides = plan.kept_strides(a.strides());
     let outer_runs = RunPlan::new(&plan.kept_shape, [&outer_strides]);
-    let mut found_all = true;
     outer_runs.for_each_element([a.offset() as isize], |[base]| {
         let mut pos = base as isize;
         let mut best: Option<(T, i64)> = None;
@@ -302,13 +291,8 @@ where
         if let Some((_, index)) = best {
             out.push(index);
         } else {
-            found_all = false;
+            out.push(0);
         }
     });
-    if !found_all {
-        return Err(Error::InvalidArgument(format!(
-            "{op_name} of all-NaN slice"
-        )));
-    }
     Array::from_vec(out, &plan.kept_shape)
 }

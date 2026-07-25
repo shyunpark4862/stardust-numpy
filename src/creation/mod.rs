@@ -55,11 +55,6 @@ mod tests {
     }
 
     #[test]
-    fn arange_step_zero_err() {
-        assert!(arange(0, 3, 0).is_err());
-    }
-
-    #[test]
     fn spaces_endpoints_and_small_counts() {
         assert_eq!(linspace(0.0, 1.0, 0, true).unwrap().shape(), &[0]);
         assert_eq!(linspace(2.0, 8.0, 1, false).unwrap().to_vec(), vec![2.0]);
@@ -91,9 +86,6 @@ mod tests {
         {
             assert_relative_eq!(actual, &expected);
         }
-        assert!(geomspace(0.0, 1.0, 0, true).is_err());
-        assert!(geomspace(-1.0, 1.0, 5, true).is_err());
-        assert!(logspace(0.0, 1.0, 5, true, 0.0).is_err());
     }
 
     #[test]
@@ -117,16 +109,13 @@ mod tests {
     }
 
     #[test]
-    fn meshgrid_empty_single_and_invalid_rank() {
+    fn meshgrid_empty_single() {
         let none: Vec<&Array<i64>> = Vec::new();
         assert!(meshgrid(&none, MeshgridIndexing::Xy).unwrap().is_empty());
 
         let x = Array::from_slice(&[1_i64, 2], &[2]).unwrap();
         let one = meshgrid(&[&x], MeshgridIndexing::Xy).unwrap();
         assert_eq!(one[0].shape(), &[2]);
-
-        let matrix = Array::from_slice(&[1_i64, 2], &[1, 2]).unwrap();
-        assert!(meshgrid(&[&matrix], MeshgridIndexing::Ij).is_err());
     }
 
     #[test]

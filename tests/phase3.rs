@@ -125,12 +125,6 @@ fn boolean_mask_1d() -> Result<()> {
 }
 
 #[test]
-fn boolean_mask_length_mismatch() {
-    let a = Array::from_slice(&[10_i64, 20, 30], &[3]).unwrap();
-    assert!(gather(&a, &[bool_arr(&[true, false])]).is_err());
-}
-
-#[test]
 fn boolean_mask_first_axis_2d() -> Result<()> {
     let a = Array::from_slice(&[10_i64, 20, 30, 40, 50, 60], &[3, 2])?;
     let b = gather(&a, &[bool_arr(&[true, false, true])])?;

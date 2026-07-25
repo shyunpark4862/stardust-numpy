@@ -2,7 +2,7 @@
 
 use sdnp::{
     all, any, argmax, argmin, cumprod, cumsum, max, mean, min, prod, std, sum,
-    var, Array, Error,
+    var, Array,
 };
 
 #[test]
@@ -176,7 +176,7 @@ fn prefix_schedule_handles_multi_axis_keepdims_and_nan_order() {
 }
 
 #[test]
-fn empty_sum_prod_ok_min_err() {
+fn empty_sum_prod_ok() {
     let a = Array::from_slice(&[] as &[i64], &[0]).unwrap();
     assert_eq!(
         sum(&a, None, false, sdnp::NanPolicy::Propagate)
@@ -192,14 +192,6 @@ fn empty_sum_prod_ok_min_err() {
             .unwrap(),
         1
     );
-    assert!(matches!(
-        min(&a, None, false, sdnp::NanPolicy::Propagate),
-        Err(Error::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        mean(&a, None, false, sdnp::NanPolicy::Propagate),
-        Err(Error::InvalidArgument(_))
-    ));
 }
 
 #[test]
@@ -563,12 +555,6 @@ fn any_all() {
 }
 
 #[test]
-fn duplicate_axis_err() {
-    let a = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-    assert!(sum(&a, Some(&[0, 0]), false, sdnp::NanPolicy::Propagate).is_err());
-}
-
-#[test]
 fn empty_outer_vs_empty_inner() {
     // shape (0, 3): reducing axis 1 → empty outer → empty result
     let a = Array::from_slice(&[] as &[i64], &[0, 3]).unwrap();
@@ -583,21 +569,13 @@ fn empty_outer_vs_empty_inner() {
         mean(&a, Some(&[1]), false, sdnp::NanPolicy::Propagate).unwrap();
     assert_eq!(mean_out.shape(), &[0]);
 
-    // reducing axis 0 → empty inner → identity / error
+    // reducing axis 0 → empty inner
     assert_eq!(
         sum(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate)
             .unwrap()
             .to_vec(),
         vec![0, 0, 0]
     );
-    assert!(matches!(
-        min(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate),
-        Err(Error::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        mean(&a, Some(&[0]), false, sdnp::NanPolicy::Propagate),
-        Err(Error::InvalidArgument(_))
-    ));
 }
 
 #[test]

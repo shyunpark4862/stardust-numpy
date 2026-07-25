@@ -133,7 +133,6 @@ fn nditer_broadcasts_and_handles_strided_operands() -> Result<()> {
 fn nditer_validates_operands_and_empty_shapes() {
     let left = Array::from_slice(&[1_i64, 2], &[2]).unwrap();
     let right = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();
-    assert!(matches!(nditer::<i64>(&[]), Err(Error::InvalidArgument(_))));
     assert!(matches!(
         nditer(&[&left, &right]),
         Err(Error::Broadcast { .. })
@@ -152,9 +151,9 @@ fn nditer_validates_operands_and_empty_shapes() {
 #[test]
 fn axis0_iteration_returns_cached_shared_views() -> Result<()> {
     let matrix = Array::from_slice(&[1_i64, 2, 3, 4, 5, 6], &[2, 3])?;
-    assert_eq!(matrix.axis0_len()?, 2);
+    assert_eq!(matrix.axis0_len(), 2);
 
-    let mut rows = matrix.iter_axis0()?;
+    let mut rows = matrix.iter_axis0();
     assert_eq!(rows.len(), 2);
     let first = rows.next().unwrap();
     let second = rows.next().unwrap();
@@ -165,7 +164,7 @@ fn axis0_iteration_returns_cached_shared_views() -> Result<()> {
     assert!(second.shares_buffer_with(&matrix));
 
     let vector = Array::from_slice(&[10_i64, 20], &[2])?;
-    let scalars = vector.iter_axis0()?.collect::<Vec<_>>();
+    let scalars = vector.iter_axis0().collect::<Vec<_>>();
     assert_eq!(scalars[0].shape(), &[] as &[usize]);
     assert_eq!(scalars[0].item()?, 10);
     assert_eq!(scalars[1].item()?, 20);
@@ -179,11 +178,11 @@ fn axis0_iteration_preserves_layout_and_copy_on_write() -> Result<()> {
         &matrix,
         &[IndexSpec::slice(None, None, Some(-1)), IndexSpec::full()],
     )?;
-    let rows = reversed.iter_axis0()?.collect::<Vec<_>>();
+    let rows = reversed.iter_axis0().collect::<Vec<_>>();
     assert_eq!(rows[0].to_vec(), vec![4, 5, 6]);
     assert_eq!(rows[1].to_vec(), vec![1, 2, 3]);
 
-    let mut row = matrix.iter_axis0()?.next().unwrap();
+    let mut row = matrix.iter_axis0().next().unwrap();
     assert!(row.shares_buffer_with(&matrix));
     row.set(&[0], 99)?;
     assert_eq!(matrix.get(&[0, 0])?, 1);
@@ -193,19 +192,12 @@ fn axis0_iteration_preserves_layout_and_copy_on_write() -> Result<()> {
 }
 
 #[test]
-fn axis0_iteration_handles_empty_axes_and_rejects_zero_dimensional_arrays() {
+fn axis0_iteration_handles_empty_axes() {
     let no_rows = Array::from_vec(Vec::<i64>::new(), &[0, 3]).unwrap();
-    assert_eq!(no_rows.iter_axis0().unwrap().count(), 0);
+    assert_eq!(no_rows.iter_axis0().count(), 0);
 
     let empty_rows = Array::from_vec(Vec::<i64>::new(), &[3, 0]).unwrap();
-    let rows = empty_rows.iter_axis0().unwrap().collect::<Vec<_>>();
+    let rows = empty_rows.iter_axis0().collect::<Vec<_>>();
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|row| row.shape() == [0]));
-
-    let scalar = Array::from_slice(&[1_i64], &[]).unwrap();
-    assert!(matches!(scalar.axis0_len(), Err(Error::InvalidArgument(_))));
-    assert!(matches!(
-        scalar.iter_axis0(),
-        Err(Error::InvalidArgument(_))
-    ));
 }

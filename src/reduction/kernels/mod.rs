@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::array::Array;
 use crate::axis::normalize_axis;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::reduction::plan::{
     AxisTraversalPlan, ReducePlan, TraversalSchedule,
 };

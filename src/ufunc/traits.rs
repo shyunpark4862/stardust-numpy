@@ -188,7 +188,9 @@ impl FallibleElemDiv for i64 {
         if rhs == 0 {
             return Err(Error::DivideByZero);
         }
-        Ok(self / rhs)
+        self.checked_div(rhs).ok_or_else(|| {
+            Error::InvalidArgument("integer division overflow".into())
+        })
     }
 }
 impl FallibleElemTruncDiv for i64 {
@@ -203,20 +205,17 @@ impl FallibleElemRem for i64 {
         if rhs == 0 {
             return Err(Error::DivideByZero);
         }
-        Ok(self % rhs)
+        self.checked_rem(rhs).ok_or_else(|| {
+            Error::InvalidArgument("integer remainder overflow".into())
+        })
     }
 }
 impl FallibleElemPow for i64 {
     #[inline]
     fn elem_pow(self, rhs: Self) -> Result<Self> {
-        if rhs < 0 {
+        if rhs < 0 || rhs > u32::MAX as i64 {
             return Err(Error::InvalidArgument(
-                "i64 power with negative exponent is not supported".into(),
-            ));
-        }
-        if rhs > u32::MAX as i64 {
-            return Err(Error::InvalidArgument(
-                "i64 power exponent too large".into(),
+                "i64 power exponent must be in 0..=u32::MAX".into(),
             ));
         }
         Ok(self.pow(rhs as u32))

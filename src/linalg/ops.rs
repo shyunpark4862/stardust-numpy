@@ -2,7 +2,7 @@
 
 use crate::array::Array;
 use crate::dtype::{CastTo, Promote, Scalar};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::linalg::geometry::{plan_dot, DiagonalPlan, MatmulPlan};
 use crate::linalg::kernels::{
     contract, gather_diagonal, trace_diagonal, vector_dot,
@@ -71,13 +71,11 @@ where
     R: Scalar + CastTo<<L as Promote<R>>::Output>,
     <L as Promote<R>>::Output: ContractElement,
 {
-    if left.size() != right.size() {
-        return Err(Error::InvalidArgument(format!(
-            "vdot requires equal flattened sizes, got {} and {}",
-            left.size(),
-            right.size()
-        )));
-    }
+    debug_assert_eq!(
+        left.size(),
+        right.size(),
+        "vdot requires equal flattened sizes"
+    );
     vector_dot(left, right, true)
 }
 

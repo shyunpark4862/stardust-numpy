@@ -4,7 +4,7 @@ use crate::array::Array;
 use crate::axis::normalize_axis;
 use crate::broadcast::broadcast_shape;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::linalg::diagonal_geometry::{diagonal_geometry, DiagonalGeometry};
 
 /// Supported rank combinations for `dot`.
@@ -44,9 +44,7 @@ impl MatmulPlan {
         right: &Array<R>,
     ) -> Result<Self> {
         if left.ndim() == 0 || right.ndim() == 0 {
-            return Err(Error::InvalidArgument(
-                "matmul does not support 0-D operands".into(),
-            ));
+            debug_assert!(false, "matmul does not support 0-D operands");
         }
 
         let left_was_vector = left.ndim() == 1;
@@ -80,15 +78,10 @@ impl MatmulPlan {
             )
         };
 
-        if contraction_len != right_contraction_len {
-            return Err(Error::InvalidArgument(format!(
-                "matmul inner dimensions differ: {} and {} for shapes {:?} and {:?}",
-                contraction_len,
-                right_contraction_len,
-                left.shape(),
-                right.shape()
-            )));
-        }
+        debug_assert_eq!(
+            contraction_len, right_contraction_len,
+            "matmul inner dimensions differ"
+        );
 
         let left_batch_rank = left.ndim().saturating_sub(2);
         let right_batch_rank = right.ndim().saturating_sub(2);
@@ -146,11 +139,8 @@ pub(crate) fn plan_dot<L: Scalar, R: Scalar>(
         (1, 2) => DotKind::VectorMatrix,
         (2, 2) => DotKind::MatrixMatrix,
         _ => {
-            return Err(Error::InvalidArgument(format!(
-                "dot supports only 1-D or 2-D operands, got ndim {} and {}",
-                left.ndim(),
-                right.ndim()
-            )))
+            debug_assert!(false, "dot supports only 1-D or 2-D operands");
+            DotKind::MatrixMatrix
         }
     };
     Ok((kind, MatmulPlan::new(left, right)?))
@@ -197,19 +187,9 @@ impl DiagonalPlan {
         axis1: isize,
         axis2: isize,
     ) -> Result<Self> {
-        if array.ndim() < 2 {
-            return Err(Error::InvalidArgument(format!(
-                "diagonal operations require at least 2 dimensions, got ndim={}",
-                array.ndim()
-            )));
-        }
-        let axis1 = normalize_axis(axis1, array.ndim())?;
-        let axis2 = normalize_axis(axis2, array.ndim())?;
-        if axis1 == axis2 {
-            return Err(Error::InvalidArgument(
-                "axis1 and axis2 must differ".into(),
-            ));
-        }
+        let axis1 = normalize_axis(axis1, array.ndim());
+        let axis2 = normalize_axis(axis2, array.ndim());
+        debug_assert_ne!(axis1, axis2, "axis1 and axis2 must differ");
 
         let geometry = diagonal_geometry(
             array.shape()[axis1],

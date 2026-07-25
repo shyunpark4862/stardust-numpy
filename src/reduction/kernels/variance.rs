@@ -15,9 +15,10 @@ where
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
     if plan.reduction_is_empty() {
-        return Err(Error::InvalidArgument(
-            "var of empty array / empty axis".into(),
-        ));
+        return Array::from_vec(
+            vec![f64::NAN; plan.output_len],
+            &plan.output_shape,
+        );
     }
 
     match reduction_path(a, &plan) {
@@ -41,9 +42,10 @@ pub(crate) fn reduce_var_ignore_f64(
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
     if plan.reduction_is_empty() {
-        return Err(Error::InvalidArgument(
-            "var of empty array / empty axis".into(),
-        ));
+        return Array::from_vec(
+            vec![f64::NAN; plan.output_len],
+            &plan.output_shape,
+        );
     }
     match reduction_path(a, &plan) {
         ReductionPath::SuffixContiguous(slice) => {

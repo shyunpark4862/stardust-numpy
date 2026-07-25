@@ -10,9 +10,7 @@ pub(crate) fn slice_length(
     stop: isize,
     step: isize,
 ) -> Result<usize> {
-    if step == 0 {
-        return Err(Error::InvalidArgument("slice step cannot be zero".into()));
-    }
+    debug_assert!(step != 0, "slice step cannot be zero");
     if (stop - start) * step <= 0 {
         return Ok(0);
     }
@@ -65,9 +63,7 @@ pub(crate) fn resolve_slice(
     axis_len: usize,
 ) -> Result<(isize, isize, isize)> {
     let step = step.unwrap_or(1);
-    if step == 0 {
-        return Err(Error::InvalidArgument("slice step cannot be zero".into()));
-    }
+    debug_assert!(step != 0, "slice step cannot be zero");
     let len = axis_len as i64;
 
     let (start, stop) = if step > 0 {
@@ -107,7 +103,6 @@ mod tests {
     fn slice_length_basic() {
         assert_eq!(slice_length(0, 5, 1).unwrap(), 5);
         assert_eq!(slice_length(3, 1, 1).unwrap(), 0);
-        assert!(slice_length(0, 5, 0).is_err());
     }
 
     #[test]

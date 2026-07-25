@@ -17,7 +17,7 @@ pub fn sort<T: SortElement>(
     let mut data = a.to_vec();
     let shape = match axis {
         Some(axis) => {
-            let axis = normalize_axis(axis, a.ndim())?;
+            let axis = normalize_axis(axis, a.ndim());
             sort_values_along_axis(&mut data, a.shape(), axis);
             a.shape().to_vec()
         }
@@ -41,7 +41,7 @@ pub fn argsort<T: SortElement>(
     let data = a.to_vec();
     let (indices, shape) = match axis {
         Some(axis) => {
-            let axis = normalize_axis(axis, a.ndim())?;
+            let axis = normalize_axis(axis, a.ndim());
             (
                 argsort_along_axis(&data, a.shape(), axis),
                 a.shape().to_vec(),

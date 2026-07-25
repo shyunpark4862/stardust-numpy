@@ -463,16 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn power_i64_negative_exponent_errors() {
-        let a = Array::from_slice(&[2_i64], &[1]).unwrap();
-        let b = Array::from_slice(&[-1_i64], &[1]).unwrap();
-        assert!(matches!(
-            power(&a, &b).unwrap_err(),
-            Error::InvalidArgument(_)
-        ));
-    }
-
-    #[test]
     fn power_f64_invalid_is_nan() {
         let a = Array::from_slice(&[-1.0_f64], &[1]).unwrap();
         let b = Array::from_slice(&[0.5_f64], &[1]).unwrap();

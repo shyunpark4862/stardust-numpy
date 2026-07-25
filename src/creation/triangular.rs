@@ -2,7 +2,7 @@ use num_traits::{One, Zero};
 
 use crate::array::Array;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::linalg::diagonal_geometry::{
     diagonal_geometry, is_lower_triangle, is_upper_triangle,
 };
@@ -78,9 +78,10 @@ fn triangle_copy<T: Scalar + Zero>(
     lower: bool,
 ) -> Result<Array<T>> {
     if array.ndim() == 0 {
-        return Err(Error::InvalidArgument(
-            "tril and triu require at least 1 dimension".into(),
-        ));
+        debug_assert!(
+            array.ndim() > 0,
+            "tril and triu require at least 1 dimension"
+        );
     }
 
     if array.ndim() == 1 {
@@ -134,11 +135,7 @@ pub fn diag<T: Scalar + Zero>(array: &Array<T>, k: isize) -> Result<Array<T>> {
         1 => {
             let side = array.shape()[0]
                 .checked_add(k.unsigned_abs())
-                .ok_or_else(|| {
-                    Error::InvalidArgument(
-                        "diag output dimension overflows usize".into(),
-                    )
-                })?;
+                .expect("diag output dimension overflows usize");
             let mut output =
                 vec![T::zero(); checked_size_of_shape(&[side, side])?];
             let diagonal = diagonal_geometry(side, side, k);
@@ -152,8 +149,12 @@ pub fn diag<T: Scalar + Zero>(array: &Array<T>, k: isize) -> Result<Array<T>> {
             Array::from_vec(output, &[side, side])
         }
         2 => crate::linalg::diagonal(array, k, 0, 1),
-        ndim => Err(Error::InvalidArgument(format!(
-            "diag requires a 1-D or 2-D array, got ndim={ndim}"
-        ))),
+        ndim => {
+            debug_assert!(
+                ndim <= 2,
+                "diag requires a 1-D or 2-D array, got ndim={ndim}"
+            );
+            crate::linalg::diagonal(array, k, 0, 1)
+        }
     }
 }

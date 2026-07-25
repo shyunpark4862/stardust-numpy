@@ -1,4 +1,11 @@
 //! Error types for `sdnp`.
+//!
+//! ## Validation layers
+//!
+//! - **Python binding (`sdnp-py`)**: user-input parsing and policy.
+//! - **Core**: memory and layout invariants only (`IndexOutOfBounds`,
+//!   `Broadcast`, `ReadOnly`, `BufferSizeMismatch`, `DivideByZero`, …).
+//!   Other misuse is caught by `debug_assert` in debug builds.
 
 use thiserror::Error;
 
@@ -44,7 +51,7 @@ pub enum Error {
         axis_len: usize,
     },
 
-    /// Axis number out of bounds for an array rank.
+    /// Legacy axis error retained for Python mapping compatibility.
     #[error("axis {axis} is out of bounds for array of dimension {ndim}")]
     AxisOutOfBounds {
         /// Requested, possibly-negative axis.
@@ -61,7 +68,7 @@ pub enum Error {
     #[error("division by zero")]
     DivideByZero,
 
-    /// Generic invalid argument.
+    /// Reserved for rare internal paths; prefer `debug_assert` for caller misuse.
     #[error("{0}")]
     InvalidArgument(String),
 }

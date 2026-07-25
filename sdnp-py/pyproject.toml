@@ -1,0 +1,20 @@
+[project]
+name = "sdnp"
+version = "0.1.0"
+description = "Educational NumPy-style arrays backed by Rust sdnp"
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["python-tests"]

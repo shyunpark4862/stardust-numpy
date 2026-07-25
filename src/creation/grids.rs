@@ -1,6 +1,6 @@
 use crate::array::Array;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Axis ordering used by [`meshgrid`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,12 +25,7 @@ pub fn meshgrid<T: Scalar>(
     indexing: MeshgridIndexing,
 ) -> Result<Vec<Array<T>>> {
     for array in arrays {
-        if array.ndim() != 1 {
-            return Err(Error::InvalidArgument(format!(
-                "meshgrid inputs must be 1-D, got ndim={}",
-                array.ndim()
-            )));
-        }
+        debug_assert_eq!(array.ndim(), 1, "meshgrid inputs must be 1-D");
     }
 
     let ndim = arrays.len();
@@ -50,12 +45,7 @@ pub fn meshgrid<T: Scalar>(
                 _ => input_axis,
             };
             let mut reshape = vec![1_isize; ndim];
-            reshape[output_axis] =
-                isize::try_from(array.shape()[0]).map_err(|_| {
-                    Error::InvalidArgument(
-                        "meshgrid input length exceeds isize::MAX".into(),
-                    )
-                })?;
+            reshape[output_axis] = array.shape()[0] as isize;
             array.reshape(&reshape)?.broadcast_to(&output_shape)
         })
         .collect()

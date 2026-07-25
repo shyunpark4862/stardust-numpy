@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "sdnp-py"]
+resolver = "2"
+
 [package]
 name = "sdnp"
 version = "0.1.0"

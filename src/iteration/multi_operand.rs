@@ -1,7 +1,7 @@
 use crate::array::Array;
 use crate::broadcast::broadcast_arrays;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::index::advance_multi_index;
 use crate::shape::{checked_size_of_shape, offset_at};
 
@@ -20,11 +20,7 @@ pub struct NdIter<T: Scalar> {
 
 /// Iterate over one or more broadcast-compatible arrays in lockstep.
 pub fn nditer<T: Scalar>(operands: &[&Array<T>]) -> Result<NdIter<T>> {
-    if operands.is_empty() {
-        return Err(Error::InvalidArgument(
-            "nditer requires at least one operand".into(),
-        ));
-    }
+    debug_assert!(!operands.is_empty(), "nditer requires at least one operand");
 
     let operands = broadcast_arrays(operands)?;
     let shape = operands[0].shape().to_vec();

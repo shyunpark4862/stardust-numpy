@@ -1,0 +1,16 @@
+[package]
+name = "sdnp-py"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 Python bindings for sdnp"
+license = "MIT"
+
+[lib]
+name = "sdnp"
+crate-type = ["cdylib"]
+
+[dependencies]
+sdnp = { path = ".." }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+num-complex = "0.4"
+num-traits = "0.2"

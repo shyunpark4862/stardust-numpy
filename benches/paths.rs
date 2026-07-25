@@ -1227,7 +1227,6 @@ fn bench_phase7(c: &mut Criterion) {
         b.iter(|| {
             let checksum = black_box(&contiguous)
                 .iter_axis0()
-                .unwrap()
                 .fold(0_usize, |sum, row| sum + black_box(row.size()));
             black_box(checksum)
         })

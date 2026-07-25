@@ -60,13 +60,13 @@ impl<T: Scalar> Array<T> {
     }
 
     fn checked_offset(&self, indices: &[usize]) -> Result<usize> {
-        if indices.len() != self.ndim() {
-            return Err(crate::error::Error::InvalidArgument(format!(
-                "expected {} indices, got {}",
-                self.ndim(),
-                indices.len()
-            )));
-        }
+        debug_assert_eq!(
+            indices.len(),
+            self.ndim(),
+            "expected {} indices, got {}",
+            self.ndim(),
+            indices.len()
+        );
         for (&i, &dim) in indices.iter().zip(self.shape.iter()) {
             if i >= dim {
                 return Err(crate::error::Error::IndexOutOfBounds {

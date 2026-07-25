@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::array::Array;
 use crate::axis::{normalize_axis_list, normalize_insert_axis};
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::shape::{c_order_strides, size_of_shape};
 
 /// Insert a size-one axis without copying the backing buffer.
@@ -13,7 +13,7 @@ pub(crate) fn insert_axis_view<T: Scalar>(
     array: &Array<T>,
     axis: isize,
 ) -> Result<Array<T>> {
-    let axis = normalize_insert_axis(axis, array.ndim())?;
+    let axis = normalize_insert_axis(axis, array.ndim());
     let mut shape = array.shape().to_vec();
     let mut strides = array.strides().to_vec();
     shape.insert(axis, 1);
@@ -59,22 +59,8 @@ impl<T: Scalar> Array<T> {
     /// `axes` must be a permutation of `0..ndim`; negative axes count from
     /// the end.
     pub fn permute_axes(&self, axes: &[isize]) -> Result<Array<T>> {
-        if axes.len() != self.ndim() {
-            return Err(Error::InvalidArgument(format!(
-                "axes length {} does not match ndim {}",
-                axes.len(),
-                self.ndim()
-            )));
-        }
-        let axes =
-            normalize_axis_list(axes, self.ndim()).map_err(
-                |error| match error {
-                    Error::InvalidArgument(_) => Error::InvalidArgument(
-                        "axes must be a permutation of 0..ndim-1".into(),
-                    ),
-                    other => other,
-                },
-            )?;
+        debug_assert_eq!(axes.len(), self.ndim());
+        let axes = normalize_axis_list(axes, self.ndim());
         let shape: Vec<usize> = axes.iter().map(|&a| self.shape[a]).collect();
         let strides: Vec<isize> =
             axes.iter().map(|&a| self.strides[a]).collect();
@@ -93,7 +79,7 @@ impl<T: Scalar> Array<T> {
     /// array is C-contiguous; otherwise returns a contiguous copy with the
     /// new shape.
     pub fn reshape(&self, shape: &[isize]) -> Result<Array<T>> {
-        let new_shape = resolve_reshape(shape, self.size())?;
+        let new_shape = resolve_reshape(shape, self.size());
         if self.is_c_contiguous() {
             let strides = c_order_strides(&new_shape);
             Self::from_shared_parts(
@@ -124,13 +110,8 @@ impl<T: Scalar> Array<T> {
                 }
             }
             Some(axes) => {
-                for axis in normalize_axis_list(axes, self.ndim())? {
-                    let length = self.shape[axis];
-                    if length != 1 {
-                        return Err(Error::InvalidArgument(format!(
-                            "cannot squeeze axis {axis} with length {length}"
-                        )));
-                    }
+                for axis in normalize_axis_list(axes, self.ndim()) {
+                    debug_assert_eq!(self.shape[axis], 1);
                     remove[axis] = true;
                 }
             }
@@ -170,25 +151,21 @@ impl<T: Scalar> Array<T> {
     }
 }
 
-fn resolve_reshape(shape: &[isize], size: usize) -> Result<Vec<usize>> {
+fn resolve_reshape(shape: &[isize], size: usize) -> Vec<usize> {
     let mut inferred = None;
     let mut known = 1_usize;
     let mut out = Vec::with_capacity(shape.len());
 
     for (i, &d) in shape.iter().enumerate() {
         if d == -1 {
-            if inferred.is_some() {
-                return Err(Error::InvalidArgument(
-                    "only one reshape dimension may be -1".into(),
-                ));
-            }
+            debug_assert!(
+                inferred.is_none(),
+                "only one reshape dimension may be -1"
+            );
             inferred = Some(i);
             out.push(0);
-        } else if d < 0 {
-            return Err(Error::InvalidArgument(format!(
-                "invalid reshape dimension {d}"
-            )));
         } else {
+            debug_assert!(d >= 0, "invalid reshape dimension {d}");
             let d = d as usize;
             known *= d;
             out.push(d);
@@ -196,24 +173,25 @@ fn resolve_reshape(shape: &[isize], size: usize) -> Result<Vec<usize>> {
     }
 
     if let Some(idx) = inferred {
-        if known == 0 {
-            return Err(Error::InvalidArgument(
-                "cannot infer reshape dimension when another is 0".into(),
-            ));
-        }
-        if size % known != 0 {
-            return Err(Error::InvalidArgument(format!(
-                "cannot reshape array of size {size} into shape {shape:?}"
-            )));
-        }
-        out[idx] = size / known;
-    } else if size_of_shape(&out) != size {
-        return Err(Error::InvalidArgument(format!(
+        debug_assert!(
+            known != 0,
+            "cannot infer reshape dimension when another is 0"
+        );
+        debug_assert_eq!(
+            size % known,
+            0,
             "cannot reshape array of size {size} into shape {shape:?}"
-        )));
+        );
+        out[idx] = size / known;
+    } else {
+        debug_assert_eq!(
+            size_of_shape(&out),
+            size,
+            "cannot reshape array of size {size} into shape {shape:?}"
+        );
     }
 
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -268,7 +246,6 @@ mod tests {
 
         let negative = a.permute_axes(&[-1, -2]).unwrap();
         assert_eq!(negative.shape(), b.shape());
-        assert!(a.permute_axes(&[0, -2]).is_err());
     }
 
     #[test]
@@ -288,21 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn squeeze_validates_axes_and_allows_zero_dimensional_results() {
+    fn squeeze_allows_zero_dimensional_results() {
         let a = Array::from_slice(&[7_i64], &[1]).unwrap();
         let scalar = a.squeeze(None).unwrap();
         assert_eq!(scalar.shape(), &[] as &[usize]);
         assert_eq!(scalar.item().unwrap(), 7);
 
-        assert!(a.squeeze(Some(&[0, 0])).is_err());
-        assert!(Array::from_slice(&[1_i64, 2], &[2])
-            .unwrap()
-            .squeeze(Some(&[0]))
-            .is_err());
-
         let zero_dimensional = Array::from_slice(&[9_i64], &[]).unwrap();
         assert!(zero_dimensional.squeeze(None).unwrap().shape().is_empty());
-        assert!(zero_dimensional.squeeze(Some(&[0])).is_err());
     }
 
     #[test]

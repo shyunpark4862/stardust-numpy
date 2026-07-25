@@ -1,7 +1,7 @@
 # stardust-numpy (`sdnp`)
 
-Educational NumPy-style array library in Rust, designed so a **PyO3 Python
-binding** can be added later (see `plan.md` Phase 8).
+Educational NumPy-style array library in Rust with an optional **PyO3 Python
+binding** (`sdnp` package in `sdnp-py/`).
 
 - `Array<T>` with compile-time generics
 - Auto-promotion: `bool < i64 < f64 < Complex<f64>`
@@ -14,8 +14,26 @@ Spec / behavioral reference: sibling Python project `../numpy` (with intentional
 ## Setup
 
 ```bash
-# Install Rust if needed: https://rustup.rs
+# Rust core
 cargo test
+
+# Python binding (requires Python >= 3.12, maturin)
+pip install maturin pytest
+cd sdnp-py
+maturin develop          # or: pip install -e .
+pytest python-tests
+```
+
+On Python 3.14+, set `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` when building if
+PyO3 has not yet published 3.14 wheels for your platform.
+
+Quick smoke check:
+
+```python
+import sdnp
+a = sdnp.zeros((2, 3))
+assert (a + sdnp.ones((2, 3))).shape == [2, 3]
+assert not isinstance(sdnp.sum(a), sdnp.Array)  # 0-D unwrap at boundary
 ```
 
 ## Benchmarks
@@ -101,7 +119,21 @@ Intentional differences vs NumPy: no operator overloading; scalar-valued
 linear algebra results are 0-D `Array`s; `dot` supports only 1-D/2-D inputs;
 `divide` follows Rust `/`; CoW on write; no `out`/`where`.
 
-Fill in modules phase-by-phase; Python bindings are Phase 8.
+Fill in modules phase-by-phase; Python bindings ship in `sdnp-py/` (Phase 8).
+
+## Python API (Phase 8)
+
+Import as `sdnp`. Public surface matches the Rust subset documented above,
+with these binding policies:
+
+- **0-D unwrap**: full reductions, integer basic indexing, 1-D `__iter__`, and
+  scalar linear-algebra results return Python scalars — never user-visible 0-D
+  `Array` instances.
+- **Creation**: `sdnp.array(3)` and `shape=()` are rejected with `ValueError`.
+- **Excluded from `__all__`**: `item`, buffer/broadcast helpers, `gather` /
+  `scatter`, internal layout utilities (see `plan.md`).
+- **Intentional gaps**: no transcendental ufuncs (`sin`, `exp`, …); `/` follows
+  Rust true division semantics; `//` maps to `trunc_divide`.
 
 ## Internal terminology
 

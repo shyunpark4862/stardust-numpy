@@ -2,7 +2,7 @@
 
 use crate::array::Array;
 use crate::broadcast::broadcast_shapes;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::index::bounds::{
     advance_multi_index, normalize_element_index, resolve_slice, slice_length,
 };
@@ -110,11 +110,10 @@ fn expand_ellipsis(
         .iter()
         .filter(|i| matches!(i, IndexSpec::Ellipsis))
         .count();
-    if ellipsis_count > 1 {
-        return Err(Error::InvalidArgument(
-            "an index can only have a single ellipsis".into(),
-        ));
-    }
+    debug_assert!(
+        ellipsis_count <= 1,
+        "an index can only have a single ellipsis"
+    );
 
     let used: usize = index
         .iter()
@@ -122,13 +121,12 @@ fn expand_ellipsis(
         .map(axes_consumed)
         .sum();
 
-    if used > shape.len() {
-        return Err(Error::InvalidArgument(format!(
-            "too many indices for array: array is {}-dimensional, but {} were indexed",
-            shape.len(),
-            used
-        )));
-    }
+    debug_assert!(
+        used <= shape.len(),
+        "too many indices for array: array is {}-dimensional, but {} were indexed",
+        shape.len(),
+        used
+    );
 
     let missing = shape.len() - used;
     let mut out = Vec::new();
@@ -185,38 +183,36 @@ fn expand_boolean_masks(
             }
             IndexSpec::BoolArray(mask) => {
                 let end = source_axis + mask.ndim();
-                if end > shape.len() {
-                    return Err(Error::InvalidArgument(format!(
-                        "too many indices for array: array is {}-dimensional",
-                        shape.len()
-                    )));
-                }
+                debug_assert!(
+                    end <= shape.len(),
+                    "too many indices for array: array is {}-dimensional",
+                    shape.len()
+                );
                 let expected = &shape[source_axis..end];
-                if mask.shape() != expected {
-                    return Err(Error::InvalidArgument(format!(
-                        "boolean index did not match indexed array along dimension; got {:?}, expected {:?}",
-                        mask.shape(),
-                        expected
-                    )));
-                }
+                debug_assert_eq!(
+                    mask.shape(),
+                    expected,
+                    "boolean index did not match indexed array along dimension"
+                );
                 let coords = boolean_mask_to_integer_arrays(mask)?;
                 out.extend(coords.into_iter().map(IndexSpec::IntegerArray));
                 source_axis += mask.ndim();
             }
             IndexSpec::Ellipsis => {
-                return Err(Error::InvalidArgument(
-                    "internal error: ellipsis should have been expanded".into(),
-                ));
+                debug_assert!(
+                    false,
+                    "internal error: ellipsis should have been expanded"
+                );
             }
         }
     }
 
-    if source_axis != shape.len() {
-        return Err(Error::InvalidArgument(format!(
-            "index does not cover all axes: covered {source_axis}, ndim {}",
-            shape.len()
-        )));
-    }
+    debug_assert_eq!(
+        source_axis,
+        shape.len(),
+        "index does not cover all axes: covered {source_axis}, ndim {}",
+        shape.len()
+    );
 
     Ok(out)
 }
@@ -261,20 +257,20 @@ fn resolve_entries(
                 source_axis += 1;
             }
             IndexSpec::BoolArray(_) | IndexSpec::Ellipsis => {
-                return Err(Error::InvalidArgument(
+                debug_assert!(
+                    false,
                     "internal error: index must be expanded before resolve"
-                        .into(),
-                ));
+                );
             }
         }
     }
 
-    if source_axis != shape.len() {
-        return Err(Error::InvalidArgument(format!(
-            "index does not cover all axes: covered {source_axis}, ndim {}",
-            shape.len()
-        )));
-    }
+    debug_assert_eq!(
+        source_axis,
+        shape.len(),
+        "index does not cover all axes: covered {source_axis}, ndim {}",
+        shape.len()
+    );
 
     Ok(out)
 }

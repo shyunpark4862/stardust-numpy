@@ -55,22 +55,6 @@ fn dot_promotes_dtype_and_handles_strided_operands() {
 }
 
 #[test]
-fn dot_validates_rank_and_inner_dimensions() {
-    let short = Array::from_slice(&[1_i64, 2], &[2]).unwrap();
-    let long = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();
-    assert!(matches!(dot(&short, &long), Err(Error::InvalidArgument(_))));
-
-    let cube = Array::from_vec(vec![1_i64; 8], &[2, 2, 2]).unwrap();
-    assert!(matches!(dot(&cube, &cube), Err(Error::InvalidArgument(_))));
-
-    let scalar = Array::from_slice(&[2_i64], &[]).unwrap();
-    assert!(matches!(
-        dot(&scalar, &short),
-        Err(Error::InvalidArgument(_))
-    ));
-}
-
-#[test]
 fn matmul_broadcasts_batches_and_vector_axes() {
     let left = Array::from_slice(
         &[
@@ -129,14 +113,7 @@ fn matmul_broadcasts_both_leading_shapes() {
 }
 
 #[test]
-fn matmul_rejects_scalars_and_incompatible_batches() {
-    let scalar = Array::from_slice(&[3_i64], &[]).unwrap();
-    let matrix = Array::from_slice(&[1_i64, 2, 3, 4], &[2, 2]).unwrap();
-    assert!(matches!(
-        matmul(&matrix, &scalar),
-        Err(Error::InvalidArgument(_))
-    ));
-
+fn matmul_rejects_incompatible_batches() {
     let left = Array::from_vec(vec![1_i64; 8], &[2, 2, 2]).unwrap();
     let right = Array::from_vec(vec![1_i64; 12], &[3, 2, 2]).unwrap();
     assert!(matches!(
@@ -173,12 +150,6 @@ fn vdot_conjugates_first_and_outer_flattens_logically() {
     let result = outer(&a, &b).unwrap();
     assert_eq!(result.shape(), &[4, 2]);
     assert_eq!(result.to_vec(), vec![10, 20, 30, 60, 20, 40, 40, 80]);
-
-    let wrong_size = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();
-    assert!(matches!(
-        vdot(&b, &wrong_size),
-        Err(Error::InvalidArgument(_))
-    ));
 }
 
 #[test]
@@ -198,11 +169,6 @@ fn diagonal_and_trace_support_nd_axes_and_offsets() {
     let traced = trace(&four_d, 0, -4, -3).unwrap();
     assert_eq!(traced.shape(), &[2, 3]);
     assert_eq!(traced.to_vec(), vec![18, 20, 22, 24, 26, 28]);
-
-    assert!(matches!(
-        diagonal(&matrix, 0, 0, 0),
-        Err(Error::InvalidArgument(_))
-    ));
 }
 
 #[test]
@@ -271,9 +237,4 @@ fn diagonal_family_handles_noncontiguous_inputs_and_rank_errors() {
         tril(&matrix, 0).unwrap().to_vec(),
         vec![0, 0, 0, 1, 4, 0, 2, 5, 8]
     );
-
-    let scalar = Array::from_slice(&[1_i64], &[]).unwrap();
-    assert!(matches!(tril(&scalar, 0), Err(Error::InvalidArgument(_))));
-    let cube = Array::from_vec(vec![1_i64; 8], &[2, 2, 2]).unwrap();
-    assert!(matches!(diag(&cube, 0), Err(Error::InvalidArgument(_))));
 }

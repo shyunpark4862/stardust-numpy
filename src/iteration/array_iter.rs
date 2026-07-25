@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use crate::array::Array;
 use crate::dtype::Scalar;
-use crate::error::{Error, Result};
 use crate::traversal::StrideIter;
 
 use super::{ndindex, NdIndex};
@@ -134,28 +133,23 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Return the length of axis 0.
-    ///
-    /// Zero-dimensional arrays do not have an axis 0.
-    pub fn axis0_len(&self) -> Result<usize> {
-        self.shape().first().copied().ok_or_else(|| {
-            Error::InvalidArgument(
-                "axis-0 length is undefined for a 0-D array".into(),
-            )
-        })
+    pub fn axis0_len(&self) -> usize {
+        debug_assert!(
+            self.ndim() > 0,
+            "axis-0 length is undefined for a 0-D array"
+        );
+        self.shape()[0]
     }
 
     /// Iterate over shared-buffer views selected along axis 0.
-    ///
-    /// For a one-dimensional input, each item is a zero-dimensional array.
-    /// The Python binding may unwrap those items to scalars for `__iter__`.
-    pub fn iter_axis0(&self) -> Result<Axis0Iter<'_, T>> {
-        let remaining = self.axis0_len()?;
-        Ok(Axis0Iter {
+    pub fn iter_axis0(&self) -> Axis0Iter<'_, T> {
+        let remaining = self.axis0_len();
+        Axis0Iter {
             parent: self,
             shape: self.shape[1..].to_vec(),
             strides: self.strides[1..].to_vec(),
             next_index: 0,
             remaining,
-        })
+        }
     }
 }

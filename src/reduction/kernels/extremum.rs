@@ -4,14 +4,9 @@ fn build_extremum_plan<T: Scalar>(
     a: &Array<T>,
     axes: Option<&[isize]>,
     keepdims: bool,
-    op_name: &str,
+    _op_name: &str,
 ) -> Result<ReducePlan> {
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
-    if plan.output_len > 0 && plan.reduction_is_empty() {
-        return Err(Error::InvalidArgument(format!(
-            "{op_name} of empty array / empty axis"
-        )));
-    }
     Ok(plan)
 }
 
@@ -26,6 +21,19 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
+    if plan.reduction_is_empty() {
+        if slice.len() >= plan.output_len {
+            return Array::from_vec(
+                slice[..plan.output_len].to_vec(),
+                &plan.output_shape,
+            );
+        }
+        debug_assert!(slice.is_empty(), "empty reduction requires empty slice");
+    }
+    if slice.len() < plan.output_len {
+        debug_assert!(plan.reduction_is_empty());
+        return Array::from_vec(Vec::new(), &plan.output_shape);
+    }
     let (first_row, remaining) = slice.split_at(plan.output_len);
     let mut out = first_row.to_vec();
     for row in remaining.chunks_exact(plan.output_len) {
@@ -161,6 +169,13 @@ where
     let plan = build_extremum_plan(a, axes, keepdims, op_name)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
+    }
+    if plan.reduction_is_empty() {
+        let fill = if op_name == "min" { i64::MAX } else { i64::MIN };
+        return Array::from_vec(
+            vec![fill; plan.output_len],
+            &plan.output_shape,
+        );
     }
     match reduction_path(a, &plan) {
         ReductionPath::SuffixContiguous(slice) => {
