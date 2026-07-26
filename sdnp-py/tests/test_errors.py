@@ -140,7 +140,7 @@ def test_excessive_sequence_nesting_is_rejected_safely():
             lambda: sdnp.stack((sdnp.ones((2,)), sdnp.ones((1, 2)))),
         ),
         (
-            "where operands could not be broadcast together",
+            "operands could not be broadcast together",
             lambda: sdnp.where(
                 sdnp.array([True, False]),
                 sdnp.ones((3,)),
@@ -168,7 +168,7 @@ def test_excessive_sequence_nesting_is_rejected_safely():
             lambda: sdnp.nditer((sdnp.array([1]), sdnp.array([1.0]))),
         ),
         (
-            "nditer operands could not be broadcast together",
+            "operands could not be broadcast together",
             lambda: sdnp.nditer((sdnp.ones((2,)), sdnp.ones((3,)))),
         ),
         (
@@ -207,6 +207,10 @@ def test_value_errors_use_value_error(fragment, call):
         (
             "axis 2 is out of bounds",
             lambda: sdnp.sum(sdnp.ones((2, 2)), axis=2),
+        ),
+        (
+            "axis 2 is out of bounds",
+            lambda: sdnp.sort(sdnp.ones((2, 2)), axis=2),
         ),
         (
             "out of bounds",

@@ -25,16 +25,6 @@ def default_canvas_path() -> Path:
     )
 
 
-def _time(value_ns: float) -> str:
-    if value_ns < 1_000:
-        return f"{value_ns:.1f} ns"
-    if value_ns < 1_000_000:
-        return f"{value_ns / 1_000:.2f} µs"
-    if value_ns < 1_000_000_000:
-        return f"{value_ns / 1_000_000:.2f} ms"
-    return f"{value_ns / 1_000_000_000:.2f} s"
-
-
 def _escape(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
@@ -59,40 +49,6 @@ def render_markdown(payload: dict[str, Any]) -> str:
         mean = sum(ratios) / len(ratios)
         category_lines.append(
             f"| {_escape(category)} | {len(ratios)} | {median:.3f}× | {mean:.3f}× |"
-        )
-
-    result_lines = [
-        "| Function | dtype | size | ndim | shape | "
-        "sdnp p25 | sdnp p50 | sdnp p75 | sdnp mean | "
-        "NumPy p25 | NumPy p50 | NumPy p75 | NumPy mean | ratio |",
-        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | "
-        "---: | ---: | ---: | ---: | ---: |",
-    ]
-    for result in results:
-        case = result["case"]
-        sd = result["sdnp"]
-        np_result = result["numpy"]
-        result_lines.append(
-            "| "
-            + " | ".join(
-                [
-                    _escape(case["function"]),
-                    case["dtype"],
-                    case["size"],
-                    str(case["ndim"]),
-                    "×".join(map(str, case["shape"])),
-                    _time(sd["p25_ns"]),
-                    _time(sd["median_ns"]),
-                    _time(sd["p75_ns"]),
-                    _time(sd["mean_ns"]),
-                    _time(np_result["p25_ns"]),
-                    _time(np_result["median_ns"]),
-                    _time(np_result["p75_ns"]),
-                    _time(np_result["mean_ns"]),
-                    f"{result['ratio_median']:.3f}×",
-                ]
-            )
-            + " |"
         )
 
     filters = payload.get("filters", {})
@@ -121,10 +77,6 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"- sdnp median ≤ NumPy median: **{faster} / {len(results)}**",
             "",
             *category_lines,
-            "",
-            "## Complete Results",
-            "",
-            *result_lines,
             "",
             "_Generated directly from benchmark summary JSON._",
             "",
@@ -210,6 +162,14 @@ function choices(key: "category" | "dtype" | "size" | "ndim") {{
   return ["all", ...Array.from(new Set(results.map((result) => String(result[key]))))];
 }}
 
+function priority(result: Result) {{
+  const ratio = result.ratio;
+  if (ratio <= 1) return "success" as const;
+  if (ratio >= 5) return "danger" as const;
+  if (ratio >= 2) return "warning" as const;
+  return "neutral" as const;
+}}
+
 export default function SdnpNumpyBenchmark() {{
   const [category, setCategory] = useCanvasState("benchmark-category", "all");
   const [dtype, setDtype] = useCanvasState("benchmark-dtype", "all");
@@ -287,28 +247,29 @@ export default function SdnpNumpyBenchmark() {{
 
       <Stack gap={{10}}>
         <H2>Complete benchmark statistics</H2>
+        <Text tone="tertiary" size="small">
+          평균 실행 시간과 median 비율 · 행 앞 색 점: 초록(≤1×) · 회색(1–2×) · 노랑(2–5×) · 빨강(≥5×)
+        </Text>
         <Table
           headers={{[
             "Function", "dtype", "Size", "Shape",
-            "sdnp p25", "sdnp p50", "sdnp p75", "sdnp mean",
-            "NumPy p25", "NumPy p50", "NumPy p75", "NumPy mean", "Ratio"
+            "sdnp mean", "NumPy mean", "Ratio"
           ]}}
-          rows={{visible.map((result) => [
+          rows={{[...visible]
+            .sort((a, b) => b.ratio - a.ratio)
+            .map((result) => [
             result.function,
             result.dtype,
             result.size,
             result.shape.join("×"),
-            formatTime(result.sdnp.p25_ns),
-            formatTime(result.sdnp.median_ns),
-            formatTime(result.sdnp.p75_ns),
             formatTime(result.sdnp.mean_ns),
-            formatTime(result.numpy.p25_ns),
-            formatTime(result.numpy.median_ns),
-            formatTime(result.numpy.p75_ns),
             formatTime(result.numpy.mean_ns),
             `${{result.ratio.toFixed(3)}}×`,
           ])}}
-          columnAlign={{["left", "left", "left", "left", "right", "right", "right", "right", "right", "right", "right", "right", "right"]}}
+          columnAlign={{["left", "left", "left", "left", "right", "right", "right"]}}
+          rowTone={{[...visible]
+            .sort((a, b) => b.ratio - a.ratio)
+            .map((result) => priority(result))}}
           striped
           stickyHeader
         />

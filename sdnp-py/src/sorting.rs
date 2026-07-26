@@ -1,6 +1,6 @@
 //! Sorting and uniqueness free functions.
 //!
-//! Validates axis arguments and dtype support at the boundary, then dispatches
+//! Coerces axis arguments and validates dtype policy at the boundary, then dispatches
 //! to typed `sdnp::sort`, `sdnp::argsort`, or `sdnp::unique` kernels.
 //! Complex arrays are rejected here because ordering is undefined.
 
@@ -10,7 +10,6 @@ use crate::array::{array_from_inner, PyArray};
 use crate::coerce::coerce_optional_axis;
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
-use crate::validate::check_optional_axis;
 
 /// Return a sorted copy along `axis` (default: last axis).
 ///
@@ -47,7 +46,6 @@ pub fn sort(
 ) -> PyResult<PyObject> {
     a.reject_zero_dim_input("sort")?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::Bool(map_sdnp(sdnp::sort(arr, ax))?)
@@ -96,7 +94,6 @@ pub fn argsort(
 ) -> PyResult<PyObject> {
     a.reject_zero_dim_input("argsort")?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::argsort(arr, ax))?)

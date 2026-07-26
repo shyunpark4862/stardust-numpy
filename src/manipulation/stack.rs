@@ -4,9 +4,9 @@
 //! [`hstack`] promote 0-D/1-D inputs to the ranks NumPy expects before joining.
 
 use crate::array::{insert_axis_view, Array};
-use crate::axis::normalize_insert_axis;
+use crate::axis::resolve_insert_axis;
 use crate::dtype::Scalar;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use super::concatenate;
 
@@ -32,6 +32,8 @@ use super::concatenate;
 ///
 /// # Errors
 ///
+/// * [`Error::AxisOutOfBounds`](crate::Error::AxisOutOfBounds) - `axis` is
+///   outside the output rank.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
 ///   or offset overflow during concatenation.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -48,8 +50,21 @@ use super::concatenate;
 /// assert_eq!(s.shape(), &[2, 2]);
 /// ```
 pub fn stack<T: Scalar>(arrays: &[&Array<T>], axis: isize) -> Result<Array<T>> {
-    let first = arrays[0];
-    let axis = normalize_insert_axis(axis, first.ndim());
+    let first = arrays
+        .first()
+        .copied()
+        .ok_or(Error::EmptyOperands { op: "stack" })?;
+    for (index, array) in arrays.iter().enumerate().skip(1) {
+        if array.shape() != first.shape() {
+            return Err(Error::ShapeMismatch {
+                op: "stack",
+                expected: first.shape().to_vec(),
+                index,
+                actual: array.shape().to_vec(),
+            });
+        }
+    }
+    let axis = resolve_insert_axis(axis, first.ndim())?;
 
     let views: Vec<_> = arrays
         .iter()
@@ -89,6 +104,9 @@ pub fn stack<T: Scalar>(arrays: &[&Array<T>], axis: isize) -> Result<Array<T>> {
 /// assert_eq!(v.shape(), &[2, 2]);
 /// ```
 pub fn vstack<T: Scalar>(arrays: &[&Array<T>]) -> Result<Array<T>> {
+    if arrays.is_empty() {
+        return Err(Error::EmptyOperands { op: "vstack" });
+    }
     let views: Vec<_> = arrays
         .iter()
         .map(|array| promote_at_least_2d(array))
@@ -127,6 +145,9 @@ pub fn vstack<T: Scalar>(arrays: &[&Array<T>]) -> Result<Array<T>> {
 /// assert_eq!(hstack(&[&a, &b]).unwrap().to_vec(), vec![1, 2, 3, 4]);
 /// ```
 pub fn hstack<T: Scalar>(arrays: &[&Array<T>]) -> Result<Array<T>> {
+    if arrays.is_empty() {
+        return Err(Error::EmptyOperands { op: "hstack" });
+    }
     let views: Vec<_> = arrays
         .iter()
         .map(|array| promote_at_least_1d(array))

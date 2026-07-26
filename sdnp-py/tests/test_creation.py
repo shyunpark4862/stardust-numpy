@@ -162,7 +162,7 @@ def test_basic_factories_reject_invalid_shapes(shape):
     ],
 )
 def test_basic_factories_reject_shape_size_overflow_without_allocating(factory):
-    with pytest.raises((ValueError, OverflowError), match="overflow"):
+    with pytest.raises(ValueError, match="array shape size overflows usize"):
         factory()
 
 
@@ -413,6 +413,13 @@ def test_diag_rejects_bool_array(values):
         sdnp.diag(sdnp.array(values))
 
 
+def test_creation_diag_has_narrower_bool_policy_than_linalg_diagonal():
+    matrix = sdnp.array([[True, False], [False, True]])
+    with pytest.raises(ValueError, match="does not support boolean"):
+        sdnp.diag(matrix)
+    assert sdnp.diagonal(matrix).to_list() == [True, True]
+
+
 def test_diag_validates_rank_input_type_and_overflow():
     with pytest.raises(TypeError):
         sdnp.diag([1, 2])
@@ -446,14 +453,21 @@ def test_meshgrid_empty_call_returns_empty_tuple():
     assert sdnp.meshgrid() == ()
 
 
+def test_meshgrid_dtype_policy_has_stable_errors():
+    with pytest.raises(ValueError, match="^meshgrid dtype mismatch$"):
+        sdnp.meshgrid(sdnp.array([1]), sdnp.array([1.0]))
+    with pytest.raises(
+        ValueError, match="^meshgrid does not support bool dtype$"
+    ):
+        sdnp.meshgrid(sdnp.array([True, False]))
+
+
 @pytest.mark.parametrize(
     "call",
     [
         lambda: sdnp.meshgrid(sdnp.array([1]), indexing="bad"),
         lambda: sdnp.meshgrid([1, 2]),
         lambda: sdnp.meshgrid(sdnp.array([[1, 2]])),
-        lambda: sdnp.meshgrid(sdnp.array([1]), sdnp.array([1.0])),
-        lambda: sdnp.meshgrid(sdnp.array([True, False])),
     ],
 )
 def test_meshgrid_rejects_invalid_inputs(call):

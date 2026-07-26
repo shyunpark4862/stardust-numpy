@@ -200,8 +200,10 @@ def test_hstack_handles_empty_and_noncontiguous_inputs():
     [sdnp.concatenate, sdnp.stack, sdnp.vstack, sdnp.hstack],
     ids=["concatenate", "stack", "vstack", "hstack"],
 )
-def test_join_operations_reject_empty_input(operation):
-    with pytest.raises(ValueError, match="at least one array"):
+def test_empty_join_inputs_surface_core_empty_operands(operation):
+    with pytest.raises(
+        ValueError, match=rf"{operation.__name__} requires at least one array"
+    ):
         operation([])
 
 
@@ -269,3 +271,13 @@ def test_axis_must_be_an_integer():
 def test_join_operations_reject_incompatible_shapes(operation, left, right):
     with pytest.raises(ValueError, match="shape|rank|dimensions"):
         operation([_array(left, float), _array(right, float)])
+
+
+def test_core_validates_zero_dimensional_and_late_join_operands():
+    with pytest.raises(ValueError, match="dimension|rank"):
+        sdnp.concatenate([sdnp.array(1)])
+
+    valid = sdnp.zeros((2, 3))
+    incompatible = sdnp.zeros((2, 4))
+    with pytest.raises(ValueError, match="shape"):
+        sdnp.stack([valid, valid, incompatible])

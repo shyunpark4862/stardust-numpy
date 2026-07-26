@@ -57,6 +57,32 @@ def test_basic_indexing_matches_numpy(dtype, index):
     assert_matches(actual[index], expected[index])
 
 
+def test_basic_indexing_empty_reverse_slice_matches_numpy():
+    actual = sdnp.zeros((0, 3), dtype=int)
+    expected = np.zeros((0, 3), dtype=np.int64)
+
+    assert_matches(actual[::-1], expected[::-1])
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        slice(-(2**63), 2**63 - 1, 1),
+        slice(2**63 - 1, -(2**63), -2),
+        slice(-(2**63), 2**63 - 1, 2**62 + 1),
+    ],
+    ids=["huge-forward", "huge-reverse", "huge-step"],
+)
+def test_large_slice_bounds_get_and_set_match_numpy(index):
+    actual = sdnp.arange(8)
+    expected = np.arange(8, dtype=np.int64)
+
+    assert_matches(actual[index], expected[index])
+    actual[index] = -1
+    expected[index] = -1
+    assert_matches(actual, expected)
+
+
 @pytest.mark.parametrize(
     ("sdnp_index", "numpy_index"),
     [

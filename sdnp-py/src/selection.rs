@@ -13,7 +13,7 @@ use crate::dispatch::cast_inner;
 use crate::error::{map_sdnp, type_error, value_error};
 use crate::inner::ArrayInner;
 use crate::unwrap::PyScalar;
-use crate::validate::{check_broadcastable, require_bool_array};
+use crate::validate::require_bool_array;
 
 /// Select from `x` or `y` element-wise where `condition` is true.
 ///
@@ -56,14 +56,6 @@ pub fn where_(
     let cond = condition.inner.as_bool()?;
     let x_arr = coerce_array_like(x, None)?;
     let y_arr = coerce_array_like(y, None)?;
-    check_broadcastable(
-        "where",
-        &[
-            condition.inner.shape(),
-            x_arr.inner.shape(),
-            y_arr.inner.shape(),
-        ],
-    )?;
     // Promote branch dtypes before calling the typed where_ kernel.
     let dt = x_arr.inner.dtype().promote(y_arr.inner.dtype());
     let x_inner = cast_inner(x_arr.inner, dt)?;

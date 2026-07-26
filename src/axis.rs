@@ -1,67 +1,150 @@
-//! Axis-number normalization shared across reduction, manipulation, and
-//! view code.
+//! Fallible axis resolution shared across reduction, manipulation, linear
+//! algebra, and view code.
 //!
 //! NumPy accepts negative axis indices counting backward from the last
-//! dimension. Callers are expected to validate axis lists before calling
-//! these helpers; invalid axes map to `usize::MAX` as a sentinel value.
+//! dimension. The core owns semantic axis validation: these helpers either
+//! return canonical unsigned axes or a structured [`Error`](crate::Error).
 
-/// Convert one possibly-negative axis index into the range `0..ndim`.
-///
-/// Negative values count backward from `ndim` (e.g. `-1` is the last axis).
-/// Out-of-range inputs return `usize::MAX` so callers can detect failure
-/// without panicking.
-///
-/// # Arguments
-///
-/// * `axis` — raw axis index (may be negative)
-/// * `ndim` — number of dimensions in the array being addressed
-///
-/// # Returns
-///
-/// Normalized axis in `0..ndim`, or `usize::MAX` when out of range.
-pub(crate) fn normalize_axis(axis: isize, ndim: usize) -> usize {
+use crate::error::{Error, Result};
+
+/// Resolve one possibly-negative axis into `0..ndim`.
+pub(crate) fn resolve_axis(axis: isize, ndim: usize) -> Result<usize> {
     let normalized = if axis < 0 {
-        // Negative index: count backward from ndim.
         ndim.checked_sub(axis.unsigned_abs())
     } else {
-        // Non-negative index must fit in usize and be strictly less than ndim.
         usize::try_from(axis).ok().filter(|&axis| axis < ndim)
     };
-    normalized.unwrap_or(usize::MAX)
+    normalized.ok_or(Error::AxisOutOfBounds { axis, ndim })
 }
 
-/// Normalize every axis in `axes`, preserving the original order.
-///
-/// Applies [`normalize_axis`] element-wise. Duplicate or invalid entries are
-/// preserved as `usize::MAX` for the caller to reject.
-///
-/// # Arguments
-///
-/// * `axes` — raw axis indices (may be negative)
-/// * `ndim` — number of dimensions in the array being addressed
-///
-/// # Returns
-///
-/// Normalized axis indices in the same order as `axes`.
-pub(crate) fn normalize_axis_list(axes: &[isize], ndim: usize) -> Vec<usize> {
-    axes.iter()
-        .map(|&axis| normalize_axis(axis, ndim))
-        .collect()
+/// Resolve a nonduplicated axis list while preserving its order.
+pub(crate) fn resolve_axis_list(
+    axes: &[isize],
+    ndim: usize,
+) -> Result<Vec<usize>> {
+    let mut resolved = Vec::with_capacity(axes.len());
+    let mut seen = vec![false; ndim];
+    for &axis in axes {
+        let axis = resolve_axis(axis, ndim)?;
+        if seen[axis] {
+            return Err(Error::DuplicateAxes);
+        }
+        seen[axis] = true;
+        resolved.push(axis);
+    }
+    Ok(resolved)
 }
 
-/// Normalize an axis index for a rank that will gain one inserted dimension.
+/// Resolve an insertion position in `0..=ndim`.
+pub(crate) fn resolve_insert_axis(axis: isize, ndim: usize) -> Result<usize> {
+    let output_ndim = ndim
+        .checked_add(1)
+        .ok_or(Error::AxisOutOfBounds { axis, ndim })?;
+    resolve_axis(axis, output_ndim)
+}
+
+/// Resolve two distinct axes used to define a diagonal plane.
+pub(crate) fn resolve_diagonal_axes(
+    axis1: isize,
+    axis2: isize,
+    ndim: usize,
+) -> Result<(usize, usize)> {
+    let axis1 = resolve_axis(axis1, ndim)?;
+    let axis2 = resolve_axis(axis2, ndim)?;
+    if axis1 == axis2 {
+        return Err(Error::AxesMustDiffer);
+    }
+    Ok((axis1, axis2))
+}
+
+/// Resolve and validate a complete permutation of `0..ndim`, visiting each
+/// canonical axis exactly once in input order.
 ///
-/// Delegates to [`normalize_axis`] with `ndim + 1`, matching NumPy rules for
-/// `expand_dims` / `newaxis` insertion bounds.
-///
-/// # Arguments
-///
-/// * `axis` — insertion position (may be negative)
-/// * `ndim` — current rank before the new axis is inserted
-///
-/// # Returns
-///
-/// Normalized insertion axis in `0..=ndim`, or `usize::MAX` when invalid.
-pub(crate) fn normalize_insert_axis(axis: isize, ndim: usize) -> usize {
-    normalize_axis(axis, ndim + 1)
+/// The visitor lets callers consume resolved axes directly without first
+/// allocating a temporary `Vec`. Ranks up to 128 use an inline bitset for
+/// duplicate detection; unusually large ranks fall back to heap storage.
+pub(crate) fn visit_resolved_permutation(
+    axes: &[isize],
+    ndim: usize,
+    mut visit: impl FnMut(usize),
+) -> Result<()> {
+    if axes.len() != ndim {
+        return Err(Error::NotPermutation);
+    }
+
+    if ndim <= u128::BITS as usize {
+        let mut seen = 0_u128;
+        for &axis in axes {
+            let axis = resolve_axis(axis, ndim)?;
+            let bit = 1_u128 << axis;
+            if seen & bit != 0 {
+                return Err(Error::NotPermutation);
+            }
+            seen |= bit;
+            visit(axis);
+        }
+    } else {
+        let mut seen = vec![false; ndim];
+        for &axis in axes {
+            let axis = resolve_axis(axis, ndim)?;
+            if seen[axis] {
+                return Err(Error::NotPermutation);
+            }
+            seen[axis] = true;
+            visit(axis);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_negative_axis_and_rejects_bounds() {
+        assert_eq!(resolve_axis(-1, 3), Ok(2));
+        assert_eq!(
+            resolve_axis(3, 3),
+            Err(Error::AxisOutOfBounds { axis: 3, ndim: 3 })
+        );
+        assert_eq!(
+            resolve_axis(-4, 3),
+            Err(Error::AxisOutOfBounds { axis: -4, ndim: 3 })
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_axis_lists_after_resolution() {
+        assert_eq!(resolve_axis_list(&[0, -2], 2), Err(Error::DuplicateAxes));
+    }
+
+    #[test]
+    fn validates_insert_diagonal_and_permutation_axes() {
+        assert_eq!(resolve_insert_axis(-1, 2), Ok(2));
+        assert!(matches!(
+            resolve_insert_axis(3, 2),
+            Err(Error::AxisOutOfBounds { .. })
+        ));
+        assert_eq!(resolve_diagonal_axes(0, -2, 2), Err(Error::AxesMustDiffer));
+        assert_eq!(
+            visit_resolved_permutation(&[0, 0], 2, |_| {}),
+            Err(Error::NotPermutation)
+        );
+        assert_eq!(
+            visit_resolved_permutation(&[0], 2, |_| {}),
+            Err(Error::NotPermutation)
+        );
+
+        let mut resolved = Vec::new();
+        visit_resolved_permutation(&[-1, 0], 2, |axis| resolved.push(axis))
+            .unwrap();
+        assert_eq!(resolved, [1, 0]);
+
+        let large: Vec<isize> = (0..129).collect();
+        let mut visited = 0;
+        visit_resolved_permutation(&large, large.len(), |_| visited += 1)
+            .unwrap();
+        assert_eq!(visited, large.len());
+    }
 }

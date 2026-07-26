@@ -4,7 +4,7 @@
 //! specific axis, each 1-D slice along that axis is sorted independently
 //! while the overall shape is preserved.
 
-use crate::axis::normalize_axis;
+use crate::axis::resolve_axis;
 use crate::error::Result;
 use crate::shape::checked_allocation_len;
 use crate::Array;
@@ -34,6 +34,8 @@ use super::SortElement;
 ///
 /// # Errors
 ///
+/// * [`Error::AxisOutOfBounds`](crate::Error::AxisOutOfBounds) - `axis` is
+///   outside the input rank.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
 ///   exceeds platform limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -54,7 +56,7 @@ pub fn sort<T: SortElement>(
     let mut data = a.to_vec();
     let shape = match axis {
         Some(axis) => {
-            let axis = normalize_axis(axis, a.ndim());
+            let axis = resolve_axis(axis, a.ndim())?;
             sort_values_along_axis(&mut data, a.shape(), axis);
             a.shape().to_vec()
         }
@@ -90,6 +92,8 @@ pub fn sort<T: SortElement>(
 ///
 /// # Errors
 ///
+/// * [`Error::AxisOutOfBounds`](crate::Error::AxisOutOfBounds) - `axis` is
+///   outside the input rank.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
 ///   exceeds platform limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -112,7 +116,7 @@ pub fn argsort<T: SortElement>(
     let data = a.to_vec();
     let (indices, shape) = match axis {
         Some(axis) => {
-            let axis = normalize_axis(axis, a.ndim());
+            let axis = resolve_axis(axis, a.ndim())?;
             (
                 argsort_along_axis(&data, a.shape(), axis),
                 a.shape().to_vec(),

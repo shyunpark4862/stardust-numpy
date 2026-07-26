@@ -6,8 +6,8 @@
 //! or unwrap 0-D inputs. Dtype-specific work is dispatched via enum matches.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyComplex, PyList};
-use sdnp::Array;
+use pyo3::types::PyList;
+use sdnp::{Array, Scalar};
 
 use crate::coerce::coerce_reshape_shape;
 use crate::dispatch::{py_binary, py_unary, BinaryOp, UnaryOp};
@@ -17,9 +17,6 @@ use crate::index_parse::{get_item, set_item};
 use crate::inner::ArrayInner;
 use crate::repr::{array_repr, array_str};
 use crate::unwrap::{finish, scalar_from_item, PyScalar};
-use crate::validate::{
-    check_permute_axes, check_reshape_shape, check_squeeze_axes,
-};
 
 /// NumPy-like n-dimensional array exposed to Python as `sdnp.Array`.
 #[pyclass(name = "Array", module = "sdnp")]
@@ -319,7 +316,6 @@ impl PyArray {
     ) -> PyResult<PyObject> {
         self.reject_zero_dim_input("reshape")?;
         let shape = coerce_reshape_shape(shape)?;
-        check_reshape_shape(&shape, self.inner.size())?;
         let inner = match &self.inner {
             ArrayInner::Bool(a) => {
                 ArrayInner::Bool(map_sdnp(a.reshape(&shape))?)
@@ -367,7 +363,6 @@ impl PyArray {
             Some(obj) if obj.is_none() => None,
             Some(obj) => Some(crate::coerce::coerce_axes(obj)?),
         };
-        check_squeeze_axes(&self.inner, axes.as_deref())?;
         let inner = match &self.inner {
             ArrayInner::Bool(a) => {
                 ArrayInner::Bool(map_sdnp(a.squeeze(axes.as_deref()))?)
@@ -426,7 +421,6 @@ impl PyArray {
     ) -> PyResult<PyObject> {
         self.reject_zero_dim_input("permute_axes")?;
         let axes = crate::coerce::coerce_axes(axes)?;
-        check_permute_axes(&axes, self.inner.ndim())?;
         let inner = match &self.inner {
             ArrayInner::Bool(a) => {
                 ArrayInner::Bool(map_sdnp(a.permute_axes(&axes))?)
@@ -1228,8 +1222,8 @@ impl PyArray {
 
 /// Build nested Python lists mirroring array shape (for `to_list`).
 ///
-/// Recursively walks axis 0, materializing scalars at the leaves. Complex
-/// values become `complex` objects; other dtypes map to native Python types.
+/// Dispatches once by dtype, then walks the original buffer directly using
+/// shape, strides, and offset. No intermediate `Array` views are created.
 ///
 /// # Arguments
 ///
@@ -1242,70 +1236,72 @@ impl PyArray {
 ///
 /// # Errors
 ///
-/// * Propagates gather/scalar conversion failures from nested slices.
+/// * Propagates Python scalar or list allocation failures.
 fn nested_list<'py>(py: Python<'py>, inner: &ArrayInner) -> PyResult<PyObject> {
-    let shape = inner.shape();
-    if shape.is_empty() {
-        // 0-D → bare scalar in list conversion path.
-        return scalar_from_item(py, inner.item_scalar()?);
+    match inner {
+        ArrayInner::Bool(a) => nested_typed_list(py, a, PyScalar::Bool),
+        ArrayInner::I64(a) => nested_typed_list(py, a, PyScalar::I64),
+        ArrayInner::F64(a) => nested_typed_list(py, a, PyScalar::F64),
+        ArrayInner::C64(a) => nested_typed_list(py, a, PyScalar::C64),
     }
-    if shape.len() == 1 {
-        let list = PyList::empty(py);
-        match inner {
-            ArrayInner::Bool(a) => {
-                for v in a.to_vec() {
-                    list.append(v)?;
-                }
-            }
-            ArrayInner::I64(a) => {
-                for v in a.to_vec() {
-                    list.append(v)?;
-                }
-            }
-            ArrayInner::F64(a) => {
-                for v in a.to_vec() {
-                    list.append(v)?;
-                }
-            }
-            ArrayInner::C64(a) => {
-                for v in a.to_vec() {
-                    list.append(PyComplex::from_doubles(py, v.re, v.im))?;
-                }
-            }
-        }
-        return Ok(list.into());
-    }
-    let list = PyList::empty(py);
-    for i in 0..shape[0] {
-        let sub = slice_axis(inner, i)?;
-        list.append(nested_list(py, &sub)?)?;
-    }
-    Ok(list.into())
 }
 
-/// Take one index along axis 0 via core gather.
+/// Convert one typed array directly into nested Python lists.
 ///
 /// # Arguments
 ///
-/// * `inner` - Source typed storage.
-/// * `i` - Zero-based axis-0 index.
+/// * `py` - Python interpreter token.
+/// * `array` - Typed source storage and layout.
+/// * `wrap` - Converts a typed value to the runtime scalar tag.
 ///
 /// # Returns
 ///
-/// A sub-array with the leading dimension removed.
+/// A nested list matching `array.shape()`.
 ///
 /// # Errors
 ///
-/// * `IndexError` / `ValueError` — out-of-bounds or gather failure.
-fn slice_axis(inner: &ArrayInner, i: usize) -> PyResult<ArrayInner> {
-    use sdnp::{gather, IndexSpec};
-    let spec = vec![IndexSpec::Index(i as i64)];
-    Ok(match inner {
-        ArrayInner::Bool(a) => ArrayInner::Bool(map_sdnp(gather(a, &spec))?),
-        ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(gather(a, &spec))?),
-        ArrayInner::F64(a) => ArrayInner::F64(map_sdnp(gather(a, &spec))?),
-        ArrayInner::C64(a) => ArrayInner::C64(map_sdnp(gather(a, &spec))?),
-    })
+/// Propagates Python scalar or list allocation failures.
+fn nested_typed_list<T: Scalar>(
+    py: Python<'_>,
+    array: &Array<T>,
+    wrap: impl Fn(T) -> PyScalar + Copy,
+) -> PyResult<PyObject> {
+    nested_buffer_list(
+        py,
+        array.as_buffer(),
+        array.shape(),
+        array.strides(),
+        array.offset() as isize,
+        wrap,
+    )
+}
+
+/// Recursively materialize one layout level without constructing array views.
+fn nested_buffer_list<T: Copy>(
+    py: Python<'_>,
+    data: &[T],
+    shape: &[usize],
+    strides: &[isize],
+    offset: isize,
+    wrap: impl Fn(T) -> PyScalar + Copy,
+) -> PyResult<PyObject> {
+    if shape.is_empty() {
+        return scalar_from_item(py, wrap(data[offset as usize]));
+    }
+
+    let items = (0..shape[0])
+        .map(|index| {
+            nested_buffer_list(
+                py,
+                data,
+                &shape[1..],
+                &strides[1..],
+                offset + index as isize * strides[0],
+                wrap,
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, items)?.into())
 }
 
 /// Owning flat iterator state per element type.

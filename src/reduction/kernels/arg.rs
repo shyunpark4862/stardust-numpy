@@ -10,6 +10,7 @@
 //! `argmin` stops at the first `false`, `argmax` at the first `true`.
 
 use super::*;
+use crate::error::Error;
 
 /// Flat argmin/argmax with NaN propagation in logical C order.
 ///
@@ -35,7 +36,7 @@ use super::*;
 /// Returns an error when allocation fails.
 pub(crate) fn arg_extremum_flat<T, F, N, E>(
     a: &Array<T>,
-    _op_name: &str,
+    op_name: &'static str,
     mut is_better: F,
     is_nan: N,
     is_terminal: E,
@@ -48,7 +49,7 @@ where
 {
     let n = a.size();
     if n == 0 {
-        return Array::from_vec(vec![0], &[]);
+        return Err(Error::EmptyReduction { op: op_name });
     }
 
     if let Some(slice) = a.as_c_contiguous_slice() {
@@ -220,6 +221,7 @@ where
 pub(crate) fn arg_extremum_axis<T, F, N, E>(
     a: &Array<T>,
     axis: isize,
+    op_name: &'static str,
     mut is_better: F,
     is_nan: N,
     is_terminal: E,
@@ -230,14 +232,14 @@ where
     N: Fn(T) -> bool,
     E: Fn(T) -> bool,
 {
-    let axis = normalize_axis(axis, a.ndim());
+    let axis = resolve_axis(axis, a.ndim())?;
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     checked_allocation_len::<i64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }
     if plan.axis_len == 0 {
-        return Array::from_vec(vec![0; plan.output_len], &plan.kept_shape);
+        return Err(Error::EmptyReduction { op: op_name });
     }
 
     // Last axis + C-contiguous: each output row is one memory chunk.
@@ -383,8 +385,8 @@ where
 
 /// Flat argmin/argmax skipping NaN elements.
 ///
-/// Ignores NaN values entirely. When every element is NaN, returns index
-/// `0` (NumPy-compatible placeholder).
+/// Ignores NaN values entirely. When every element is NaN, returns
+/// [`Error::AllNanSlice`].
 ///
 /// # Arguments
 ///
@@ -402,7 +404,7 @@ where
 /// Returns an error when allocation fails.
 pub(crate) fn arg_extremum_flat_ignore<T, F, N>(
     a: &Array<T>,
-    _op_name: &str,
+    op_name: &'static str,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<i64>>
@@ -412,7 +414,7 @@ where
     N: Fn(T) -> bool,
 {
     if a.size() == 0 {
-        return Array::from_vec(vec![0], &[]);
+        return Err(Error::EmptyReduction { op: op_name });
     }
     let mut best: Option<(T, i64)> = None;
     let mut linear = 0_i64;
@@ -434,14 +436,14 @@ where
     });
     match best {
         Some((_, index)) => Array::from_vec(vec![index], &[]),
-        None => Array::from_vec(vec![0], &[]),
+        None => Err(Error::AllNanSlice { op: op_name }),
     }
 }
 
 /// Axis argmin/argmax skipping NaN elements.
 ///
 /// Emits one axis-relative index per outer position, considering only
-/// finite elements. All-NaN rows return index `0`.
+/// finite elements. Any all-NaN row returns [`Error::AllNanSlice`].
 ///
 /// # Arguments
 ///
@@ -461,7 +463,7 @@ where
 pub(crate) fn arg_extremum_axis_ignore<T, F, N>(
     a: &Array<T>,
     axis: isize,
-    _op_name: &str,
+    op_name: &'static str,
     mut is_better: F,
     is_nan: N,
 ) -> Result<Array<i64>>
@@ -470,20 +472,21 @@ where
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
 {
-    let axis = normalize_axis(axis, a.ndim());
+    let axis = resolve_axis(axis, a.ndim())?;
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     checked_allocation_len::<i64>(plan.output_len)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.kept_shape);
     }
     if plan.axis_len == 0 {
-        return Array::from_vec(vec![0; plan.output_len], &plan.kept_shape);
+        return Err(Error::EmptyReduction { op: op_name });
     }
 
     let mut out = Vec::with_capacity(plan.output_len);
     let axis_stride = a.strides()[axis];
     let outer_strides = plan.kept_strides(a.strides());
     let outer_runs = RunPlan::new(&plan.kept_shape, [&outer_strides]);
+    let mut has_all_nan_slice = false;
     outer_runs.for_each_element([a.offset() as isize], |[base]| {
         let mut pos = base as isize;
         let mut best: Option<(T, i64)> = None;
@@ -501,8 +504,11 @@ where
         if let Some((_, index)) = best {
             out.push(index);
         } else {
-            out.push(0);
+            has_all_nan_slice = true;
         }
     });
+    if has_all_nan_slice {
+        return Err(Error::AllNanSlice { op: op_name });
+    }
     Array::from_vec(out, &plan.kept_shape)
 }

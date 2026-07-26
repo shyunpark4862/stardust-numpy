@@ -7,7 +7,7 @@
 
 use crate::array::Array;
 use crate::dtype::Scalar;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Selects Cartesian (`xy`) or matrix (`ij`) axis ordering for [`meshgrid`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +48,8 @@ pub enum MeshgridIndexing {
 ///
 /// # Errors
 ///
+/// * [`Error::InvalidRank`](crate::Error::InvalidRank) - Any input is not
+///   one-dimensional.
 /// * [`Error::Broadcast`](crate::Error::Broadcast) - Reshape or broadcast
 ///   to the grid shape fails.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Reshape
@@ -68,6 +70,13 @@ pub fn meshgrid<T: Scalar>(
     arrays: &[&Array<T>],
     indexing: MeshgridIndexing,
 ) -> Result<Vec<Array<T>>> {
+    if let Some(array) = arrays.iter().find(|array| array.ndim() != 1) {
+        return Err(Error::InvalidRank {
+            op: "meshgrid",
+            expected: "1-D input arrays",
+            actual: array.ndim(),
+        });
+    }
     let ndim = arrays.len();
     let mut output_shape: Vec<usize> =
         arrays.iter().map(|array| array.shape()[0]).collect();

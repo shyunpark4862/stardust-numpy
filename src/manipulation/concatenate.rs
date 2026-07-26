@@ -4,7 +4,7 @@
 //! is a new C-contiguous array built by copying each operand's slabs in order.
 
 use crate::array::Array;
-use crate::axis::normalize_axis;
+use crate::axis::resolve_axis;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
 use crate::shape::{checked_allocation_len, checked_size_of_shape};
@@ -34,6 +34,8 @@ use crate::traversal::{extend_unary, RunPlan};
 ///
 /// # Errors
 ///
+/// * [`Error::AxisOutOfBounds`](crate::Error::AxisOutOfBounds) - `axis` is
+///   outside the input rank.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Concatenated
 ///   axis length, slab size, or offset overflows; allocation exceeds limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -52,8 +54,40 @@ pub fn concatenate<T: Scalar>(
     arrays: &[&Array<T>],
     axis: isize,
 ) -> Result<Array<T>> {
-    let first = arrays[0];
-    let axis = normalize_axis(axis, first.ndim());
+    let first = arrays
+        .first()
+        .copied()
+        .ok_or(Error::EmptyOperands { op: "concatenate" })?;
+    if first.ndim() == 0 {
+        return Err(Error::InvalidRank {
+            op: "concatenate",
+            expected: "arrays of at least one dimension",
+            actual: 0,
+        });
+    }
+    let axis = resolve_axis(axis, first.ndim())?;
+    for (index, array) in arrays.iter().enumerate().skip(1) {
+        if array.ndim() != first.ndim() {
+            return Err(Error::RankMismatch {
+                op: "concatenate",
+                expected: first.ndim(),
+                index,
+                actual: array.ndim(),
+            });
+        }
+        if array.shape().iter().zip(first.shape()).enumerate().any(
+            |(dimension, (actual, expected))| {
+                dimension != axis && actual != expected
+            },
+        ) {
+            return Err(Error::ShapeMismatch {
+                op: "concatenate",
+                expected: first.shape().to_vec(),
+                index,
+                actual: array.shape().to_vec(),
+            });
+        }
+    }
 
     let mut output_shape = first.shape().to_vec();
     let mut axis_len = 0usize;

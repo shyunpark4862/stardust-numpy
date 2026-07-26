@@ -27,6 +27,32 @@ fn normalized_basic_indexing_handles_reverse_ellipsis_and_new_axis() {
 }
 
 #[test]
+fn direct_basic_indexing_handles_omitted_axes_and_reverse_slices() {
+    let array = Array::from_vec((0_i64..12).collect(), &[3, 4]).unwrap();
+    let direct =
+        gather(&array, &[IndexSpec::slice(None, None, Some(-1))]).unwrap();
+    let general = gather(
+        &array,
+        &[IndexSpec::slice(None, None, Some(-1)), IndexSpec::Ellipsis],
+    )
+    .unwrap();
+
+    assert_eq!(direct.shape(), &[3, 4]);
+    assert_eq!(direct.to_vec(), vec![8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3]);
+    assert_eq!(direct.to_vec(), general.to_vec());
+
+    let direct_last = gather(&array, &[IndexSpec::index(-1)]).unwrap();
+    let general_last =
+        gather(&array, &[IndexSpec::index(-1), IndexSpec::Ellipsis]).unwrap();
+    assert_eq!(direct_last.to_vec(), general_last.to_vec());
+
+    let empty = gather(&array, &[IndexSpec::slice(Some(0), Some(0), Some(-1))])
+        .unwrap();
+    assert_eq!(empty.shape(), &[0, 4]);
+    assert!(empty.to_vec().is_empty());
+}
+
+#[test]
 fn fancy_and_boolean_indexing_follow_c_order() {
     let array = Array::from_vec((0_i64..12).collect(), &[3, 4]).unwrap();
     let rows = Array::from_slice(&[2_i64, 0], &[2]).unwrap();
@@ -69,18 +95,54 @@ fn scatter_scalar_and_array_detach_shared_storage() {
 }
 
 #[test]
+fn direct_basic_scatter_handles_slices_arrays_and_omitted_axes() {
+    let source = Array::from_vec((0_i64..12).collect(), &[3, 4]).unwrap();
+    let mut direct = source.clone();
+    let mut general = source.clone();
+    let reversed_rows = IndexSpec::slice(None, None, Some(-2));
+    scatter(&mut direct, std::slice::from_ref(&reversed_rows), 9).unwrap();
+    scatter(&mut general, &[reversed_rows, IndexSpec::Ellipsis], 9).unwrap();
+    assert_eq!(direct.to_vec(), vec![9, 9, 9, 9, 4, 5, 6, 7, 9, 9, 9, 9]);
+    assert_eq!(direct.to_vec(), general.to_vec());
+    assert_eq!(source.to_vec(), (0_i64..12).collect::<Vec<_>>());
+
+    let values = Array::from_slice(&[1_i64, 2, 3, 4], &[4]).unwrap();
+    scatter_array(&mut direct, &[IndexSpec::index(1)], &values).unwrap();
+    scatter_array(
+        &mut general,
+        &[IndexSpec::index(1), IndexSpec::Ellipsis],
+        &values,
+    )
+    .unwrap();
+    assert_eq!(direct.to_vec(), vec![9, 9, 9, 9, 1, 2, 3, 4, 9, 9, 9, 9]);
+    assert_eq!(direct.to_vec(), general.to_vec());
+}
+
+#[test]
 fn indexing_errors_are_structured() {
     let array = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();
     assert!(matches!(
         gather(&array, &[IndexSpec::index(3)]),
         Err(Error::IndexOutOfBounds { .. })
     ));
-    assert!(
-        gather(&array, &[IndexSpec::Ellipsis, IndexSpec::Ellipsis]).is_err()
-    );
-    assert!(
-        gather(&array, &[IndexSpec::index(0), IndexSpec::index(0)]).is_err()
-    );
+    assert!(matches!(
+        gather(&array, &[IndexSpec::Ellipsis, IndexSpec::Ellipsis]),
+        Err(Error::InvalidIndex(_))
+    ));
+    assert!(matches!(
+        gather(&array, &[IndexSpec::index(0), IndexSpec::index(0)]),
+        Err(Error::InvalidIndex(_))
+    ));
+    assert!(matches!(
+        gather(&array, &[IndexSpec::slice(None, None, Some(0))]),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    let bad_mask = Array::from_slice(&[true, false], &[2]).unwrap();
+    assert!(matches!(
+        gather(&array, &[IndexSpec::BoolArray(bad_mask)]),
+        Err(Error::InvalidIndex(_))
+    ));
 }
 
 #[test]

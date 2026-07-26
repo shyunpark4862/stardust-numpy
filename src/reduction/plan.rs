@@ -4,11 +4,11 @@
 //! elements each output slot folds. [`TraversalSchedule`] picks contiguous
 //! suffix chunks, prefix rows, or a general strided walk once per call.
 
-use crate::axis::normalize_axis_list;
+use crate::axis::resolve_axis_list;
 use crate::error::Result;
 use crate::shape::{checked_size_of_shape, size_of_shape_unchecked};
 
-/// Sort and deduplicate normalized axis indices.
+/// Resolve and sort reduction axis indices.
 ///
 /// Negative axis indices are resolved against `ndim` before sorting so
 /// kernels always see ascending, unique axis numbers.
@@ -20,12 +20,11 @@ use crate::shape::{checked_size_of_shape, size_of_shape_unchecked};
 ///
 /// # Returns
 ///
-/// Sorted, deduplicated axis indices in `[0, ndim)`.
-fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Vec<usize> {
-    let mut out = normalize_axis_list(axes, ndim);
+/// Sorted, unique axis indices in `[0, ndim)`.
+fn resolve_reduction_axes(axes: &[isize], ndim: usize) -> Result<Vec<usize>> {
+    let mut out = resolve_axis_list(axes, ndim)?;
     out.sort_unstable();
-    out.dedup();
-    out
+    Ok(out)
 }
 
 /// Resolve which axes collapse for a reduction call.
@@ -53,7 +52,7 @@ pub(crate) fn resolve_reduced_axes(
     Ok(match axes {
         None => (0..ndim).collect(),
         Some([]) => vec![],
-        Some(axes) => normalize_reduction_axes(axes, ndim),
+        Some(axes) => resolve_reduction_axes(axes, ndim)?,
     })
 }
 
@@ -326,8 +325,8 @@ impl ReducePlan {
 
     /// True when the reduced block has zero elements.
     ///
-    /// Empty reduced slices yield identity fills or NaN sentinels depending
-    /// on the operation, without touching input memory.
+    /// Callers use this to select an identity, sentinel, or structured error
+    /// without touching input memory.
     ///
     /// # Returns
     ///

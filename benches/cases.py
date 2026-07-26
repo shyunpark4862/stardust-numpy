@@ -648,9 +648,9 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
             target = np_a.copy()
             return lambda: target.__setitem__((0,) * case.ndim, np_dtype(1))
 
-        return BackendTask(sd_factory, fresh=True), BackendTask(
-            np_factory, fresh=True
-        )
+        # Reassigning the same scalar to the same element is idempotent, so one
+        # target per sample run keeps array construction outside the timed loop.
+        return BackendTask(sd_factory), BackendTask(np_factory)
     if name == "Array.__len__":
         return _pair_tasks(lambda: len(sd_a), lambda: len(np_a))
     if name == "Array.__iter__":

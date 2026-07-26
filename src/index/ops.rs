@@ -10,6 +10,9 @@ use crate::array::Array;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
 use crate::index::advance_multi_index;
+use crate::index::bounds::{
+    normalize_element_index, resolve_slice, slice_length,
+};
 use crate::index::prepare::{
     prepare_index, FancyLayout, PreparedEntry, PreparedIndex,
 };
@@ -67,11 +70,21 @@ pub fn gather<T: Scalar>(
     array: &Array<T>,
     index: &[IndexSpec],
 ) -> Result<Array<T>> {
+    if is_direct_basic_index(index) {
+        let meta = direct_basic_view_meta(array, index)?;
+        return Array::from_shared_parts(
+            Arc::clone(&array.data),
+            meta.shape,
+            meta.strides,
+            meta.offset,
+            array.writable,
+        );
+    }
     let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
         gather_fancy(array, &prepared)
     } else {
-        gather_basic(array, &prepared)
+        gather_prepared_basic(array, &prepared)
     }
 }
 
@@ -119,11 +132,16 @@ pub fn scatter<T: Scalar>(
     if !array.writable {
         return Err(Error::ReadOnly);
     }
+    if is_direct_basic_index(index) {
+        return scatter_basic_scalar_with(array, value, |array| {
+            direct_basic_view_meta(array, index)
+        });
+    }
     let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
         scatter_fancy_scalar(array, &prepared, value)
     } else {
-        scatter_basic_scalar(array, &prepared, value)
+        scatter_prepared_basic_scalar(array, &prepared, value)
     }
 }
 
@@ -174,11 +192,16 @@ pub fn scatter_array<T: Scalar>(
     if !array.writable {
         return Err(Error::ReadOnly);
     }
+    if is_direct_basic_index(index) {
+        return scatter_basic_array_with(array, values, |array| {
+            direct_basic_view_meta(array, index)
+        });
+    }
     let prepared = prepare_index(array.shape(), index)?;
     if prepared.has_fancy() {
         scatter_fancy_array(array, &prepared, values)
     } else {
-        scatter_basic_array(array, &prepared, values)
+        scatter_prepared_basic_array(array, &prepared, values)
     }
 }
 
@@ -293,6 +316,123 @@ struct BasicViewMeta {
     offset: usize,
 }
 
+#[inline]
+fn is_direct_basic_index(index: &[IndexSpec]) -> bool {
+    index.iter().all(|item| {
+        matches!(item, IndexSpec::Index(_) | IndexSpec::Slice { .. })
+    })
+}
+
+/// Resolve an integer/slice-only raw index straight into view metadata.
+///
+/// Integer and slice bounds remain core-owned and are resolved exactly once
+/// per call; omitted trailing axes are appended without materializing entries.
+fn direct_basic_view_meta<T: Scalar>(
+    array: &Array<T>,
+    index: &[IndexSpec],
+) -> Result<BasicViewMeta> {
+    debug_assert!(is_direct_basic_index(index));
+    if index.len() > array.ndim() {
+        return Err(Error::InvalidIndex(format!(
+            "too many indices for array: array is {}-dimensional, but {} were indexed",
+            array.ndim(),
+            index.len()
+        )));
+    }
+
+    let mut offset = array.offset() as isize;
+    let mut shape = Vec::with_capacity(array.ndim());
+    let mut strides = Vec::with_capacity(array.ndim());
+
+    for (source_axis, entry) in index.iter().enumerate() {
+        let source_stride = array.strides()[source_axis];
+        match entry {
+            IndexSpec::Index(raw) => {
+                let index =
+                    normalize_element_index(*raw, array.shape()[source_axis])?;
+                offset = checked_index_offset(offset, index, source_stride)?;
+            }
+            IndexSpec::Slice { start, stop, step } => {
+                let (start, stop, step) = resolve_slice(
+                    *start,
+                    *stop,
+                    *step,
+                    array.shape()[source_axis],
+                )?;
+                let len = slice_length(start, stop, step)?;
+                if len > 0 {
+                    offset =
+                        checked_slice_offset(offset, start, source_stride)?;
+                }
+                shape.push(len);
+                let stride = checked_slice_stride(source_stride, step, len)?;
+                strides.push(stride);
+            }
+            _ => unreachable!("direct-basic classification excluded variant"),
+        }
+    }
+
+    for source_axis in index.len()..array.ndim() {
+        shape.push(array.shape()[source_axis]);
+        strides.push(array.strides()[source_axis]);
+    }
+
+    Ok(BasicViewMeta {
+        shape,
+        strides,
+        offset: match usize::try_from(offset) {
+            Ok(offset) => offset,
+            Err(_) => {
+                return Err(Error::InvalidArgument(
+                    "indexing produced a negative buffer offset".into(),
+                ))
+            }
+        },
+    })
+}
+
+fn checked_index_offset(
+    offset: isize,
+    index: usize,
+    stride: isize,
+) -> Result<isize> {
+    let delta = isize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_mul(stride))
+        .ok_or_else(|| {
+            Error::InvalidArgument("index offset overflows isize".into())
+        })?;
+    offset.checked_add(delta).ok_or_else(|| {
+        Error::InvalidArgument("index offset overflows isize".into())
+    })
+}
+
+fn checked_slice_offset(
+    offset: isize,
+    start: isize,
+    stride: isize,
+) -> Result<isize> {
+    let delta = start.checked_mul(stride).ok_or_else(|| {
+        Error::InvalidArgument("slice start offset overflows isize".into())
+    })?;
+    offset.checked_add(delta).ok_or_else(|| {
+        Error::InvalidArgument("slice start offset overflows isize".into())
+    })
+}
+
+fn checked_slice_stride(
+    source_stride: isize,
+    step: isize,
+    len: usize,
+) -> Result<isize> {
+    source_stride
+        .checked_mul(step)
+        .or_else(|| (len <= 1).then_some(0))
+        .ok_or_else(|| {
+            Error::InvalidArgument("slice stride overflows isize".into())
+        })
+}
+
 /// Compute view shape, strides, and offset for a basic prepared index.
 ///
 /// Walks [`PreparedEntry`] slots that do not involve fancy arrays. Integer
@@ -330,47 +470,19 @@ fn basic_view_meta<T: Scalar>(
             }
             PreparedEntry::Index(idx) => {
                 // Integer index collapses an axis; advance offset only.
-                let delta = isize::try_from(*idx)
-                    .ok()
-                    .and_then(|index| {
-                        index.checked_mul(array.strides()[source_axis])
-                    })
-                    .ok_or_else(|| {
-                        Error::InvalidArgument(
-                            "index offset overflows isize".into(),
-                        )
-                    })?;
-                offset = offset.checked_add(delta).ok_or_else(|| {
-                    Error::InvalidArgument(
-                        "index offset overflows isize".into(),
-                    )
-                })?;
+                offset = checked_index_offset(
+                    offset,
+                    *idx,
+                    array.strides()[source_axis],
+                )?;
                 source_axis += 1;
             }
             PreparedEntry::Slice { start, len, step } => {
                 let source_stride = array.strides()[source_axis];
-                let delta =
-                    start.checked_mul(source_stride).ok_or_else(|| {
-                        Error::InvalidArgument(
-                            "slice start offset overflows isize".into(),
-                        )
-                    })?;
-                offset = offset.checked_add(delta).ok_or_else(|| {
-                    Error::InvalidArgument(
-                        "slice start offset overflows isize".into(),
-                    )
-                })?;
+                offset = checked_slice_offset(offset, *start, source_stride)?;
                 shape.push(*len);
                 // Output stride = source stride × slice step (0 if len ≤ 1).
-                let stride = source_stride
-                    .checked_mul(*step)
-                    .or_else(|| (*len <= 1).then_some(0))
-                    .ok_or_else(|| {
-                        Error::InvalidArgument(
-                            "slice stride overflows isize".into(),
-                        )
-                    })?;
-                strides.push(stride);
+                strides.push(checked_slice_stride(source_stride, *step, *len)?);
                 source_axis += 1;
             }
             PreparedEntry::IntegerArray(_) => {}
@@ -402,7 +514,7 @@ fn basic_view_meta<T: Scalar>(
 /// # Errors
 ///
 /// Propagates errors from [`basic_view_meta`].
-fn gather_basic<T: Scalar>(
+fn gather_prepared_basic<T: Scalar>(
     array: &Array<T>,
     prepared: &PreparedIndex,
 ) -> Result<Array<T>> {
@@ -434,14 +546,24 @@ fn gather_basic<T: Scalar>(
 /// # Errors
 ///
 /// Propagates errors from [`basic_view_meta`].
-fn scatter_basic_scalar<T: Scalar>(
+fn scatter_prepared_basic_scalar<T: Scalar>(
     array: &mut Array<T>,
     prepared: &PreparedIndex,
     value: T,
 ) -> Result<()> {
-    let mut meta = basic_view_meta(array, prepared)?;
+    scatter_basic_scalar_with(array, value, |array| {
+        basic_view_meta(array, prepared)
+    })
+}
+
+fn scatter_basic_scalar_with<T: Scalar>(
+    array: &mut Array<T>,
+    value: T,
+    resolve_meta: impl Fn(&Array<T>) -> Result<BasicViewMeta>,
+) -> Result<()> {
+    let mut meta = resolve_meta(array)?;
     if array.ensure_unique_storage_for_write() {
-        meta = basic_view_meta(array, prepared)?;
+        meta = resolve_meta(array)?;
     }
     let data = Arc::make_mut(&mut array.data);
 
@@ -484,16 +606,26 @@ fn scatter_basic_scalar<T: Scalar>(
 /// # Errors
 ///
 /// Propagates broadcast, view, or copy errors.
-fn scatter_basic_array<T: Scalar>(
+fn scatter_prepared_basic_array<T: Scalar>(
     array: &mut Array<T>,
     prepared: &PreparedIndex,
     values: &Array<T>,
 ) -> Result<()> {
-    let mut meta = basic_view_meta(array, prepared)?;
+    scatter_basic_array_with(array, values, |array| {
+        basic_view_meta(array, prepared)
+    })
+}
+
+fn scatter_basic_array_with<T: Scalar>(
+    array: &mut Array<T>,
+    values: &Array<T>,
+    resolve_meta: impl Fn(&Array<T>) -> Result<BasicViewMeta>,
+) -> Result<()> {
+    let mut meta = resolve_meta(array)?;
     let aligned = prepare_scatter_source(array, values, &meta.shape)?;
 
     if array.ensure_unique_storage_for_write() {
-        meta = basic_view_meta(array, prepared)?;
+        meta = resolve_meta(array)?;
     }
     let dest_c_contiguous = is_c_contiguous(&meta.shape, &meta.strides);
     let src_slice = aligned.as_c_contiguous_slice();

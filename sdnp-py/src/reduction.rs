@@ -1,8 +1,8 @@
 //! Reduction and cumulative free functions.
 //!
 //! Parses `axis`/`axes`, `keepdims`, and `nan_policy` at the Python boundary,
-//! validates empty-slice rules before calling typed `sdnp` reduction kernels,
-//! and applies 0-D unwrap on scalar results. Dtype-specific result types
+//! applies Python-only argument policy, and maps typed `sdnp` reduction
+//! results. Dtype-specific result types
 //! (e.g. bool `sum` → int64) are chosen in the dispatch table below.
 
 use pyo3::prelude::*;
@@ -12,10 +12,7 @@ use crate::array::{array_from_inner, wrap_result};
 use crate::coerce::{coerce_optional_axes, coerce_optional_axis};
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
-use crate::validate::{
-    axis_refers_to, check_arg_nonempty, check_axis_xor_axes,
-    check_nonempty_reduction, check_optional_axes, check_optional_axis,
-};
+use crate::validate::check_axis_xor_axes;
 
 /// Parse `nan_policy` string into the core enum.
 ///
@@ -42,63 +39,12 @@ fn parse_nan_policy(s: &str) -> PyResult<NanPolicy> {
     }
 }
 
-/// Reject all-NaN slices for argmin/argmax when policy is `ignore`.
-///
-/// Only applies to float64 storage. Other dtypes pass through unchanged.
-///
-/// # Arguments
-///
-/// * `name` - Operation name for error messages (`"argmin"` or `"argmax"`).
-/// * `inner` - Typed array storage.
-/// * `axis` - Optional reduction axis after coercion.
-/// * `policy` - Parsed NaN handling policy.
-///
-/// # Returns
-///
-/// `Ok(())` when no all-NaN slice is found under the policy.
-///
-/// # Errors
-///
-/// * `ValueError` — an all-NaN slice would be reduced with `ignore`.
-fn check_arg_nan_slice(
-    name: &str,
-    inner: &ArrayInner,
-    axis: Option<isize>,
-    policy: NanPolicy,
-) -> PyResult<()> {
-    if policy != NanPolicy::Ignore {
-        return Ok(());
-    }
-    let ArrayInner::F64(array) = inner else {
-        return Ok(());
-    };
-    let values = array.to_vec();
-    if axis.is_none() {
-        if !values.is_empty() && values.iter().all(|value| value.is_nan()) {
-            return Err(value_error(format!("{name} of all-NaN slice")));
-        }
-        return Ok(());
-    }
-
-    let raw_axis = axis.unwrap();
-    let axis = (0..array.ndim())
-        .find(|&dimension| axis_refers_to(raw_axis, dimension, array.ndim()))
-        .expect("axis was validated before checking NaN slices");
-    // Walk reduction slices in row-major flat layout.
-    let outer = array.shape()[..axis].iter().product::<usize>();
-    let axis_len = array.shape()[axis];
-    let inner_len = array.shape()[axis + 1..].iter().product::<usize>();
-    for outer_index in 0..outer {
-        for inner_index in 0..inner_len {
-            let all_nan = (0..axis_len).all(|axis_index| {
-                values[(outer_index * axis_len + axis_index) * inner_len
-                    + inner_index]
-                    .is_nan()
-            });
-            if all_nan {
-                return Err(value_error(format!("{name} of all-NaN slice")));
-            }
-        }
+/// Preserve the Python API rule that an explicit axes sequence is non-empty.
+fn reject_empty_axes(axes: Option<&[isize]>) -> PyResult<()> {
+    if axes.is_some_and(<[isize]>::is_empty) {
+        return Err(value_error(
+            "axes must be a non-empty sequence of integers",
+        ));
     }
     Ok(())
 }
@@ -112,7 +58,7 @@ fn check_arg_nan_slice(
 ///
 /// * `inner` - Typed input storage.
 /// * `name` - Reduction op tag (`"sum"`, `"mean"`, etc.).
-/// * `axes` - Optional axis list after validation.
+/// * `axes` - Optional axis list after Python coercion.
 /// * `keepdims` - Keep reduced axes as length-1 dimensions.
 /// * `policy` - NaN policy for floating reductions.
 ///
@@ -181,7 +127,11 @@ fn reduce_inner(
             "std" => ArrayInner::F64(map_sdnp(sdnp::std(
                 arr, axes, keepdims, policy,
             ))?),
-            _ => unreachable!(),
+            _ => {
+                return Err(value_error(format!(
+                    "unsupported reduction {name} for int"
+                )))
+            }
         },
         ArrayInner::F64(arr) => match name {
             "sum" => ArrayInner::F64(map_sdnp(sdnp::sum(
@@ -205,7 +155,11 @@ fn reduce_inner(
             "std" => ArrayInner::F64(map_sdnp(sdnp::std(
                 arr, axes, keepdims, policy,
             ))?),
-            _ => unreachable!(),
+            _ => {
+                return Err(value_error(format!(
+                    "unsupported reduction {name} for float"
+                )))
+            }
         },
         ArrayInner::C64(arr) => match name {
             "sum" => ArrayInner::C64(map_sdnp(sdnp::sum(
@@ -227,14 +181,18 @@ fn reduce_inner(
                     "min/max are not supported for complex arrays",
                 ))
             }
-            _ => unreachable!(),
+            _ => {
+                return Err(value_error(format!(
+                    "unsupported reduction {name} for complex"
+                )))
+            }
         },
     })
 }
 
 /// Shared axis-reduction body for `sum`, `prod`, `min`, `max`, `mean`, `var`.
 ///
-/// Parses axes, validates optional empty-slice rules, dispatches through
+/// Parses axes, enforces Python-only keyword policy, dispatches through
 /// [`reduce_inner`], and applies 0-D unwrap on the result.
 ///
 /// # Arguments
@@ -245,8 +203,6 @@ fn reduce_inner(
 /// * `axis_args` - The mutually exclusive `axis` and `axes` keywords.
 /// * `keepdims` - Keep reduced axes as length-1 dimensions.
 /// * `nan_policy` - `"propagate"` or `"ignore"`.
-/// * `check_empty` - Whether to reject empty reduction slices first.
-///
 /// # Returns
 ///
 /// Python object for the reduced array or bare scalar.
@@ -262,25 +218,17 @@ fn reduce_axis_fn(
     axis_args: (Option<&Bound<'_, PyAny>>, Option<&Bound<'_, PyAny>>),
     keepdims: bool,
     nan_policy: &str,
-    check_empty: bool,
 ) -> PyResult<PyObject> {
     let (axis, axes) = axis_args;
     a.reject_zero_dim_input(name)?;
     let policy = parse_nan_policy(nan_policy)?;
     check_axis_xor_axes(axis.is_some(), axes.is_some())?;
-    let ndim = a.inner.ndim();
     let ax = if axes.is_some() {
-        let ax = coerce_optional_axes(axes)?;
-        check_optional_axes(ax.as_deref(), ndim)?;
-        ax
+        coerce_optional_axes(axes)?
     } else {
-        let ax = coerce_optional_axes(axis)?;
-        check_optional_axes(ax.as_deref(), ndim)?;
-        ax
+        coerce_optional_axes(axis)?
     };
-    if check_empty {
-        check_nonempty_reduction(name, &a.inner, ax.as_deref())?;
-    }
+    reject_empty_axes(ax.as_deref())?;
     wrap_result(
         py,
         reduce_inner(&a.inner, name, ax.as_deref(), keepdims, policy)?,
@@ -327,7 +275,7 @@ pub fn sum(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "sum", (axis, axes), keepdims, nan_policy, false)
+    reduce_axis_fn(py, a, "sum", (axis, axes), keepdims, nan_policy)
 }
 
 /// Product of array elements over the given axes.
@@ -370,7 +318,7 @@ pub fn prod(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "prod", (axis, axes), keepdims, nan_policy, false)
+    reduce_axis_fn(py, a, "prod", (axis, axes), keepdims, nan_policy)
 }
 
 /// Minimum value over the given axes.
@@ -412,7 +360,7 @@ pub fn min(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "min", (axis, axes), keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "min", (axis, axes), keepdims, nan_policy)
 }
 
 /// Maximum value over the given axes.
@@ -454,7 +402,7 @@ pub fn max(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "max", (axis, axes), keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "max", (axis, axes), keepdims, nan_policy)
 }
 
 /// Arithmetic mean over the given axes.
@@ -497,7 +445,7 @@ pub fn mean(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "mean", (axis, axes), keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "mean", (axis, axes), keepdims, nan_policy)
 }
 
 /// Population variance (`ddof=0`) over the given axes.
@@ -539,7 +487,7 @@ pub fn var(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "var", (axis, axes), keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "var", (axis, axes), keepdims, nan_policy)
 }
 
 /// Population standard deviation over the given axes.
@@ -582,24 +530,7 @@ pub fn py_std(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    a.reject_zero_dim_input("std")?;
-    let policy = parse_nan_policy(nan_policy)?;
-    check_axis_xor_axes(axis.is_some(), axes.is_some())?;
-    let ndim = a.inner.ndim();
-    let ax = if axes.is_some() {
-        let ax = coerce_optional_axes(axes)?;
-        check_optional_axes(ax.as_deref(), ndim)?;
-        ax
-    } else {
-        let ax = coerce_optional_axes(axis)?;
-        check_optional_axes(ax.as_deref(), ndim)?;
-        ax
-    };
-    check_nonempty_reduction("std", &a.inner, ax.as_deref())?;
-    wrap_result(
-        py,
-        reduce_inner(&a.inner, "std", ax.as_deref(), keepdims, policy)?,
-    )
+    reduce_axis_fn(py, a, "std", (axis, axes), keepdims, nan_policy)
 }
 
 /// True if any element is logically true over the given axes.
@@ -639,7 +570,7 @@ pub fn any(
 ) -> PyResult<PyObject> {
     a.reject_zero_dim_input("any")?;
     let ax = coerce_optional_axes(axis)?;
-    check_optional_axes(ax.as_deref(), a.inner.ndim())?;
+    reject_empty_axes(ax.as_deref())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::Bool(map_sdnp(sdnp::any(arr, ax.as_deref(), keepdims))?)
@@ -694,7 +625,7 @@ pub fn all(
 ) -> PyResult<PyObject> {
     a.reject_zero_dim_input("all")?;
     let ax = coerce_optional_axes(axis)?;
-    check_optional_axes(ax.as_deref(), a.inner.ndim())?;
+    reject_empty_axes(ax.as_deref())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::Bool(map_sdnp(sdnp::all(arr, ax.as_deref(), keepdims))?)
@@ -753,9 +684,6 @@ pub fn argmin(
     a.reject_zero_dim_input("argmin")?;
     let policy = parse_nan_policy(nan_policy)?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
-    check_arg_nonempty("argmin", &a.inner, ax)?;
-    check_arg_nan_slice("argmin", &a.inner, ax, policy)?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::argmin(arr, ax, policy))?)
@@ -816,9 +744,6 @@ pub fn argmax(
     a.reject_zero_dim_input("argmax")?;
     let policy = parse_nan_policy(nan_policy)?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
-    check_arg_nonempty("argmax", &a.inner, ax)?;
-    check_arg_nan_slice("argmax", &a.inner, ax, policy)?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::argmax(arr, ax, policy))?)
@@ -876,7 +801,6 @@ pub fn cumsum(
     a.reject_zero_dim_input("cumsum")?;
     let policy = parse_nan_policy(nan_policy)?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::cumsum(arr, ax, policy))?)
@@ -932,7 +856,6 @@ pub fn cumprod(
     a.reject_zero_dim_input("cumprod")?;
     let policy = parse_nan_policy(nan_policy)?;
     let ax = coerce_optional_axis(axis)?;
-    check_optional_axis(ax, a.inner.ndim())?;
     let inner = match &a.inner {
         ArrayInner::Bool(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::cumprod(arr, ax, policy))?)

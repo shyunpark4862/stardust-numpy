@@ -117,6 +117,7 @@ pub(crate) fn prepare_index(
     index: &[IndexSpec],
 ) -> Result<PreparedIndex> {
     let index = expand_ellipsis(shape, index)?;
+    validate_boolean_mask_shapes(shape, &index)?;
     let index = expand_boolean_masks(&index)?;
     let mut entries = resolve_entries(shape, &index)?;
 
@@ -202,7 +203,7 @@ fn expand_ellipsis(
         .filter(|i| matches!(i, IndexSpec::Ellipsis))
         .count();
     if ellipsis_count > 1 {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidIndex(
             "an index can only have a single ellipsis".into(),
         ));
     }
@@ -214,7 +215,7 @@ fn expand_ellipsis(
         .sum();
 
     if used > shape.len() {
-        return Err(Error::InvalidArgument(format!(
+        return Err(Error::InvalidIndex(format!(
             "too many indices for array: array is {}-dimensional, but {} were indexed",
             shape.len(),
             used
@@ -243,6 +244,41 @@ fn expand_ellipsis(
         }
     }
     Ok(out)
+}
+
+/// Validate boolean masks against the source axes they consume.
+///
+/// This runs after ellipsis expansion, so every omitted source axis is
+/// represented by an explicit full slice. Validation must happen before masks
+/// are lowered to integer coordinate arrays, which would lose their original
+/// shape relationship to the source.
+fn validate_boolean_mask_shapes(
+    shape: &[usize],
+    index: &[IndexSpec],
+) -> Result<()> {
+    let mut source_axis = 0usize;
+    for item in index {
+        match item {
+            IndexSpec::NewAxis => {}
+            IndexSpec::BoolArray(mask) => {
+                let end = source_axis + mask.ndim();
+                if end > shape.len() || mask.shape() != &shape[source_axis..end]
+                {
+                    return Err(Error::InvalidIndex(format!(
+                        "boolean index shape {:?} does not match indexed dimensions {:?}",
+                        mask.shape(),
+                        shape.get(source_axis..end).unwrap_or(&[])
+                    )));
+                }
+                source_axis = end;
+            }
+            IndexSpec::Index(_)
+            | IndexSpec::Slice { .. }
+            | IndexSpec::IntegerArray(_) => source_axis += 1,
+            IndexSpec::Ellipsis => unreachable!("ellipsis was expanded"),
+        }
+    }
+    Ok(())
 }
 
 /// Replace boolean masks with per-axis integer coordinate arrays.

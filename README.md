@@ -53,13 +53,17 @@ flowchart LR
 
 | Layer                               | Responsibility                                                                                                                                              |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Rust core** (`src/`)              | Buffers, shape/strides, views + copy-on-write, broadcasting, ufunc kernels, reductions, linear algebra, fancy indexing gather/scatter                       |
-| **Python binding** (`sdnp-py/src/`) | `import sdnp`, operator overloading, Python object ↔ array coercion, runtime dtype dispatch over a compile-time-generic core, `__repr__`, error translation |
+| **Rust core** (`src/`)              | Buffers, shape/strides, semantic validation, views + copy-on-write, broadcasting, ufunc/reduction/sorting kernels, linear algebra, indexing gather/scatter |
+| **Python binding** (`sdnp-py/src/`) | `import sdnp`, operator overloading, Python object ↔ array coercion, Python-only API policy, runtime dtype dispatch, `__repr__`, core error translation     |
 
 The Rust core stays fully generic over `T: Scalar` and has **no runtime dtype
 concept**; `sdnp-py` wraps it in a small tagged enum (`Bool` / `I64` / `F64` /
 `C64`) and matches on it once per call, so the compiled kernels stay
-monomorphic and inlinable.
+monomorphic and inlinable. Shared shape, index, axis, and empty-operand
+semantics are validated by the core. Binding checks are limited to Python
+surface policy, including 0-D rejection and deliberately narrower dtype
+support for creation APIs such as `diag` (while `linalg.diagonal` accepts
+bool).
 
 ## Repository layout
 
@@ -84,7 +88,7 @@ stardust-numpy/
 │   └── linalg/           # contraction/diagonal geometry, kernels, public ops
 ├── tests/                # Rust integration tests (core-only semantics)
 ├── sdnp-py/              # PyO3 Python extension
-│   ├── src/              # PyArray, dtype dispatch, binding-level validation
+│   ├── src/              # PyArray, coercion/dtype dispatch, Python-only policy
 │   ├── tests/            # pytest: API contract, NumPy differential, property tests
 │   └── pyproject.toml
 ├── benches/              # sdnp-vs-NumPy benchmark runner (see Benchmarking)
@@ -230,6 +234,10 @@ sdnp-py/.venv/bin/python benches/benchmark.py run --profile full
 sdnp-py/.venv/bin/python benches/benchmark.py run --function add
 sdnp-py/.venv/bin/python benches/benchmark.py run \
   --function matmul --dtype float64 --size large
+
+# Re-measure selected cases and merge them into the existing full summary
+sdnp-py/.venv/bin/python benches/benchmark.py run \
+  --profile full --merge --function Array.to_list
 
 # Explicit measurement controls
 sdnp-py/.venv/bin/python benches/benchmark.py run \

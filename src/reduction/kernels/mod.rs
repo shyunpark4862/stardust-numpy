@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::array::Array;
-use crate::axis::normalize_axis;
+use crate::axis::resolve_axis;
 use crate::dtype::Scalar;
 use crate::error::Result;
 use crate::reduction::plan::{

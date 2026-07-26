@@ -34,6 +34,7 @@ from benches.cases import (
 )
 from benches.matrix import DTYPES, NDIMS, PROFILES, SIZE_ELEMENTS
 from benches.measure import MeasureConfig, Measurement, measure
+from benches.merge import merge_results, prepare_merge_state
 from benches.report import RESULTS_DIR, render_outputs
 
 SUMMARY_PATH = RESULTS_DIR / "benchmark.json"
@@ -138,7 +139,7 @@ def _metadata(run_id: str, started_at: str) -> dict[str, Any]:
 
 
 def _filters(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    filters = {
         "function": args.function,
         "case": args.case,
         "match": args.match,
@@ -147,6 +148,9 @@ def _filters(args: argparse.Namespace) -> dict[str, Any]:
         "size": args.size,
         "ndim": args.ndim,
     }
+    if args.merge:
+        filters["merge"] = True
+    return filters
 
 
 def _summary_payload(
@@ -265,12 +269,36 @@ def run(args: argparse.Namespace) -> int:
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     metadata = _metadata(run_id, started_at)
+    replaced_case_ids = {case.id for case in cases}
+    kept_results: list[dict[str, Any]] = []
+    preserved_rows: list[dict[str, str]] = []
+    if args.merge:
+        kept_results, preserved_rows, had_base = prepare_merge_state(
+            summary_path=SUMMARY_PATH,
+            raw_path=RAW_PATH,
+            cases=cases,
+            profile=args.profile,
+        )
+        if not had_base:
+            print(
+                "warning: --merge requested but no existing summary was found; "
+                "writing a fresh result set",
+                file=sys.stderr,
+            )
+        elif preserved_rows or kept_results:
+            print(
+                f"merge: keeping {len(kept_results)} existing case(s) and "
+                f"replacing {len(replaced_case_ids)} case(s)",
+                file=sys.stderr,
+            )
     results: list[dict[str, Any]] = []
-    raw_rows = 0
+    raw_rows = len(preserved_rows)
 
     with RAW_PATH.open("w", newline="", encoding="utf-8") as raw_handle:
         writer = csv.DictWriter(raw_handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
+        if preserved_rows:
+            writer.writerows(preserved_rows)
         raw_handle.flush()
         os.fsync(raw_handle.fileno())
 
@@ -318,12 +346,22 @@ def run(args: argparse.Namespace) -> int:
                     "ratio_median": ratio,
                 }
             )
+            merged_results = (
+                merge_results(
+                    kept_results,
+                    results,
+                    profile=args.profile,
+                    replaced_case_ids=replaced_case_ids,
+                )
+                if args.merge
+                else results
+            )
             payload = _summary_payload(
                 metadata=metadata,
                 config=config,
                 profile=args.profile,
                 filters=_filters(args),
-                results=results,
+                results=merged_results,
                 raw_rows=raw_rows,
             )
             _atomic_json(SUMMARY_PATH, payload)
@@ -410,6 +448,14 @@ def parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--list-functions", action="store_true")
     run_parser.add_argument("--list", action="store_true")
+    run_parser.add_argument(
+        "--merge",
+        action="store_true",
+        help=(
+            "merge this run into benches/results/benchmark.json and "
+            "benchmark.csv instead of replacing the full result set"
+        ),
+    )
     run_parser.set_defaults(handler=run)
 
     render_parser = subparsers.add_parser(

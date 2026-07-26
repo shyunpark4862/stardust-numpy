@@ -5,6 +5,7 @@
 //! NaN-ignore `f64` reuses the same layout split as other reductions.
 
 use super::*;
+use crate::error::Error;
 
 /// Population variance (`ddof = 0`) for any type cast via `to_f64`.
 ///
@@ -41,10 +42,7 @@ where
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
     if plan.reduction_is_empty() {
-        return Array::from_vec(
-            vec![f64::NAN; plan.output_len],
-            &plan.output_shape,
-        );
+        return Err(Error::EmptyReduction { op: "var" });
     }
 
     match reduction_path(a, &plan) {
@@ -87,10 +85,7 @@ pub(crate) fn reduce_var_ignore_f64(
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
     if plan.reduction_is_empty() {
-        return Array::from_vec(
-            vec![f64::NAN; plan.output_len],
-            &plan.output_shape,
-        );
+        return Err(Error::EmptyReduction { op: "var" });
     }
     match reduction_path(a, &plan) {
         ReductionPath::SuffixContiguous(slice) => {

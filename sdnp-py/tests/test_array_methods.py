@@ -63,6 +63,21 @@ def test_empty_array_properties():
 
 
 @pytest.mark.parametrize("dtype", [bool, int, float, complex])
+def test_to_list_walks_strided_layout_directly(dtype):
+    expected = np.asarray(VALUES[dtype], dtype=NP_DTYPES[dtype])[:, ::-1].T
+    array = sdnp.array(VALUES[dtype], dtype=dtype)[:, ::-1].T
+
+    assert array.to_list() == expected.tolist()
+
+
+def test_to_list_preserves_deeply_nested_shape():
+    expected = np.arange(64).reshape((2, 2, 2, 2, 2, 2))
+    array = sdnp.arange(64).reshape((2, 2, 2, 2, 2, 2))
+
+    assert array.to_list() == expected.tolist()
+
+
+@pytest.mark.parametrize("dtype", [bool, int, float, complex])
 def test_flat_and_axis_zero_iteration(dtype):
     expected = np.asarray(VALUES[dtype], dtype=NP_DTYPES[dtype])
     array = sdnp.array(VALUES[dtype], dtype=dtype)

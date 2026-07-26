@@ -2,7 +2,8 @@
 //!
 //! Translates `int`, `slice`, `Ellipsis`, `None` (newaxis), tuples, and fancy
 //! integer/boolean arrays into the indexing IR consumed by `sdnp::gather` and
-//! `sdnp::scatter`. Validation runs here before the core sees the spec.
+//! `sdnp::scatter`. This layer validates Python object types and 0-D surface
+//! policy; the core owns index semantics, bounds, masks, and slice validation.
 
 use pyo3::prelude::*;
 use pyo3::types::{PySlice, PyTuple};
@@ -11,15 +12,14 @@ use sdnp::{gather, scatter, scatter_array, IndexSpec};
 use crate::array::PyArray;
 use crate::coerce::coerce_scalar;
 use crate::dispatch::cast_inner;
-use crate::error::{index_error, map_sdnp, type_error, value_error};
+use crate::error::{map_sdnp, type_error, value_error};
 use crate::inner::ArrayInner;
 use crate::unwrap::{finish, PyScalar};
-use crate::validate::check_slice_step;
 
 /// Implement `Array.__getitem__`: parse, validate, gather, unwrap.
 ///
-/// Translates Python index objects into core [`IndexSpec`] lists, validates
-/// bounds and mask shapes, then returns a scalar or new array.
+/// Translates Python index objects into core [`IndexSpec`] lists, then lets the
+/// core validate bounds, masks, and slice semantics before returning a result.
 ///
 /// # Arguments
 ///
@@ -35,7 +35,7 @@ use crate::validate::check_slice_step;
 ///
 /// * `TypeError` — invalid index type or 0-D fancy index array.
 /// * `IndexError` — out-of-bounds, too many indices, or mask mismatch.
-/// * `ValueError` — invalid slice step or core gather failure.
+/// * `ValueError` — core gather failure.
 ///
 /// # Examples
 ///
@@ -52,7 +52,6 @@ pub fn get_item(
     index: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let spec = parse_index(index)?;
-    validate_index(array.inner.shape(), &spec)?;
     let inner = match &array.inner {
         ArrayInner::Bool(a) => ArrayInner::Bool(map_sdnp(gather(a, &spec))?),
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(gather(a, &spec))?),
@@ -98,7 +97,6 @@ pub fn set_item(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let spec = parse_index(index)?;
-    validate_index(array.inner.shape(), &spec)?;
     if let Ok(arr) = value.extract::<PyRef<PyArray>>() {
         arr.reject_zero_dim_input("array assignment")?;
         return set_item_array(array, &spec, &arr.inner);
@@ -259,16 +257,19 @@ fn set_item_array(
 /// # Errors
 ///
 /// * `TypeError` — unsupported index type or 0-D fancy index array.
-/// * `ValueError` — invalid slice step.
+///
+/// Semantic failures are reported by the core when the spec is consumed.
 fn parse_index(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
     if let Ok(tuple) = obj.downcast::<PyTuple>() {
-        let mut specs = Vec::new();
+        let mut specs = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
-            specs.extend(parse_index_item(&item)?);
+            parse_index_item(&item, &mut specs)?;
         }
         return Ok(specs);
     }
-    parse_index_item(obj)
+    let mut specs = Vec::with_capacity(1);
+    parse_index_item(obj, &mut specs)?;
+    Ok(specs)
 }
 
 /// Parse one index slot: int, slice, ellipsis, newaxis, or fancy array.
@@ -288,23 +289,31 @@ fn parse_index(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
 ///
 /// * `TypeError` — invalid index type, 0-D index array, or float/complex
 ///   fancy index.
-fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
+fn parse_index_item(
+    obj: &Bound<'_, PyAny>,
+    specs: &mut Vec<IndexSpec>,
+) -> PyResult<()> {
     let py = obj.py();
     if obj.is_none() {
-        return Ok(vec![IndexSpec::NewAxis]);
+        specs.push(IndexSpec::NewAxis);
+        return Ok(());
     }
     if obj.is(&py.Ellipsis()) {
-        return Ok(vec![IndexSpec::Ellipsis]);
+        specs.push(IndexSpec::Ellipsis);
+        return Ok(());
     }
     if let Ok(slice) = obj.downcast::<PySlice>() {
-        return Ok(vec![parse_slice(slice)?]);
+        specs.push(parse_slice(slice)?);
+        return Ok(());
     }
     if let Ok(i) = obj.extract::<i64>() {
-        return Ok(vec![IndexSpec::Index(i)]);
+        specs.push(IndexSpec::Index(i));
+        return Ok(());
     }
     if let Ok(arr) = obj.extract::<PyRef<PyArray>>() {
         arr.reject_zero_dim_input("array index")?;
-        return fancy_spec(&arr);
+        specs.push(fancy_spec(&arr)?);
+        return Ok(());
     }
     Err(type_error(format!(
         "index must be int, slice, ellipsis, None, or array; got {obj}"
@@ -313,7 +322,8 @@ fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
 
 /// Convert a Python slice object into `IndexSpec::Slice`.
 ///
-/// `None` components remain `None` so the core applies NumPy default bounds.
+/// `None` components remain `None` so the core applies NumPy default bounds
+/// and validates semantic rules, including a zero step.
 ///
 /// # Arguments
 ///
@@ -326,13 +336,43 @@ fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexSpec>> {
 /// # Errors
 ///
 /// * `TypeError` — non-integer slice component.
-/// * `ValueError` — zero slice step.
+#[cfg(all(not(Py_LIMITED_API), not(PyPy), not(GraalPy)))]
+fn parse_slice(slice: &Bound<'_, PySlice>) -> PyResult<IndexSpec> {
+    // SAFETY: `slice` is a live, GIL-bound exact CPython slice object.
+    // PyO3's non-limited CPython `PySliceObject` layout exposes three owned,
+    // non-null references. We only borrow them while the slice and GIL live;
+    // `Bound::from_borrowed_ptr` neither steals nor extends those references.
+    let (start, stop, step) = unsafe {
+        let raw = &*slice.as_ptr().cast::<pyo3::ffi::PySliceObject>();
+        (
+            optional_index_ptr(slice.py(), raw.start)?,
+            optional_index_ptr(slice.py(), raw.stop)?,
+            optional_index_ptr(slice.py(), raw.step)?,
+        )
+    };
+    Ok(IndexSpec::Slice { start, stop, step })
+}
+
+/// Portable fallback for limited-API and alternate Python implementations,
+/// where CPython's concrete `PySliceObject` layout is unavailable.
+#[cfg(any(Py_LIMITED_API, PyPy, GraalPy))]
 fn parse_slice(slice: &Bound<'_, PySlice>) -> PyResult<IndexSpec> {
     let start = optional_index(&slice.getattr("start")?)?;
     let stop = optional_index(&slice.getattr("stop")?)?;
     let step = optional_index(&slice.getattr("step")?)?;
-    check_slice_step(step)?;
     Ok(IndexSpec::Slice { start, stop, step })
+}
+
+#[cfg(all(not(Py_LIMITED_API), not(PyPy), not(GraalPy)))]
+unsafe fn optional_index_ptr(
+    py: Python<'_>,
+    ptr: *mut pyo3::ffi::PyObject,
+) -> PyResult<Option<i64>> {
+    if ptr == pyo3::ffi::Py_None() {
+        return Ok(None);
+    }
+    let object = Bound::<PyAny>::from_borrowed_ptr(py, ptr);
+    Ok(Some(object.extract::<i64>()?))
 }
 
 /// Extract `None` → `None`, otherwise an integer index component.
@@ -350,6 +390,7 @@ fn parse_slice(slice: &Bound<'_, PySlice>) -> PyResult<IndexSpec> {
 /// # Errors
 ///
 /// * `TypeError` — non-integer, non-`None` component.
+#[cfg(any(Py_LIMITED_API, PyPy, GraalPy))]
 fn optional_index(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
     if obj.is_none() {
         return Ok(None);
@@ -374,100 +415,12 @@ fn optional_index(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
 /// # Errors
 ///
 /// * `TypeError` — float or complex fancy index array.
-fn fancy_spec(arr: &PyRef<PyArray>) -> PyResult<Vec<IndexSpec>> {
+fn fancy_spec(arr: &PyRef<PyArray>) -> PyResult<IndexSpec> {
     match &arr.inner {
-        ArrayInner::Bool(a) => Ok(vec![IndexSpec::BoolArray(a.clone())]),
-        ArrayInner::I64(a) => Ok(vec![IndexSpec::IntegerArray(a.clone())]),
+        ArrayInner::Bool(a) => Ok(IndexSpec::BoolArray(a.clone())),
+        ArrayInner::I64(a) => Ok(IndexSpec::IntegerArray(a.clone())),
         ArrayInner::F64(_) | ArrayInner::C64(_) => Err(type_error(
             "fancy index must be an integer or boolean array",
         )),
     }
-}
-
-/// How many source axes one spec entry consumes (0 for newaxis/ellipsis).
-///
-/// Boolean masks consume `mask.ndim()` axes; scalar indices consume one.
-///
-/// # Arguments
-///
-/// * `spec` - One parsed index specification entry.
-///
-/// # Returns
-///
-/// Number of source axes consumed by this entry.
-///
-/// # Errors
-///
-/// None.
-fn axes_consumed(spec: &IndexSpec) -> usize {
-    match spec {
-        IndexSpec::NewAxis | IndexSpec::Ellipsis => 0,
-        IndexSpec::BoolArray(mask) => mask.ndim(),
-        IndexSpec::Index(_)
-        | IndexSpec::Slice { .. }
-        | IndexSpec::IntegerArray(_) => 1,
-    }
-}
-
-/// Check ellipsis count, axis count, and boolean mask shape alignment.
-///
-/// Ensures at most one ellipsis, not too many indices, and that boolean
-/// masks exactly cover the indexed sub-shape.
-///
-/// # Arguments
-///
-/// * `shape` - Source array shape.
-/// * `specs` - Parsed index specification list.
-///
-/// # Returns
-///
-/// `Ok(())` when the index is structurally valid.
-///
-/// # Errors
-///
-/// * `IndexError` — multiple ellipses, too many indices, or boolean mask
-///   shape mismatch.
-fn validate_index(shape: &[usize], specs: &[IndexSpec]) -> PyResult<()> {
-    let ellipsis_count = specs
-        .iter()
-        .filter(|spec| matches!(spec, IndexSpec::Ellipsis))
-        .count();
-    if ellipsis_count > 1 {
-        return Err(index_error("an index can only have a single ellipsis"));
-    }
-
-    let used: usize = specs.iter().map(axes_consumed).sum();
-    if used > shape.len() {
-        return Err(index_error(format!(
-            "too many indices for array: array is {}-dimensional, but {used} were indexed",
-            shape.len()
-        )));
-    }
-    // Ellipsis expands to consume all remaining unindexed axes.
-    let missing = shape.len() - used;
-    let mut source_axis = 0usize;
-    for spec in specs {
-        match spec {
-            IndexSpec::NewAxis => {}
-            IndexSpec::Ellipsis => source_axis += missing,
-            IndexSpec::BoolArray(mask) => {
-                let end = source_axis + mask.ndim();
-                if end > shape.len() || mask.shape() != &shape[source_axis..end]
-                {
-                    return Err(index_error(format!(
-                        "boolean index shape {:?} does not match indexed dimensions {:?}",
-                        mask.shape(),
-                        shape.get(source_axis..end).unwrap_or(&[])
-                    )));
-                }
-                source_axis = end;
-            }
-            IndexSpec::Index(_)
-            | IndexSpec::Slice { .. }
-            | IndexSpec::IntegerArray(_) => {
-                source_axis += 1;
-            }
-        }
-    }
-    Ok(())
 }

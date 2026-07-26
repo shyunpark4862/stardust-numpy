@@ -154,8 +154,8 @@ pub fn arange_stop(stop: i64) -> Result<Array<i64>> {
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - `num`
-///   exceeds allocation limits.
+/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Either bound
+///   is non-finite, or `num` exceeds allocation limits.
 ///
 /// # Examples
 ///
@@ -171,6 +171,7 @@ pub fn linspace(
     num: usize,
     endpoint: bool,
 ) -> Result<Array<f64>> {
+    validate_finite_bounds("linspace", start, stop)?;
     checked_allocation_len::<f64>(num)?;
     let values = linear_values(start, stop, num, endpoint);
     Array::from_vec(values, &[num])
@@ -196,8 +197,9 @@ pub fn linspace(
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - `num`
-///   exceeds allocation limits.
+/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - A bound is
+///   non-finite, `base` is non-finite or non-positive, or `num` exceeds
+///   allocation limits.
 ///
 /// # Examples
 ///
@@ -214,6 +216,12 @@ pub fn logspace(
     endpoint: bool,
     base: f64,
 ) -> Result<Array<f64>> {
+    validate_finite_bounds("logspace", start, stop)?;
+    if !base.is_finite() || base <= 0.0 {
+        return Err(Error::InvalidArgument(
+            "logspace base must be finite and greater than zero".into(),
+        ));
+    }
     checked_allocation_len::<f64>(num)?;
     let values = linear_values(start, stop, num, endpoint)
         .into_iter()
@@ -244,8 +252,9 @@ pub fn logspace(
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - `num`
-///   exceeds allocation limits.
+/// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - A bound is
+///   non-finite or zero, bounds have opposite signs, or `num` exceeds
+///   allocation limits.
 ///
 /// # Examples
 ///
@@ -263,6 +272,17 @@ pub fn geomspace(
     num: usize,
     endpoint: bool,
 ) -> Result<Array<f64>> {
+    validate_finite_bounds("geomspace", start, stop)?;
+    if start == 0.0 || stop == 0.0 {
+        return Err(Error::InvalidArgument(
+            "geomspace bounds must not be zero".into(),
+        ));
+    }
+    if start.is_sign_negative() != stop.is_sign_negative() {
+        return Err(Error::InvalidArgument(
+            "geomspace bounds must have the same sign".into(),
+        ));
+    }
     checked_allocation_len::<f64>(num)?;
     let negative = start.is_sign_negative();
     let log_start = start.abs().ln();
@@ -288,6 +308,16 @@ pub fn geomspace(
         values[num - 1] = stop;
     }
     Array::from_vec(values, &[num])
+}
+
+/// Validate finite endpoints for floating-point range constructors.
+fn validate_finite_bounds(name: &str, start: f64, stop: f64) -> Result<()> {
+    if !start.is_finite() || !stop.is_finite() {
+        return Err(Error::InvalidArgument(format!(
+            "{name} bounds must be finite"
+        )));
+    }
+    Ok(())
 }
 
 /// Shared linear interpolation core for `linspace`, `logspace`, and

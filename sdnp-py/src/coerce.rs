@@ -37,8 +37,7 @@ use crate::unwrap::PyScalar;
 ///
 /// # Errors
 ///
-/// * `ValueError` — negative dimension, empty shape, 0-D request, or
-///   product overflow (`usize`).
+/// * `ValueError` — negative dimension, empty shape, or 0-D request.
 /// * `TypeError` — element is not an integer (via PyO3 extract).
 ///
 /// # Examples
@@ -67,16 +66,13 @@ pub fn parse_shape(obj: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
                 "0-dimensional arrays cannot be created from Python",
             ));
         }
-        validate_shape_size(&shape)?;
         return Ok(shape);
     }
     let dim: isize = obj.extract()?;
     if dim < 0 {
         return Err(value_error("shape dimensions must be non-negative"));
     }
-    let shape = vec![dim as usize];
-    validate_shape_size(&shape)?;
-    Ok(shape)
+    Ok(vec![dim as usize])
 }
 
 /// Parse a reshape target shape, allowing `-1` for one inferred dimension.
@@ -120,30 +116,6 @@ pub fn coerce_reshape_shape(obj: &Bound<'_, PyAny>) -> PyResult<Vec<isize>> {
             value_error("reshape dimensions must be integers")
         })?])
     }
-}
-
-/// Guard against shape products overflowing `usize`.
-///
-/// Multiplies all dimensions with checked arithmetic before allocation.
-/// Called from [`parse_shape`] so huge shape tuples fail early.
-///
-/// # Arguments
-///
-/// * `shape` - Proposed output dimensions (already non-negative).
-///
-/// # Returns
-///
-/// `Ok(())` when the product fits in `usize`.
-///
-/// # Errors
-///
-/// * `ValueError` — product exceeds `usize::MAX`.
-fn validate_shape_size(shape: &[usize]) -> PyResult<()> {
-    shape
-        .iter()
-        .try_fold(1usize, |size, &dimension| size.checked_mul(dimension))
-        .ok_or_else(|| value_error("shape size overflows usize"))?;
-    Ok(())
 }
 
 /// Coerce a Python object to a typed [`PyScalar`].
@@ -711,6 +683,13 @@ pub fn coerce_axes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<isize>> {
     if let Ok(axis) = obj.extract::<isize>() {
         return Ok(vec![axis]);
     }
+    if let Ok(tuple) = obj.downcast::<PyTuple>() {
+        let mut axes = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            axes.push(coerce_axis(&item)?);
+        }
+        return Ok(axes);
+    }
     let seq = obj.downcast::<PySequence>()?;
     let mut axes = Vec::with_capacity(seq.len()?);
     for item in seq.try_iter()? {
@@ -804,8 +783,8 @@ pub fn require_pyarray<'py>(
 /// Collect [`ArrayInner`] values from a Python sequence of arrays.
 ///
 /// Used by `concatenate`, `stack`, and similar multi-array APIs. Clones
-/// inner storage from each element after dtype/shape validation at the
-/// Python boundary.
+/// inner storage from each element after Python object validation. Empty
+/// sequences are preserved so the typed caller can route them to the core.
 ///
 /// # Arguments
 ///
@@ -819,7 +798,7 @@ pub fn require_pyarray<'py>(
 /// # Errors
 ///
 /// * `TypeError` — `seq` is not a sequence or an element is not an Array.
-/// * `ValueError` — empty sequence or 0-D element where disallowed.
+/// * `ValueError` — 0-D element where disallowed.
 pub fn collect_pyarrays(
     seq: &Bound<'_, PyAny>,
     context: &str,
@@ -827,11 +806,6 @@ pub fn collect_pyarrays(
     let sequence = seq.downcast::<PySequence>().map_err(|_| {
         type_error(format!("{context} argument must be a sequence of arrays"))
     })?;
-    if sequence.len()? == 0 {
-        return Err(value_error(format!(
-            "{context} requires at least one array"
-        )));
-    }
     let mut out = Vec::with_capacity(sequence.len()?);
     for (index, item) in sequence.try_iter()?.enumerate() {
         let item = item?;

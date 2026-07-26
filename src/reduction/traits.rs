@@ -7,7 +7,7 @@
 
 use crate::array::Array;
 use crate::dtype::{AsBool, CastTo, Complex64, Scalar};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::reduction::kernels::{
     arg_extremum_axis, arg_extremum_axis_ignore, arg_extremum_flat,
     arg_extremum_flat_ignore, cumulate, cumulate_ignore, reduce_associative,
@@ -1016,6 +1016,7 @@ impl ExtremumReduce for i64 {
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
+                "argmin",
                 |candidate, best| candidate < best,
                 |_| false,
                 |_| false,
@@ -1038,6 +1039,7 @@ impl ExtremumReduce for i64 {
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
+                "argmax",
                 |candidate, best| candidate > best,
                 |_| false,
                 |_| false,
@@ -1084,6 +1086,7 @@ impl ExtremumReduce for bool {
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
+                "argmin",
                 |candidate, best| !candidate && best,
                 |_| false,
                 |value| !value,
@@ -1107,6 +1110,7 @@ impl ExtremumReduce for bool {
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
+                "argmax",
                 |candidate, best| candidate && !best,
                 |_| false,
                 |value| value,
@@ -1167,6 +1171,7 @@ impl ExtremumReduce for f64 {
                 Some(ax) => arg_extremum_axis(
                     a,
                     ax,
+                    "argmin",
                     |c, b| c < b,
                     f64::is_nan,
                     |_| false,
@@ -1206,6 +1211,7 @@ impl ExtremumReduce for f64 {
                 Some(ax) => arg_extremum_axis(
                     a,
                     ax,
+                    "argmax",
                     |c, b| c > b,
                     f64::is_nan,
                     |_| false,
@@ -1259,6 +1265,9 @@ fn mean_propagate<T: MeanReduce>(
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
     }
+    if plan.reduction_is_empty() {
+        return Err(Error::EmptyReduction { op: "mean" });
+    }
     // Every slot folds the same number of elements.
     let count = plan.reduction_len as f64;
     let sums = reduce_associative_with_plan(
@@ -1303,6 +1312,9 @@ fn mean_ignore<T: MeanReduce, N: Fn(T) -> bool>(
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
+    }
+    if plan.reduction_is_empty() {
+        return Err(Error::EmptyReduction { op: "mean" });
     }
     let (mut sums, counts) = reduce_ignore_with_counts(
         a,

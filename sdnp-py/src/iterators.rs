@@ -9,9 +9,7 @@ use sdnp::NdIndex;
 
 use crate::coerce::{parse_shape, require_pyarray};
 use crate::error::map_sdnp;
-use crate::validate::{
-    check_broadcastable, check_nditer_operands, check_nditer_same_dtype,
-};
+use crate::validate::{check_nditer_operands, check_nditer_same_dtype};
 
 use crate::array::PyArray;
 use crate::inner::ArrayInner;
@@ -385,11 +383,6 @@ pub fn py_nditer(
         .map(|item| require_pyarray(&item, "nditer"))
         .collect::<PyResult<_>>()?;
     check_nditer_same_dtype(&arrays)?;
-    let shapes = arrays
-        .iter()
-        .map(|array| array.inner.shape())
-        .collect::<Vec<_>>();
-    check_broadcastable("nditer", &shapes)?;
     let dt = arrays[0].inner.dtype();
 
     // Match (dtype, operand count) — core nditer is monomorphized per type.

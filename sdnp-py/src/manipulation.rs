@@ -1,8 +1,9 @@
 //! Shape manipulation: concatenate, stack, vstack, hstack.
 //!
-//! Collects Python sequences into `Vec<ArrayInner>`, validates join rules at
-//! the boundary, then dispatches to typed `sdnp` manipulation kernels. Each
-//! arm matches on [`PyDType`] because Rust generics require monomorphization.
+//! Collects Python sequences into `Vec<ArrayInner>`, applies runtime dtype
+//! dispatch, then delegates join semantics to typed `sdnp` manipulation
+//! kernels. Each arm matches on [`PyDType`] because Rust generics require
+//! monomorphization.
 
 use pyo3::prelude::*;
 
@@ -10,15 +11,12 @@ use crate::array::array_from_inner;
 use crate::coerce::collect_pyarrays;
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
-use crate::validate::{
-    check_concatenate, check_hstack, check_same_dtype, check_stack,
-    check_vstack,
-};
+use crate::validate::check_same_dtype;
 
 /// Shared concatenate path after Python arrays are collected.
 ///
-/// Validates join rules and dispatches to the typed `sdnp::concatenate`
-/// kernel for the common element dtype.
+/// Dispatches to the typed `sdnp::concatenate` kernel for the common element
+/// dtype; empty inputs and join rules are validated by the core.
 ///
 /// # Arguments
 ///
@@ -36,7 +34,10 @@ fn concatenate_inner(
     arrays: &[ArrayInner],
     axis: isize,
 ) -> PyResult<ArrayInner> {
-    check_concatenate(arrays, axis)?;
+    if arrays.is_empty() {
+        return map_sdnp(sdnp::concatenate::<i64>(&[], axis))
+            .map(ArrayInner::I64);
+    }
     check_same_dtype(arrays, "concatenate")?;
     match arrays[0].dtype() {
         crate::dtype::PyDType::Bool => {
@@ -154,7 +155,15 @@ pub fn stack(
     axis: isize,
 ) -> PyResult<PyObject> {
     let inners = collect_pyarrays(arrays, "stack")?;
-    check_stack(&inners, axis)?;
+    if inners.is_empty() {
+        return map_sdnp(sdnp::stack::<i64>(&[], axis)).and_then(|inner| {
+            crate::array::into_pyobject(
+                py,
+                array_from_inner(ArrayInner::I64(inner)),
+            )
+        });
+    }
+    check_same_dtype(&inners, "stack")?;
     let inner = match inners[0].dtype() {
         crate::dtype::PyDType::Bool => {
             let refs = inners
@@ -223,8 +232,15 @@ pub fn stack(
 #[pyfunction]
 pub fn vstack(py: Python<'_>, arrays: &Bound<'_, PyAny>) -> PyResult<PyObject> {
     let inners = collect_pyarrays(arrays, "vstack")?;
+    if inners.is_empty() {
+        return map_sdnp(sdnp::vstack::<i64>(&[])).and_then(|inner| {
+            crate::array::into_pyobject(
+                py,
+                array_from_inner(ArrayInner::I64(inner)),
+            )
+        });
+    }
     check_same_dtype(&inners, "vstack")?;
-    check_vstack(&inners)?;
     let inner = match inners[0].dtype() {
         crate::dtype::PyDType::Bool => {
             let refs = inners
@@ -294,8 +310,15 @@ pub fn vstack(py: Python<'_>, arrays: &Bound<'_, PyAny>) -> PyResult<PyObject> {
 #[pyfunction]
 pub fn hstack(py: Python<'_>, arrays: &Bound<'_, PyAny>) -> PyResult<PyObject> {
     let inners = collect_pyarrays(arrays, "hstack")?;
+    if inners.is_empty() {
+        return map_sdnp(sdnp::hstack::<i64>(&[])).and_then(|inner| {
+            crate::array::into_pyobject(
+                py,
+                array_from_inner(ArrayInner::I64(inner)),
+            )
+        });
+    }
     check_same_dtype(&inners, "hstack")?;
-    check_hstack(&inners)?;
     let inner = match inners[0].dtype() {
         crate::dtype::PyDType::Bool => {
             let refs = inners

@@ -17,3 +17,6 @@ sdnp = { path = ".." }
 pyo3 = { version = "0.23", features = ["extension-module"] }
 num-complex = "0.4"
 num-traits = "0.2"
+
+[build-dependencies]
+pyo3-build-config = "0.23"

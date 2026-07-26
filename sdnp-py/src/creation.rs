@@ -1,8 +1,11 @@
 //! Array-creation free functions (`array`, `zeros`, ranges, grids, …).
 //!
-//! Each entry point parses Python arguments, validates bounds at the boundary,
-//! selects a typed `sdnp` factory kernel, and returns a value through the
-//! 0-D unwrap policy. Default dtype is float64 where NumPy would agree.
+//! Each entry point parses Python arguments, applies Python-only surface
+//! policy, selects a typed `sdnp` factory kernel, and returns a value through
+//! the 0-D unwrap policy. The core owns shared shape and allocation semantics.
+//! Bool restrictions on `eye`, `tri`, `tril`, `triu`, `diag`, and `meshgrid`
+//! are deliberately Python-only dtype policy, not generic core semantics.
+//! Default dtype is float64 where NumPy would agree.
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -15,11 +18,7 @@ use crate::coerce::{
 use crate::dtype::PyDType;
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
-use crate::validate::{
-    check_arange_step, check_diag_input, check_finite_bounds,
-    check_geomspace_bounds, check_logspace_base, check_meshgrid_arrays,
-    check_meshgrid_indexing, check_triangle_input,
-};
+use crate::validate::check_meshgrid_indexing;
 
 /// Construct an array from nested sequences, or broadcast a scalar to `shape`.
 ///
@@ -279,9 +278,6 @@ pub fn arange(
     stop: Option<i64>,
     step: i64,
 ) -> PyResult<PyObject> {
-    if stop.is_some() {
-        check_arange_step(step)?;
-    }
     let arr = match stop {
         None => map_sdnp(sdnp::arange_stop(start))?,
         Some(stop) => map_sdnp(sdnp::arange(start, stop, step))?,
@@ -329,7 +325,6 @@ pub fn linspace(
     num: usize,
     endpoint: bool,
 ) -> PyResult<PyObject> {
-    check_finite_bounds("linspace", start, stop)?;
     wrap_result(
         py,
         ArrayInner::F64(map_sdnp(sdnp::linspace(start, stop, num, endpoint))?),
@@ -375,8 +370,6 @@ pub fn logspace(
     endpoint: bool,
     base: f64,
 ) -> PyResult<PyObject> {
-    check_finite_bounds("logspace", start, stop)?;
-    check_logspace_base(base)?;
     wrap_result(
         py,
         ArrayInner::F64(map_sdnp(sdnp::logspace(
@@ -422,7 +415,6 @@ pub fn geomspace(
     num: usize,
     endpoint: bool,
 ) -> PyResult<PyObject> {
-    check_geomspace_bounds(start, stop)?;
     wrap_result(
         py,
         ArrayInner::F64(map_sdnp(sdnp::geomspace(start, stop, num, endpoint))?),
@@ -664,7 +656,6 @@ pub fn tril(
     k: isize,
 ) -> PyResult<PyObject> {
     array.reject_zero_dim_input("tril")?;
-    check_triangle_input("tril", &array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::tril(a, k))?),
         ArrayInner::F64(a) => ArrayInner::F64(map_sdnp(sdnp::tril(a, k))?),
@@ -710,7 +701,6 @@ pub fn triu(
     k: isize,
 ) -> PyResult<PyObject> {
     array.reject_zero_dim_input("triu")?;
-    check_triangle_input("triu", &array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::triu(a, k))?),
         ArrayInner::F64(a) => ArrayInner::F64(map_sdnp(sdnp::triu(a, k))?),
@@ -725,8 +715,9 @@ pub fn triu(
 /// Extract a diagonal or construct a diagonal matrix from a vector.
 ///
 /// For 2-D input, returns the `k`-th diagonal as a 1-D array. For 1-D input,
-/// returns a square matrix with the vector on the main diagonal. Boolean
-/// input is rejected because `diag` is a numeric matrix operation.
+/// returns a square matrix with the vector on the main diagonal. This creation
+/// API intentionally rejects bool input at the Python boundary; the separate
+/// `linalg.diagonal` API has a broader dtype policy and accepts bool arrays.
 ///
 /// # Arguments
 ///
@@ -749,6 +740,7 @@ pub fn triu(
 ///
 /// a = np.array([[1, 2], [3, 4]])
 /// assert np.diag(a).to_list() == [1, 4]
+/// np.diag(np.array([[True, False]]))  # ValueError: Python dtype policy
 /// ```
 #[pyfunction]
 #[pyo3(signature = (array, k=0))]
@@ -758,7 +750,6 @@ pub fn diag(
     k: isize,
 ) -> PyResult<PyObject> {
     array.reject_zero_dim_input("diag")?;
-    check_diag_input(&array.inner)?;
     let inner = match &array.inner {
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::diag(a, k))?),
         ArrayInner::F64(a) => ArrayInner::F64(map_sdnp(sdnp::diag(a, k))?),
@@ -786,8 +777,9 @@ pub fn diag(
 ///
 /// # Errors
 ///
-/// * `TypeError` — non-array input or dtype mismatch.
-/// * `ValueError` — invalid `indexing`, shape rules, or core failure.
+/// * `TypeError` — non-array input.
+/// * `ValueError` — dtype mismatch, bool dtype, invalid `indexing`, shape
+///   rules, or core failure.
 ///
 /// # Examples
 ///
@@ -814,23 +806,18 @@ pub fn meshgrid(
         .iter()
         .map(|item| Ok(require_pyarray(&item, "meshgrid")?.inner.clone()))
         .collect::<PyResult<Vec<_>>>()?;
-    check_meshgrid_arrays(&validated)?;
-    let first = require_pyarray(&tuple.get_item(0)?, "meshgrid")?;
     let idx = match indexing {
         "xy" => MeshgridIndexing::Xy,
         "ij" => MeshgridIndexing::Ij,
         _ => unreachable!("validated above"),
     };
-    let inner = match &first.inner {
+    let inner = match &validated[0] {
         ArrayInner::I64(_) => {
-            let owned: Vec<_> = tuple
+            let owned: Vec<_> = validated
                 .iter()
-                .map(|item| {
-                    let arr = require_pyarray(&item, "meshgrid")?;
-                    match &arr.inner {
-                        ArrayInner::I64(a) => Ok(a.clone()),
-                        _ => Err(value_error("meshgrid dtype mismatch")),
-                    }
+                .map(|arr| match arr {
+                    ArrayInner::I64(a) => Ok(a.clone()),
+                    _ => Err(value_error("meshgrid dtype mismatch")),
                 })
                 .collect::<PyResult<_>>()?;
             let refs: Vec<_> = owned.iter().collect();
@@ -838,14 +825,11 @@ pub fn meshgrid(
             out.into_iter().map(ArrayInner::I64).collect::<Vec<_>>()
         }
         ArrayInner::F64(_) => {
-            let owned: Vec<_> = tuple
+            let owned: Vec<_> = validated
                 .iter()
-                .map(|item| {
-                    let arr = require_pyarray(&item, "meshgrid")?;
-                    match &arr.inner {
-                        ArrayInner::F64(a) => Ok(a.clone()),
-                        _ => Err(value_error("meshgrid dtype mismatch")),
-                    }
+                .map(|arr| match arr {
+                    ArrayInner::F64(a) => Ok(a.clone()),
+                    _ => Err(value_error("meshgrid dtype mismatch")),
                 })
                 .collect::<PyResult<_>>()?;
             let refs: Vec<_> = owned.iter().collect();
@@ -853,14 +837,11 @@ pub fn meshgrid(
             out.into_iter().map(ArrayInner::F64).collect::<Vec<_>>()
         }
         ArrayInner::C64(_) => {
-            let owned: Vec<_> = tuple
+            let owned: Vec<_> = validated
                 .iter()
-                .map(|item| {
-                    let arr = require_pyarray(&item, "meshgrid")?;
-                    match &arr.inner {
-                        ArrayInner::C64(a) => Ok(a.clone()),
-                        _ => Err(value_error("meshgrid dtype mismatch")),
-                    }
+                .map(|arr| match arr {
+                    ArrayInner::C64(a) => Ok(a.clone()),
+                    _ => Err(value_error("meshgrid dtype mismatch")),
                 })
                 .collect::<PyResult<_>>()?;
             let refs: Vec<_> = owned.iter().collect();

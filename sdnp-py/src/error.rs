@@ -1,9 +1,9 @@
 //! Map `sdnp::Error` values to Python exceptions.
 //!
-//! User-facing argument checks belong in [`crate::validate`] before the core
-//! runs. Errors returned from the core are domain invariants (broadcast
-//! failure, out-of-bounds index, read-only buffer, …) and are translated here
-//! into the closest standard Python exception type.
+//! The core owns shared semantic validation (including axis, shape, indexing,
+//! broadcast, and layout rules). Python-specific policy checks remain in
+//! [`crate::validate`]. Core failures are translated here into the closest
+//! standard Python exception type.
 
 use pyo3::exceptions::{
     PyIndexError, PyTypeError, PyValueError, PyZeroDivisionError,
@@ -46,15 +46,46 @@ use sdnp::Error;
 /// ```
 pub(crate) fn sdnp_err(err: Error) -> PyErr {
     match err {
+        Error::ShapeMismatch { op: "stack", .. } => PyValueError::new_err(
+            format!("all arrays must have the same shape; {err}"),
+        ),
+        Error::ShapeMismatch {
+            op: "concatenate", ..
+        } => PyValueError::new_err(format!(
+            "array dimensions must match except along the join axis; {err}"
+        )),
+        Error::InvalidRank { op: "dot", .. } => PyValueError::new_err(format!(
+            "dot supports only 1-D or 2-D operands; {err}"
+        )),
+        Error::InvalidRank { op: "meshgrid", .. } => PyValueError::new_err(
+            format!("meshgrid inputs must be 1-D arrays; {err}"),
+        ),
+        Error::AxesMustDiffer => {
+            PyValueError::new_err("axis1 and axis2 must be different")
+        }
+        Error::Broadcast { .. } => PyValueError::new_err(format!(
+            "operands could not be broadcast together; {err}"
+        )),
         // Shape/layout invariants → ValueError (NumPy convention).
         Error::BufferSizeMismatch { .. }
         | Error::ShapeStridesMismatch { .. }
-        | Error::Broadcast { .. }
+        | Error::EmptyOperands { .. }
+        | Error::InvalidRank { .. }
+        | Error::RankMismatch { .. }
+        | Error::ShapeMismatch { .. }
+        | Error::ContractionMismatch { .. }
+        | Error::BatchBroadcastMismatch { .. }
+        | Error::FlattenedSizeMismatch { .. }
+        | Error::DuplicateAxes
+        | Error::NotPermutation
+        | Error::CannotSqueezeAxis { .. }
+        | Error::EmptyReduction { .. }
+        | Error::AllNanSlice { .. }
         | Error::ReadOnly => PyValueError::new_err(err.to_string()),
         Error::InvalidArgument(msg) => PyValueError::new_err(msg),
-        Error::IndexOutOfBounds { .. } => {
-            PyIndexError::new_err(err.to_string())
-        }
+        Error::IndexOutOfBounds { .. }
+        | Error::AxisOutOfBounds { .. }
+        | Error::InvalidIndex(_) => PyIndexError::new_err(err.to_string()),
         Error::DivideByZero => PyZeroDivisionError::new_err(err.to_string()),
     }
 }
@@ -62,8 +93,8 @@ pub(crate) fn sdnp_err(err: Error) -> PyErr {
 /// Lift `sdnp::Result<T>` into [`PyResult<T>`] via [`sdnp_err`].
 ///
 /// Binding code that calls the generic core should use this at return sites
-/// instead of manual `match` on `Error`. Argument validation errors are
-/// raised earlier via [`value_error`], [`index_error`], etc.
+/// instead of manual `match` on `Error`. Python-only policy validation may
+/// still be raised earlier via [`value_error`], [`type_error`], etc.
 ///
 /// # Arguments
 ///
@@ -94,9 +125,10 @@ pub(crate) fn map_sdnp<T>(result: sdnp::Result<T>) -> PyResult<T> {
 
 /// Shorthand for [`PyValueError`] with a custom message.
 ///
-/// Use at the Python boundary for user-input mistakes: invalid keyword
-/// combinations, incompatible shapes checked before the core, empty
-/// sequences, and similar API contract violations.
+/// Use at the Python boundary for intentionally Python-only policy failures,
+/// such as invalid keyword combinations or unsupported binding dtype modes.
+/// Shared semantic validation belongs to the core and maps through
+/// [`map_sdnp`].
 ///
 /// # Arguments
 ///
@@ -119,27 +151,6 @@ pub(crate) fn map_sdnp<T>(result: sdnp::Result<T>) -> PyResult<T> {
 /// ```
 pub(crate) fn value_error(msg: impl Into<String>) -> PyErr {
     PyValueError::new_err(msg.into())
-}
-
-/// Shorthand for [`PyIndexError`] with a custom message.
-///
-/// Axis and index bounds checked at the binding layer (before the core
-/// canonicalizes negative indices) should use this for NumPy-compatible
-/// exception types.
-///
-/// # Arguments
-///
-/// * `msg` — Human-readable index error message.
-///
-/// # Returns
-///
-/// A constructed [`PyErr`] wrapping [`PyIndexError`].
-///
-/// # Errors
-///
-/// Always produces [`PyIndexError`].
-pub(crate) fn index_error(msg: impl Into<String>) -> PyErr {
-    PyIndexError::new_err(msg.into())
 }
 
 /// Shorthand for [`PyTypeError`] with a custom message.

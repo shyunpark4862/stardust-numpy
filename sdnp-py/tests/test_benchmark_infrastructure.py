@@ -164,9 +164,12 @@ def test_report_renderers_are_data_only():
     }
     markdown = render_markdown(payload)
     canvas = render_canvas(payload)
-    assert "sdnp p25" in markdown
-    assert "NumPy p75" in markdown
+    assert "| Category | Cases | Median ratio | Mean ratio |" in markdown
+    assert "Complete Results" not in markdown
     assert 'from "cursor/canvas"' in canvas
+    assert '"sdnp mean", "NumPy mean", "Ratio"' in canvas
+    assert "sdnp p25" not in canvas
+    assert "NumPy p75" not in canvas
     assert "원인" not in markdown
     assert "최적화 우선순위" not in canvas
     assert MARKDOWN_PATH == ROOT / "BENCHMARK.md"

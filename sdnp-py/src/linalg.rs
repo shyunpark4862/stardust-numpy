@@ -11,9 +11,6 @@ use crate::coerce::coerce_array_like;
 use crate::dispatch::cast_inner;
 use crate::error::{map_sdnp, value_error};
 use crate::inner::ArrayInner;
-use crate::validate::{
-    check_diagonal_axes, check_dot, check_matmul, check_vdot,
-};
 
 /// Shared matmul path for `sdnp.matmul` and `Array.__matmul__`.
 ///
@@ -65,7 +62,6 @@ fn matmul_impl(
 ) -> PyResult<PyObject> {
     let l = coerce_array_like(left, None)?;
     let r = coerce_array_like(right, None)?;
-    check_matmul(&l.inner, &r.inner)?;
     let dt = l.inner.dtype().promote(r.inner.dtype());
     let l = cast_inner(l.inner, dt)?;
     let r = cast_inner(r.inner, dt)?;
@@ -156,7 +152,6 @@ pub fn dot(
 ) -> PyResult<PyObject> {
     let l = coerce_array_like(left, None)?;
     let r = coerce_array_like(right, None)?;
-    check_dot(&l.inner, &r.inner)?;
     let dt = l.inner.dtype().promote(r.inner.dtype());
     let l = cast_inner(l.inner, dt)?;
     let r = cast_inner(r.inner, dt)?;
@@ -210,7 +205,6 @@ pub fn vdot(
 ) -> PyResult<PyObject> {
     let l = coerce_array_like(left, None)?;
     let r = coerce_array_like(right, None)?;
-    check_vdot(&l.inner, &r.inner)?;
     let dt = l.inner.dtype().promote(r.inner.dtype());
     let l = cast_inner(l.inner, dt)?;
     let r = cast_inner(r.inner, dt)?;
@@ -321,9 +315,6 @@ pub fn diagonal(
     axis1: isize,
     axis2: isize,
 ) -> PyResult<PyObject> {
-    a.reject_zero_dim_input("diagonal")?;
-    let ndim = a.inner.ndim();
-    check_diagonal_axes(ndim, axis1, axis2)?;
     let inner = match &a.inner {
         ArrayInner::I64(arr) => ArrayInner::I64(map_sdnp(sdnp::diagonal(
             arr, offset, axis1, axis2,
@@ -378,9 +369,6 @@ pub fn trace(
     axis1: isize,
     axis2: isize,
 ) -> PyResult<PyObject> {
-    a.reject_zero_dim_input("trace")?;
-    let ndim = a.inner.ndim();
-    check_diagonal_axes(ndim, axis1, axis2)?;
     let inner = match &a.inner {
         ArrayInner::I64(arr) => {
             ArrayInner::I64(map_sdnp(sdnp::trace(arr, offset, axis1, axis2))?)

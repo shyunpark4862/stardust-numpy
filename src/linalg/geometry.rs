@@ -5,7 +5,7 @@
 //! memory access patterns (IKJ tiles, diagonal walks, batch iteration).
 
 use crate::array::Array;
-use crate::axis::normalize_axis;
+use crate::axis::resolve_diagonal_axes;
 use crate::broadcast::broadcast_shape;
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
@@ -101,6 +101,20 @@ impl MatmulPlan {
         left: &Array<L>,
         right: &Array<R>,
     ) -> Result<Self> {
+        if left.ndim() == 0 {
+            return Err(Error::InvalidRank {
+                op: "matmul",
+                expected: "non-0-D operands",
+                actual: 0,
+            });
+        }
+        if right.ndim() == 0 {
+            return Err(Error::InvalidRank {
+                op: "matmul",
+                expected: "non-0-D operands",
+                actual: 0,
+            });
+        }
         let left_was_vector = left.ndim() == 1;
         let right_was_vector = right.ndim() == 1;
         let (rows, contraction_len, left_row_stride, left_contraction_stride) =
@@ -116,7 +130,7 @@ impl MatmulPlan {
                 )
             };
         let (
-            _right_contraction_len,
+            right_contraction_len,
             columns,
             right_contraction_stride,
             right_column_stride,
@@ -131,12 +145,25 @@ impl MatmulPlan {
                 right.strides()[rank - 1],
             )
         };
+        if contraction_len != right_contraction_len {
+            return Err(Error::ContractionMismatch {
+                left: contraction_len,
+                right: right_contraction_len,
+            });
+        }
 
         let left_batch_rank = left.ndim().saturating_sub(2);
         let right_batch_rank = right.ndim().saturating_sub(2);
         let left_batch_shape = &left.shape()[..left_batch_rank];
         let right_batch_shape = &right.shape()[..right_batch_rank];
-        let batch_shape = broadcast_shape(left_batch_shape, right_batch_shape)?;
+        let batch_shape = broadcast_shape(left_batch_shape, right_batch_shape)
+            .map_err(|error| match error {
+                Error::Broadcast { .. } => Error::BatchBroadcastMismatch {
+                    left: left_batch_shape.to_vec(),
+                    right: right_batch_shape.to_vec(),
+                },
+                error => error,
+            })?;
         let left_batch_strides = align_batch_strides(
             left_batch_shape,
             &left.strides()[..left_batch_rank],
@@ -212,6 +239,15 @@ pub(crate) fn plan_dot<L: Scalar, R: Scalar>(
     left: &Array<L>,
     right: &Array<R>,
 ) -> Result<(DotKind, MatmulPlan)> {
+    for rank in [left.ndim(), right.ndim()] {
+        if !(1..=2).contains(&rank) {
+            return Err(Error::InvalidRank {
+                op: "dot",
+                expected: "1-D or 2-D operands",
+                actual: rank,
+            });
+        }
+    }
     let kind = match (left.ndim(), right.ndim()) {
         (1, 1) => DotKind::VectorVector,
         (2, 1) => DotKind::MatrixVector,
@@ -302,6 +338,8 @@ impl DiagonalPlan {
     ///
     /// # Errors
     ///
+    /// * [`Error::AxisOutOfBounds`] — a diagonal axis is outside the rank
+    /// * [`Error::AxesMustDiffer`] — both axes resolve to the same dimension
     /// * [`Error::InvalidArgument`] — diagonal offset arithmetic overflows
     ///   `isize`
     pub(crate) fn new<T: Scalar>(
@@ -310,8 +348,14 @@ impl DiagonalPlan {
         axis1: isize,
         axis2: isize,
     ) -> Result<Self> {
-        let axis1 = normalize_axis(axis1, array.ndim());
-        let axis2 = normalize_axis(axis2, array.ndim());
+        if array.ndim() < 2 {
+            return Err(Error::InvalidRank {
+                op: "diagonal and trace",
+                expected: "an array of at least two dimensions",
+                actual: array.ndim(),
+            });
+        }
+        let (axis1, axis2) = resolve_diagonal_axes(axis1, axis2, array.ndim())?;
 
         let geometry = diagonal_geometry(
             array.shape()[axis1],

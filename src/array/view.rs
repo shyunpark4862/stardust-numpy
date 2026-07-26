@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use crate::array::Array;
-use crate::axis::{normalize_axis_list, normalize_insert_axis};
+use crate::axis::{
+    resolve_axis_list, resolve_insert_axis, visit_resolved_permutation,
+};
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
 
@@ -35,7 +37,7 @@ pub(crate) fn insert_axis_view<T: Scalar>(
     array: &Array<T>,
     axis: isize,
 ) -> Result<Array<T>> {
-    let axis = normalize_insert_axis(axis, array.ndim());
+    let axis = resolve_insert_axis(axis, array.ndim())?;
     let mut shape = array.shape().to_vec();
     let mut strides = array.strides().to_vec();
     shape.insert(axis, 1);
@@ -50,6 +52,29 @@ pub(crate) fn insert_axis_view<T: Scalar>(
 }
 
 impl<T: Scalar> Array<T> {
+    /// Build a view after only reordering an existing valid layout's axes.
+    ///
+    /// A complete permutation preserves the source layout's reachable buffer
+    /// indices, rank agreement, shape product, offset, and writability. The
+    /// caller must therefore provide `shape` and `strides` produced by the
+    /// same validated permutation; no unchecked constructor is exposed.
+    #[inline]
+    fn permuted_layout_view(
+        &self,
+        shape: Vec<usize>,
+        strides: Vec<isize>,
+    ) -> Self {
+        debug_assert_eq!(shape.len(), self.ndim());
+        debug_assert_eq!(strides.len(), self.ndim());
+        Self {
+            data: Arc::clone(&self.data),
+            shape,
+            strides,
+            offset: self.offset,
+            writable: self.writable,
+        }
+    }
+
     /// Return a view with axes reversed (matrix transpose for 2-D).
     ///
     /// Shares the backing buffer. For 0-D and 1-D arrays, returns an
@@ -115,7 +140,8 @@ impl<T: Scalar> Array<T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidArgument`] — layout bounds violated after permute
+    /// * [`Error::AxisOutOfBounds`] — an axis is outside the array rank
+    /// * [`Error::NotPermutation`] — axes are duplicated or incomplete
     ///
     /// # Examples
     ///
@@ -127,17 +153,13 @@ impl<T: Scalar> Array<T> {
     /// assert_eq!(b.get(&[0, 1]).unwrap(), 3);
     /// ```
     pub fn permute_axes(&self, axes: &[isize]) -> Result<Array<T>> {
-        let axes = normalize_axis_list(axes, self.ndim());
-        let shape: Vec<usize> = axes.iter().map(|&a| self.shape[a]).collect();
-        let strides: Vec<isize> =
-            axes.iter().map(|&a| self.strides[a]).collect();
-        Self::from_shared_parts(
-            Arc::clone(&self.data),
-            shape,
-            strides,
-            self.offset,
-            self.writable,
-        )
+        let mut shape = Vec::with_capacity(self.ndim());
+        let mut strides = Vec::with_capacity(self.ndim());
+        visit_resolved_permutation(axes, self.ndim(), |axis| {
+            shape.push(self.shape[axis]);
+            strides.push(self.strides[axis]);
+        })?;
+        Ok(self.permuted_layout_view(shape, strides))
     }
 
     /// Change the array's shape without changing its element order.
@@ -204,6 +226,9 @@ impl<T: Scalar> Array<T> {
     ///
     /// # Errors
     ///
+    /// * [`Error::AxisOutOfBounds`] — an axis is outside the array rank
+    /// * [`Error::DuplicateAxes`] — the same axis is listed more than once
+    /// * [`Error::CannotSqueezeAxis`] — a listed axis has length other than one
     /// * [`Error::InvalidArgument`] — resulting layout exceeds buffer bounds
     pub fn squeeze(&self, axes: Option<&[isize]>) -> Result<Array<T>> {
         let mut remove = vec![false; self.ndim()];
@@ -214,7 +239,18 @@ impl<T: Scalar> Array<T> {
                 }
             }
             Some(axes) => {
-                for axis in normalize_axis_list(axes, self.ndim()) {
+                if axes.is_empty() {
+                    return Err(Error::InvalidArgument(
+                        "squeeze axes must be a non-empty sequence".into(),
+                    ));
+                }
+                for axis in resolve_axis_list(axes, self.ndim())? {
+                    if self.shape[axis] != 1 {
+                        return Err(Error::CannotSqueezeAxis {
+                            axis,
+                            axis_len: self.shape[axis],
+                        });
+                    }
                     remove[axis] = true;
                 }
             }
@@ -288,6 +324,11 @@ impl<T: Scalar> Array<T> {
 ///   other than `-1`, size mismatch, ambiguous inference when a zero axis
 ///   is present, or shape product overflow
 fn resolve_reshape(shape: &[isize], size: usize) -> Result<Vec<usize>> {
+    if shape.is_empty() {
+        return Err(Error::InvalidArgument(
+            "reshape target shape must be non-empty".into(),
+        ));
+    }
     let mut inferred = None;
     let mut known = 1_usize;
     let mut out = Vec::with_capacity(shape.len());

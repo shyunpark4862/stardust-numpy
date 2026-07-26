@@ -5,7 +5,7 @@
 //! Python bindings and Rust callers share one dispatch path.
 
 use crate::array::Array;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::reduction::kernels::transform_owned_c_order;
 use crate::reduction::traits::{
     ExtremumReduce, LogicalReduce, MeanReduce, NanPolicy, ProdReduce,
@@ -168,8 +168,8 @@ pub fn max<T: ExtremumReduce>(
 
 /// Arithmetic mean over one or more axes.
 ///
-/// Empty output shape yields an empty array. A zero-length reduced block
-/// is an error at the kernel layer. Floating reductions honor
+/// Empty output shape yields an empty array. A zero-length reduced block with
+/// a non-empty output is an error at the kernel layer. Floating reductions honor
 /// [`NanPolicy`].
 ///
 /// # Arguments
@@ -429,7 +429,11 @@ pub fn std<T: VarReduce>(
     keepdims: bool,
     nan_policy: NanPolicy,
 ) -> Result<Array<f64>> {
-    let v = var(a, axes, keepdims, nan_policy)?;
+    let v =
+        var(a, axes, keepdims, nan_policy).map_err(|error| match error {
+            Error::EmptyReduction { .. } => Error::EmptyReduction { op: "std" },
+            other => other,
+        })?;
     Ok(transform_owned_c_order(v, f64::sqrt))
 }
 

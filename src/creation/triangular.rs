@@ -190,6 +190,7 @@ pub fn tri_with<T: Scalar + Zero + One>(
 ///
 /// # Errors
 ///
+/// * [`Error::InvalidRank`](crate::Error::InvalidRank) - Input is 0-D.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
 ///   overflows platform limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -224,6 +225,7 @@ pub fn tril<T: Scalar + Zero>(array: &Array<T>, k: isize) -> Result<Array<T>> {
 ///
 /// # Errors
 ///
+/// * [`Error::InvalidRank`](crate::Error::InvalidRank) - Input is 0-D.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Allocation
 ///   overflows platform limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -268,6 +270,13 @@ fn triangle_copy<T: Scalar + Zero>(
     k: isize,
     lower: bool,
 ) -> Result<Array<T>> {
+    if array.ndim() == 0 {
+        return Err(Error::InvalidRank {
+            op: if lower { "tril" } else { "triu" },
+            expected: "an array of at least one dimension",
+            actual: 0,
+        });
+    }
     if array.ndim() == 1 {
         let values = array.to_vec_c_order();
         let n = values.len();
@@ -317,12 +326,11 @@ fn triangle_copy<T: Scalar + Zero>(
 ///
 /// For a 1-D input, returns a square matrix with the vector on diagonal `k`.
 /// For a 2-D input, extracts the diagonal as a 1-D array (delegates to
-/// [`crate::linalg::diagonal`]). Higher-rank inputs also extract the diagonal
-/// from the trailing 2-D slice.
+/// [`crate::linalg::diagonal`]).
 ///
 /// # Arguments
 ///
-/// * `array` - 1-D vector or 2-D (or higher) matrix input.
+/// * `array` - 1-D vector or 2-D matrix input.
 /// * `k` - Diagonal offset (see [`eye_with`]).
 ///
 /// # Returns
@@ -331,6 +339,8 @@ fn triangle_copy<T: Scalar + Zero>(
 ///
 /// # Errors
 ///
+/// * [`Error::InvalidRank`](crate::Error::InvalidRank) - Input is not 1-D or
+///   2-D.
 /// * [`Error::InvalidArgument`](crate::Error::InvalidArgument) - Output
 ///   dimension or allocation overflows limits.
 /// * [`Error::BufferSizeMismatch`](crate::Error::BufferSizeMismatch) -
@@ -367,6 +377,10 @@ pub fn diag<T: Scalar + Zero>(array: &Array<T>, k: isize) -> Result<Array<T>> {
             Array::from_vec(output, &[side, side])
         }
         2 => crate::linalg::diagonal(array, k, 0, 1),
-        _ => crate::linalg::diagonal(array, k, 0, 1),
+        actual => Err(Error::InvalidRank {
+            op: "diag",
+            expected: "a 1-D or 2-D array",
+            actual,
+        }),
     }
 }

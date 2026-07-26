@@ -203,7 +203,7 @@ where
     C: Fn(T) -> Acc + Copy,
     F: FnMut(Acc, T) -> Acc,
 {
-    let axis = normalize_axis(axis, a.ndim());
+    let axis = resolve_axis(axis, a.ndim())?;
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     let n = a.size();
     if n == 0 {
@@ -533,7 +533,7 @@ where
     F: FnMut(Acc, T) -> Acc,
     N: Fn(T) -> bool + Copy,
 {
-    let axis = normalize_axis(axis, a.ndim());
+    let axis = resolve_axis(axis, a.ndim())?;
     let plan = AxisTraversalPlan::new(a.shape(), axis);
     if a.size() == 0 {
         return Array::from_vec(Vec::new(), a.shape());

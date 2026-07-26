@@ -6,6 +6,7 @@
 //! [`super::reduce_ignore_with_counts`].
 
 use super::*;
+use crate::error::Error;
 
 /// Build a [`ReducePlan`] for extremum reductions.
 ///
@@ -29,9 +30,12 @@ fn build_extremum_plan<T: Scalar>(
     a: &Array<T>,
     axes: Option<&[isize]>,
     keepdims: bool,
-    _op_name: &str,
+    op_name: &'static str,
 ) -> Result<ReducePlan> {
     let plan = ReducePlan::new(a.shape(), axes, keepdims)?;
+    if plan.output_len > 0 && plan.reduction_is_empty() {
+        return Err(Error::EmptyReduction { op: op_name });
+    }
     Ok(plan)
 }
 
@@ -223,8 +227,7 @@ fn reduce_bool_with_plan<const AND: bool>(
 
 /// Integer minimum over selected axes.
 ///
-/// Empty reduced slices fill with `i64::MAX`. Uses eight-lane partial
-/// minima on contiguous suffix chunks.
+/// Uses eight-lane partial minima on contiguous suffix chunks.
 ///
 /// # Arguments
 ///
@@ -250,8 +253,6 @@ pub(crate) fn reduce_i64_min(
 }
 
 /// Integer maximum over selected axes.
-///
-/// Empty reduced slices fill with `i64::MIN`.
 ///
 /// # Arguments
 ///
@@ -297,7 +298,7 @@ fn reduce_i64_extremum<F>(
     a: &Array<i64>,
     axes: Option<&[isize]>,
     keepdims: bool,
-    op_name: &str,
+    op_name: &'static str,
     mut is_better: F,
 ) -> Result<Array<i64>>
 where
@@ -306,13 +307,6 @@ where
     let plan = build_extremum_plan(a, axes, keepdims, op_name)?;
     if plan.output_len == 0 {
         return Array::from_vec(Vec::new(), &plan.output_shape);
-    }
-    if plan.reduction_is_empty() {
-        let fill = if op_name == "min" { i64::MAX } else { i64::MIN };
-        return Array::from_vec(
-            vec![fill; plan.output_len],
-            &plan.output_shape,
-        );
     }
     match reduction_path(a, &plan) {
         ReductionPath::SuffixContiguous(slice) => {
