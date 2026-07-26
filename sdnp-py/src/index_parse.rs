@@ -378,9 +378,9 @@ fn fancy_spec(arr: &PyRef<PyArray>) -> PyResult<Vec<IndexSpec>> {
     match &arr.inner {
         ArrayInner::Bool(a) => Ok(vec![IndexSpec::BoolArray(a.clone())]),
         ArrayInner::I64(a) => Ok(vec![IndexSpec::IntegerArray(a.clone())]),
-        ArrayInner::F64(_) | ArrayInner::C64(_) => Err(type_error(
-            "fancy index must be an integer or boolean array",
-        )),
+        ArrayInner::F64(_) | ArrayInner::C64(_) => {
+            Err(type_error("fancy index must be an integer or boolean array"))
+        }
     }
 }
 

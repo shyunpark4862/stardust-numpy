@@ -1,0 +1,4 @@
+edition = "2021"
+max_width = 80
+fn_call_width = 80
+attr_fn_like_width = 80

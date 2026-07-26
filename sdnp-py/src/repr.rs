@@ -70,10 +70,7 @@ fn format_body(
         let sub = slice_index(inner, i)?;
         parts.push(format_body(&sub, &shape[1..], depth + 1)?);
     }
-    Ok(format!(
-        "[{}]",
-        parts.join(",\n ".repeat(depth + 1).trim_end())
-    ))
+    Ok(format!("[{}]", parts.join(",\n ".repeat(depth + 1).trim_end())))
 }
 
 /// Format a 1-D row, truncating with `...` when longer than [`MAX_ITEMS`].

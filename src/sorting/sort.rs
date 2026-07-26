@@ -113,10 +113,7 @@ pub fn argsort<T: SortElement>(
     let (indices, shape) = match axis {
         Some(axis) => {
             let axis = normalize_axis(axis, a.ndim());
-            (
-                argsort_along_axis(&data, a.shape(), axis),
-                a.shape().to_vec(),
-            )
+            (argsort_along_axis(&data, a.shape(), axis), a.shape().to_vec())
         }
         None => {
             let mut indices: Vec<usize> = (0..data.len()).collect();
