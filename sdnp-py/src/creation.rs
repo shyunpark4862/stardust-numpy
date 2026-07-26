@@ -725,8 +725,8 @@ pub fn triu(
 /// Extract a diagonal or construct a diagonal matrix from a vector.
 ///
 /// For 2-D input, returns the `k`-th diagonal as a 1-D array. For 1-D input,
-/// returns a square matrix with the vector on the main diagonal. Bool input
-/// is promoted to int64 on the construct path.
+/// returns a square matrix with the vector on the main diagonal. Boolean
+/// input is rejected because `diag` is a numeric matrix operation.
 ///
 /// # Arguments
 ///
@@ -740,7 +740,7 @@ pub fn triu(
 /// # Errors
 ///
 /// * `TypeError` — 0-D input.
-/// * `ValueError` — invalid shape for `diag` or core failure.
+/// * `ValueError` — boolean input, invalid shape, or core failure.
 ///
 /// # Examples
 ///
@@ -763,9 +763,8 @@ pub fn diag(
         ArrayInner::I64(a) => ArrayInner::I64(map_sdnp(sdnp::diag(a, k))?),
         ArrayInner::F64(a) => ArrayInner::F64(map_sdnp(sdnp::diag(a, k))?),
         ArrayInner::C64(a) => ArrayInner::C64(map_sdnp(sdnp::diag(a, k))?),
-        ArrayInner::Bool(a) => {
-            let i64_a = map_sdnp(a.astype())?;
-            ArrayInner::I64(map_sdnp(sdnp::diag(&i64_a, k))?)
+        ArrayInner::Bool(_) => {
+            return Err(value_error("diag does not support boolean arrays"))
         }
     };
     wrap_result(py, inner)

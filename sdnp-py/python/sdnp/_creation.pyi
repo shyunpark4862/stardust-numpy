@@ -639,22 +639,19 @@ def triu(array: Array[NumericT], k: int = 0) -> Array[NumericT]:
     [[1, 2], [0, 4]]
     """
 
-@overload
-def diag(array: Array[bool], k: int = 0) -> Array[int]: ...
-@overload
-def diag(array: Array[ScalarT], k: int = 0) -> ArrayResult[ScalarT]: ...
-def diag(array: Array[Scalar], k: int = 0) -> ArrayResult[Scalar]:
+def diag(array: Array[NumericT], k: int = 0) -> ArrayResult[NumericT]:
     """Extract a diagonal or construct a diagonal matrix.
 
-    For a 2-D input, the Rust core gathers elements along diagonal ``k`` into
-    a new 1-D buffer—O(min(n, m)) for an ``n * m`` matrix.  For a 1-D input, it
-    allocates a square matrix with those values on the main diagonal and zeros
-    elsewhere.  Boolean vectors promote to ``int`` when constructing a matrix.
+    For a 2-D input, the Rust core returns a zero-copy strided view along
+    diagonal ``k`` in O(ndim) time.  For a 1-D input, it allocates a square
+    matrix with those values on the main diagonal and zeros elsewhere.
+    Boolean input is rejected because ``diag`` is treated as a numeric matrix
+    operation.
 
     Parameters
     ----------
     array : Array
-        One-dimensional vector or two-dimensional matrix.
+        One-dimensional vector or two-dimensional non-boolean matrix.
     k : int, optional
         Diagonal offset.
 
@@ -662,14 +659,14 @@ def diag(array: Array[Scalar], k: int = 0) -> ArrayResult[Scalar]:
     -------
     Array or scalar
         Matrix for one-dimensional input, or diagonal for two-dimensional
-        input. Boolean vector construction promotes to integer.
+        input. The input dtype is preserved.
 
     Raises
     ------
     TypeError
         If input is zero-dimensional.
     ValueError
-        If input rank is not one or two.
+        If input is boolean or its rank is not one or two.
 
     Examples
     --------

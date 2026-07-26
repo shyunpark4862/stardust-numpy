@@ -124,31 +124,6 @@ impl ArrayInner {
         }
     }
 
-    /// Copy strides into a `Vec` for the Python `strides` getter.
-    ///
-    /// Core stores strides as a slice; Python expects an owned tuple. Values
-    /// are in bytes and follow C-contiguous layout unless the array is a view.
-    ///
-    /// # Arguments
-    ///
-    /// None (`self`).
-    ///
-    /// # Returns
-    ///
-    /// Owned stride vector (one entry per dimension).
-    ///
-    /// # Errors
-    ///
-    /// Never fails.
-    pub fn strides(&self) -> Vec<isize> {
-        match self {
-            ArrayInner::Bool(a) => a.strides().to_vec(),
-            ArrayInner::I64(a) => a.strides().to_vec(),
-            ArrayInner::F64(a) => a.strides().to_vec(),
-            ArrayInner::C64(a) => a.strides().to_vec(),
-        }
-    }
-
     /// Read the sole element of a 0-D array as a [`PyScalar`].
     ///
     /// Bridges internal scalar storage to Python unwrap. Callers must ensure

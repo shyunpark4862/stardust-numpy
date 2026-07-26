@@ -210,6 +210,8 @@ pub fn mean<T: MeanReduce>(
 ///
 /// With `axis = None`, returns a flat C-order index. Otherwise the index
 /// is along the chosen axis. For `f64`, NaN handling follows `nan_policy`.
+/// For `bool`, the scan stops at the first `false`, so cost is proportional
+/// to the position of the winning value rather than the full axis length.
 ///
 /// # Arguments
 ///
@@ -247,6 +249,8 @@ pub fn argmin<T: ExtremumReduce>(
 ///
 /// With `axis = None`, returns a flat C-order index. Otherwise the index
 /// is along the chosen axis. For `f64`, NaN handling follows `nan_policy`.
+/// For `bool`, the scan stops at the first `true`, so cost is proportional
+/// to the position of the winning value rather than the full axis length.
 ///
 /// # Arguments
 ///

@@ -56,7 +56,25 @@ fn diagonal_trace_and_diag_cover_strided_and_empty_geometry() {
     let matrix = Array::from_vec((0_i64..12).collect(), &[3, 4]).unwrap();
     let transposed = matrix.transpose();
 
-    assert_eq!(diagonal(&transposed, 1, 0, 1).unwrap().to_vec(), vec![4, 9]);
+    let diagonal_view = diagonal(&transposed, 1, 0, 1).unwrap();
+    // Zero-copy view: same buffer, strided walk along the offset diagonal.
+    assert_eq!(diagonal_view.to_vec(), vec![4, 9]);
+    assert_eq!(diagonal_view.shape(), &[2]);
+    assert_eq!(diagonal_view.strides(), &[5]);
+    assert_eq!(diagonal_view.offset(), 4);
+    assert_eq!(
+        diagonal_view.as_buffer().as_ptr(),
+        matrix.as_buffer().as_ptr()
+    );
+
+    let empty_diagonal = diagonal(&matrix, 99, 0, 1).unwrap();
+    assert_eq!(empty_diagonal.shape(), &[0]);
+    assert!(empty_diagonal.to_vec().is_empty());
+    assert_eq!(
+        empty_diagonal.as_buffer().as_ptr(),
+        matrix.as_buffer().as_ptr()
+    );
+
     assert_eq!(trace(&transposed, 0, 0, 1).unwrap().item().unwrap(), 15);
 
     let vector = Array::from_slice(&[1_i64, 2, 3], &[3]).unwrap();

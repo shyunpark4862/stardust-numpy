@@ -1260,10 +1260,10 @@ pub fn check_triangle_input(name: &str, inner: &ArrayInner) -> PyResult<()> {
     Ok(())
 }
 
-/// Validate `diag` input: rank must be 1 or 2.
+/// Validate `diag` input: dtype must be numeric and rank must be 1 or 2.
 ///
 /// Extracting or constructing diagonals applies to vectors and matrices only;
-/// higher-rank tensors are rejected at the Python boundary.
+/// boolean arrays and higher-rank tensors are rejected at the Python boundary.
 ///
 /// # Arguments
 ///
@@ -1271,11 +1271,11 @@ pub fn check_triangle_input(name: &str, inner: &ArrayInner) -> PyResult<()> {
 ///
 /// # Returns
 ///
-/// `Ok(())` when rank is 1 or 2.
+/// `Ok(())` for a non-boolean array whose rank is 1 or 2.
 ///
 /// # Errors
 ///
-/// * [`PyValueError`] — rank is not 1 or 2.
+/// * [`PyValueError`] — input is boolean or rank is not 1 or 2.
 ///
 /// # Examples
 ///
@@ -1286,6 +1286,9 @@ pub fn check_triangle_input(name: &str, inner: &ArrayInner) -> PyResult<()> {
 /// np.diag(np.zeros((2, 2, 2))) # ValueError
 /// ```
 pub fn check_diag_input(inner: &ArrayInner) -> PyResult<()> {
+    if matches!(inner, ArrayInner::Bool(_)) {
+        return Err(value_error("diag does not support boolean arrays"));
+    }
     if !matches!(inner.ndim(), 1 | 2) {
         return Err(value_error("diag requires a 1-D or 2-D array"));
     }

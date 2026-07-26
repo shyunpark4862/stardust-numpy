@@ -59,9 +59,9 @@ several indexing paths share this strategy.  It preserves view semantics and
 often avoids an O(n) contiguous copy, although kernels that specifically
 require flat storage may still materialize one.
 
-NUMPY DIFFERENCES.  ``shape`` and ``strides`` return lists, strides count
-elements rather than bytes, only four dtypes exist, 0-D arrays are not exposed,
-and views use stricter copy-on-write mutation semantics.
+NUMPY DIFFERENCES.  ``shape`` returns a list, layout strides are not exposed,
+only four dtypes exist, 0-D arrays are not exposed, and views use stricter
+copy-on-write mutation semantics.
 """
 
 from collections.abc import Iterator, Sequence
@@ -121,7 +121,7 @@ class Array[ScalarT: Scalar]:
 
     Attributes
     ----------
-    shape, strides, ndim, size, dtype
+    shape, ndim, size, dtype
         Metadata accessors (raise on internal 0-D buffers).
     T
         Swap the last two axes (matrix transpose for 2-D).
@@ -170,36 +170,6 @@ class Array[ScalarT: Scalar]:
         --------
         >>> sdnp.array([[1, 2], [3, 4]]).shape
         [2, 2]
-        """
-
-    @property
-    def strides(self) -> list[int]:
-        """Return per-axis strides measured in elements, not bytes.
-
-        Strides are fixed when an array is constructed or viewed and describe
-        how far to advance in the flat buffer for a unit step along each
-        axis.  Broadcast-expanded axes may carry stride ``0``.  Ufunc and
-        reduction kernels use these values to detect C-contiguity—a trailing
-        stride of ``1`` marks a contiguous tail—so understanding element
-        strides matters for performance tuning.  NumPy's ``ndarray.strides``
-        are in bytes; multiply sdnp strides by the element size (1 for
-        ``bool``, 8 for ``int``/``float``/``complex`` components) if you need
-        byte distances for mental comparison with NumPy.
-
-        Returns
-        -------
-        list of int
-            Distance in elements between adjacent indices along each axis.
-
-        Raises
-        ------
-        TypeError
-            If the array is zero-dimensional.
-
-        Examples
-        --------
-        >>> sdnp.zeros((2, 3)).strides
-        [3, 1]
         """
 
     @property
@@ -574,16 +544,17 @@ class Array[ScalarT: Scalar]:
 
     @override
     def __repr__(self) -> str:
-        """Return a NumPy-style ``array(...)`` representation string.
+        """Return an 80-column diagnostic representation.
 
-        Formatting walks the array structure in Rust and mirrors NumPy's
-        visual style.  Long one-dimensional arrays may be abbreviated with
-        an ellipsis to keep output readable.
+        The representation reports the Python object address followed by
+        flattened data, shape, rank, size, and dtype.  Data and metadata are
+        abbreviated with an ellipsis when needed so every line is at most
+        80 columns.
 
         Returns
         -------
         str
-            Text beginning with ``array(``.
+            Six-line text beginning with ``sdnp-array at 0x``.
 
         Raises
         ------
@@ -592,18 +563,27 @@ class Array[ScalarT: Scalar]:
 
         Examples
         --------
-        >>> repr(sdnp.array([1, 2])).startswith("array(")
+        >>> repr(sdnp.array([1, 2])).startswith("sdnp-array at 0x")
         True
         """
 
     @override
     def __str__(self) -> str:
-        """Return the same human-readable text as :func:`repr`.
+        """Return a zero-based R-style array display.
+
+        Vectors use a ``[0]`` label and matrices show ``[,0]`` column and
+        ``[0,]`` row labels.  For arrays with three or more dimensions, the
+        leading axes select pages while the final two axes form each matrix;
+        a 3-D page therefore starts with ``[0, ,]`` rather than R's
+        last-axis-first ``[, , 0]`` convention.  Long row, column, and page
+        sequences preserve both edges with ``...`` between them.  Every line
+        is at most 80 columns, including when scalar values are unusually
+        long.
 
         Returns
         -------
         str
-            NumPy-style array representation.
+            Width-bounded R-style array representation.
 
         Raises
         ------
@@ -613,8 +593,8 @@ class Array[ScalarT: Scalar]:
         Examples
         --------
         >>> a = sdnp.array([1, 2])
-        >>> str(a) == repr(a)
-        True
+        >>> str(a)
+        '[0] 1 2'
         """
 
     @overload

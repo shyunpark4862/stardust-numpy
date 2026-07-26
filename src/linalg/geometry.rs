@@ -263,7 +263,9 @@ fn align_batch_strides(
 /// Geometry for N-dimensional diagonal extraction and trace.
 ///
 /// Holds the shape/strides of all axes **outside** the two diagonal axes,
-/// plus byte offsets for stepping along one diagonal element at a time.
+/// plus element offsets for stepping along one diagonal at a time.
+/// [`DiagonalPlan::diagonal_output_shape`] and the stored strides are used by
+/// [`crate::linalg::kernels::diagonal_view`] to build a zero-copy view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DiagonalPlan {
     /// Shape of axes other than the two diagonal axes.
@@ -283,7 +285,9 @@ impl DiagonalPlan {
     ///
     /// Normalizes `axis1` / `axis2`, computes [`DiagonalGeometry`] for their
     /// face dimensions and `offset`, and derives linear memory offsets from
-    /// the array strides.
+    /// the array strides. The result is consumed by both
+    /// [`crate::linalg::kernels::diagonal_view`] and
+    /// [`crate::linalg::kernels::trace_diagonal`].
     ///
     /// # Arguments
     ///
@@ -363,6 +367,7 @@ impl DiagonalPlan {
     /// Shape produced by [`crate::linalg::diagonal`].
     ///
     /// Appends the diagonal length as the last axis after all outer axes.
+    /// The view's final stride is [`Self::diagonal_stride`].
     ///
     /// # Arguments
     ///

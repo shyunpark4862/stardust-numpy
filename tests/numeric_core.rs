@@ -1,7 +1,7 @@
 use sdnp::{
-    absolute, add, argmax, cumsum, divide, max, mean, min, multiply, negative,
-    power, prod, remainder, sort, std, sum, unique, var, Array, Error,
-    NanPolicy,
+    absolute, add, argmax, argmin, cumsum, divide, max, mean, min, multiply,
+    negative, power, prod, remainder, sort, std, sum, unique, var, Array,
+    Error, NanPolicy,
 };
 
 #[test]
@@ -121,6 +121,57 @@ fn cumulative_and_arg_reductions_handle_noncontiguous_arrays() {
 
     let indices = argmax(&transposed, Some(-1), NanPolicy::Propagate).unwrap();
     assert_eq!(indices.to_vec(), vec![0, 1, 1]);
+}
+
+#[test]
+fn boolean_arg_reductions_handle_terminal_values_and_strides() {
+    // Early-exit bool arg kernels must agree on flat, axis, and strided paths.
+    let values = Array::from_vec(
+        vec![true, true, false, false, false, true, false, true],
+        &[2, 4],
+    )
+    .unwrap();
+
+    assert_eq!(
+        argmin(&values, None, NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        argmax(&values, None, NanPolicy::Propagate)
+            .unwrap()
+            .item()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        argmin(&values, Some(-1), NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![2, 0]
+    );
+    assert_eq!(
+        argmax(&values, Some(-1), NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![0, 1]
+    );
+
+    let transposed = values.transpose();
+    assert_eq!(
+        argmin(&transposed, Some(-1), NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![1, 0, 0, 0]
+    );
+    assert_eq!(
+        argmax(&transposed, Some(-1), NanPolicy::Propagate)
+            .unwrap()
+            .to_vec(),
+        vec![0, 0, 0, 1]
+    );
 }
 
 #[test]

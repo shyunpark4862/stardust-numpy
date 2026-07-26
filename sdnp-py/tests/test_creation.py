@@ -405,10 +405,12 @@ def test_diag_matches_numpy(dtype, values, k):
     )
 
 
-def test_diag_of_bool_array_returns_int_values_by_contract():
-    result = sdnp.diag(sdnp.array([True, False, True]))
-    assert result.dtype is int
-    assert_matches(result, np.diag(np.array([1, 0, 1], dtype=np.int64)))
+@pytest.mark.parametrize(
+    "values", [[True, False, True], [[True, False], [False, True]]]
+)
+def test_diag_rejects_bool_array(values):
+    with pytest.raises(ValueError, match="does not support boolean"):
+        sdnp.diag(sdnp.array(values))
 
 
 def test_diag_validates_rank_input_type_and_overflow():

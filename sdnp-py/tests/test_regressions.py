@@ -121,6 +121,19 @@ def test_astype_narrowing_and_scalar_predicates_remain_supported():
     assert sdnp.logical_and(1, 0) is False
 
 
+def test_ufunc_array_type_probe_does_not_call_repr(monkeypatch):
+    array = sdnp.array([1.0, 2.0])
+
+    def fail_if_called(_self):
+        raise AssertionError("ufunc dispatch must not format array operands")
+
+    monkeypatch.setattr(sdnp.Array, "__repr__", fail_if_called)
+
+    assert sdnp.negative(array).to_list() == [-1.0, -2.0]
+    assert sdnp.add(array, 1.0).to_list() == [2.0, 3.0]
+    assert (array + 1.0).to_list() == [2.0, 3.0]
+
+
 def test_negative_and_positive_duplicate_axes_are_detected():
     array = sdnp.ones((2, 2))
 

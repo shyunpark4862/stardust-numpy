@@ -132,36 +132,177 @@ def test_nditer_broadcasts_two_operands_in_logical_order():
     ]
 
 
-def test_repr_and_str_include_shape_values_and_dtype():
-    array = sdnp.arange(6).reshape((2, 3))
-    expected = "array([[0, 1, 2],[3, 4, 5]], dtype=int64)"
-
-    assert repr(array) == expected
-    assert str(array) == expected
+def assert_format_width(text):
+    assert text
+    assert all(len(line) <= 80 for line in text.splitlines())
 
 
 @pytest.mark.parametrize(
-    ("values", "expected"),
+    ("values", "dtype", "data", "dtype_name", "display"),
     [
-        ([True, False], "array([True, False], dtype=bool)"),
+        (
+            [True, False],
+            bool,
+            "[True, False]",
+            "bool",
+            "[0] True False",
+        ),
+        ([1, -2], int, "[1, -2]", "int64", "[0] 1 -2"),
         (
             [0.0, -0.0, float("nan"), float("inf"), -float("inf")],
-            "array([0, -0, nan, inf, -inf], dtype=float64)",
+            float,
+            "[0, -0, nan, inf, -inf]",
+            "float64",
+            "[0] 0 -0 nan inf -inf",
         ),
         (
-            [1 + 2j, 1 - 2j, complex(float("nan"), 0)],
-            "array([(1+2j), (1-2j), (nan+0j)], dtype=complex128)",
+            [1 + 2j, 1 - 2j, 3 + 0j, complex(float("nan"), 0)],
+            complex,
+            "[1+2j, 1-2j, 3+0j, nan+0j]",
+            "complex128",
+            "[0] 1+2j 1-2j 3+0j nan+0j",
         ),
     ],
 )
-def test_repr_special_values(values, expected):
-    array = sdnp.array(values)
+def test_repr_and_str_scalar_formatting(
+    values, dtype, data, dtype_name, display
+):
+    array = sdnp.array(values, dtype=dtype)
 
-    assert repr(array) == expected
-    assert str(array) == expected
+    assert repr(array).splitlines() == [
+        f"sdnp-array at 0x{id(array):x}",
+        f"  @ data: {data}",
+        f"  @ shape: [{len(values)}]",
+        "  @ ndim: 1",
+        f"  @ size: {len(values)}",
+        f"  @ dtype: {dtype_name}",
+    ]
+    assert str(array) == display
+    assert "(" not in data
+    assert_format_width(repr(array))
+    assert_format_width(str(array))
 
 
-def test_repr_abbreviates_large_one_dimensional_arrays():
-    text = repr(sdnp.arange(1001))
+def test_str_formats_two_dimensional_matrix_with_zero_based_labels():
+    array = sdnp.arange(6).reshape((2, 3))
 
-    assert text == "array([0, 1, 2, ..., 998, 999, 1000], dtype=int64)"
+    assert str(array) == (
+        "     [,0] [,1] [,2]\n"
+        "[0,]    0    1    2\n"
+        "[1,]    3    4    5"
+    )
+
+
+def test_str_paginates_three_dimensions_by_leading_axis():
+    array = sdnp.arange(24).reshape((2, 3, 4))
+
+    assert str(array) == (
+        "[0, ,]\n"
+        "     [,0] [,1] [,2] [,3]\n"
+        "[0,]    0    1    2    3\n"
+        "[1,]    4    5    6    7\n"
+        "[2,]    8    9   10   11\n\n"
+        "[1, ,]\n"
+        "     [,0] [,1] [,2] [,3]\n"
+        "[0,]   12   13   14   15\n"
+        "[1,]   16   17   18   19\n"
+        "[2,]   20   21   22   23"
+    )
+
+
+def test_str_paginates_four_dimensions_in_leading_axis_order():
+    array = sdnp.arange(16).reshape((2, 2, 2, 2))
+    labels = [
+        line
+        for line in str(array).splitlines()
+        if line.startswith("[") and line.endswith(", ,]")
+    ]
+
+    assert labels == ["[0, 0, ,]", "[0, 1, ,]", "[1, 0, ,]", "[1, 1, ,]"]
+
+
+def test_repr_and_str_follow_logical_order_for_non_contiguous_view():
+    array = sdnp.arange(6).reshape((2, 3)).T
+
+    assert repr(array).splitlines()[1] == "  @ data: [0, 3, 1, 4, 2, 5]"
+    assert str(array) == (
+        "     [,0] [,1]\n"
+        "[0,]    0    3\n"
+        "[1,]    1    4\n"
+        "[2,]    2    5"
+    )
+
+
+def test_repr_and_vector_str_abbreviate_both_edges_within_eighty_columns():
+    array = sdnp.arange(1001)
+    repr_text = repr(array)
+    str_text = str(array)
+
+    assert repr_text.splitlines()[1].startswith("  @ data: [0, 1, 2")
+    assert "..." in repr_text.splitlines()[1]
+    assert repr_text.splitlines()[1].endswith("1000]")
+    assert str_text.startswith("[0] 0 1 2")
+    assert "..." in str_text
+    assert str_text.endswith("1000")
+    assert_format_width(repr_text)
+    assert_format_width(str_text)
+
+
+def test_str_abbreviates_large_matrix_rows_and_columns():
+    text = str(sdnp.arange(400).reshape((20, 20)))
+    lines = text.splitlines()
+
+    assert lines[0].startswith("      [,0] [,1]")
+    assert " ... " in lines[0]
+    assert lines[1].lstrip().startswith("[0,]")
+    assert lines[3].lstrip().startswith("[2,]")
+    assert lines[4] == "..."
+    assert lines[-1].startswith("[19,]")
+    assert_format_width(text)
+
+
+def test_str_abbreviates_many_pages_at_both_edges():
+    text = str(sdnp.arange(40).reshape((10, 2, 2)))
+    blocks = text.split("\n\n")
+
+    assert [block.splitlines()[0] for block in blocks] == [
+        "[0, ,]",
+        "[1, ,]",
+        "[2, ,]",
+        "...",
+        "[7, ,]",
+        "[8, ,]",
+        "[9, ,]",
+    ]
+    assert_format_width(text)
+
+
+def test_long_shape_and_long_complex_values_remain_width_bounded():
+    max_float = float.fromhex("0x1.fffffffffffffp+1023")
+    arrays = [
+        sdnp.ones((1,) * 64),
+        sdnp.full((10, 10), complex(max_float, -max_float)),
+    ]
+
+    for array in arrays:
+        assert_format_width(repr(array))
+        assert_format_width(str(array))
+
+    assert "..." in repr(arrays[0]).splitlines()[2]
+    assert "(" not in repr(arrays[1])
+    assert "(" not in str(arrays[1])
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        pytest.param(sdnp.array([], dtype=int), id="empty-vector"),
+        pytest.param(sdnp.zeros((2, 0)), id="zero-columns"),
+        pytest.param(sdnp.zeros((0, 2)), id="zero-rows"),
+        pytest.param(sdnp.zeros((2, 0, 3)), id="empty-page"),
+    ],
+)
+def test_empty_array_formats_are_stable_and_width_bounded(array):
+    assert "  @ data: []" in repr(array)
+    assert_format_width(repr(array))
+    assert all(len(line) <= 80 for line in str(array).splitlines())

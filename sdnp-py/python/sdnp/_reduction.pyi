@@ -402,10 +402,12 @@ def argmin(
     """Return indices of minimum values.
 
     The Rust reduction scans along the chosen axis (or the full flattened
-    buffer when ``axis=None``) in O(n) time, honoring ``nan_policy`` for
-    floating inputs.  Only real dtypes (``bool``, ``int``, ``float``) are
-    supported; complex arrays are rejected.  A full reduction unwraps to a
-    Python ``int`` index rather than a 0-D array.
+    buffer when ``axis=None``), honoring ``nan_policy`` for floating inputs.
+    For boolean input the scan stops at the first ``False`` because no later
+    value can be smaller, matching NumPy's specialized bool kernel.  Only real
+    dtypes (``bool``, ``int``, ``float``) are supported; complex arrays are
+    rejected.  A full reduction unwraps to a Python ``int`` index rather than
+    a 0-D array.
 
     Parameters
     ----------
@@ -443,8 +445,9 @@ def argmax(
     """Return indices of maximum values.
 
     Same implementation strategy as :func:`argmin`, but selects the index of
-    the largest element along the chosen axis in O(n) time.  ``nan_policy``
-    controls NaN handling for floats; complex input is rejected.  Full
+    the largest element along the chosen axis.  For boolean input the scan
+    stops at the first ``True`` because no later value can be larger.  Float
+    ``nan_policy`` controls NaN handling; complex input is rejected.  Full
     reductions unwrap to a Python ``int`` scalar.
 
     Parameters

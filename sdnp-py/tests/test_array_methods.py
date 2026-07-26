@@ -25,7 +25,9 @@ def test_array_properties_and_list_conversion(dtype):
     array = sdnp.array(values, dtype=dtype)
 
     assert array.shape == [2, 3]
-    assert array.strides == [3, 1]
+    assert not hasattr(array, "strides")
+    with pytest.raises(AttributeError):
+        _ = array.strides
     assert array.ndim == 2
     assert array.size == 6
     assert array.dtype is dtype
@@ -52,28 +54,12 @@ def test_properties_match_numpy_for_generated_arrays(case):
     assert_matches(array, expected)
 
 
-def test_empty_array_properties_and_element_strides():
+def test_empty_array_properties():
     array = sdnp.zeros((2, 0, 3), dtype=int)
     assert array.shape == [2, 0, 3]
-    assert array.strides == [0, 3, 1]
     assert array.ndim == 3
     assert array.size == 0
     assert array.to_list() == [[], []]
-
-
-@pytest.mark.parametrize(
-    ("values", "expected"),
-    [
-        ([True, False], "array([True, False], dtype=bool)"),
-        ([1, -2], "array([1, -2], dtype=int64)"),
-        ([1.5, float("inf")], "array([1.5, inf], dtype=float64)"),
-        ([1 + 2j, 3 + 0j], "array([(1+2j), (3+0j)], dtype=complex128)"),
-    ],
-)
-def test_repr_and_str_include_values_and_fixed_width_dtype(values, expected):
-    array = sdnp.array(values)
-    assert repr(array) == expected
-    assert str(array) == expected
 
 
 @pytest.mark.parametrize("dtype", [bool, int, float, complex])
@@ -94,7 +80,6 @@ def test_copy_is_c_contiguous_and_independent():
     copied = source.copy()
 
     assert copied.shape == [3, 2]
-    assert copied.strides == [2, 1]
     assert_matches(copied, np.arange(6).reshape(2, 3).T)
 
     copied[0, 0] = 99
@@ -154,7 +139,6 @@ def test_astype_supports_every_dtype_pair(source_dtype, target_dtype):
     result = source.astype(target_dtype)
 
     assert result.dtype is target_dtype
-    assert result.strides == [1]
     assert_matches(result, expected)
 
     result[0] = target_dtype(1)
@@ -204,7 +188,6 @@ def test_reshape_of_noncontiguous_view_preserves_c_order_values():
     transposed = sdnp.arange(6).reshape((2, 3)).T
     reshaped = transposed.reshape((2, 3))
     expected = np.arange(6).reshape(2, 3).T.reshape(2, 3)
-    assert reshaped.strides == [3, 1]
     assert_matches(reshaped, expected)
 
 
@@ -238,12 +221,10 @@ def test_transpose_T_and_permute_axes_match_numpy_layout():
 
     for result in (source.transpose(), source.T):
         assert result.shape == [4, 3, 2]
-        assert result.strides == [1, 4, 12]
         assert_matches(result, expected.transpose())
 
     permuted = source.permute_axes((1, -1, 0))
     assert permuted.shape == [3, 4, 2]
-    assert permuted.strides == [4, 1, 12]
     assert_matches(permuted, np.transpose(expected, (1, 2, 0)))
 
 
@@ -257,7 +238,6 @@ def test_one_dimensional_transpose_is_a_copy_on_write_view():
     source = sdnp.arange(3)
     view = source.T
     assert view.shape == [3]
-    assert view.strides == [1]
 
     view[0] = 9
     assert source[0] == 0

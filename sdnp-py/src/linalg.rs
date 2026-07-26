@@ -284,7 +284,9 @@ pub fn outer(
 
 /// Extract a diagonal along offset `k` between `axis1` and `axis2`.
 ///
-/// Returns a 1-D view copy of the selected diagonal elements.
+/// Returns a zero-copy strided view over the source buffer. Construction is
+/// O(ndim) regardless of the diagonal length; writes to the view detach via
+/// copy-on-write rather than aliasing the input in place.
 ///
 /// # Arguments
 ///
@@ -295,7 +297,7 @@ pub fn outer(
 ///
 /// # Returns
 ///
-/// A 1-D `Array` containing the diagonal elements.
+/// A strided view whose trailing axis is the diagonal length.
 ///
 /// # Errors
 ///

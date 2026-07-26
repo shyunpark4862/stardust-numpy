@@ -95,7 +95,12 @@ OPERATIONS: tuple[Operation, ...] = tuple(
         ndims=frozenset({2}),
     )
     + _ops(["tril", "triu"], "creation", dtypes=NUMERIC_DTYPES)
-    + _ops(["diag"], "creation", ndims=frozenset({1, 2}))
+    + _ops(
+        ["diag"],
+        "creation",
+        dtypes=NUMERIC_DTYPES,
+        ndims=frozenset({1, 2}),
+    )
     + _ops(
         ["meshgrid"], "creation", dtypes=NUMERIC_DTYPES, ndims=frozenset({1})
     )
@@ -154,15 +159,14 @@ OPERATIONS: tuple[Operation, ...] = tuple(
             "Array.transpose",
             "Array.permute_axes",
             "Array.to_list",
-            "Array.__repr__",
-            "Array.__str__",
             "Array.__getitem__",
             "Array.__setitem__",
             "Array.__len__",
             "Array.__iter__",
+            "Array.__repr__",
+            "Array.__str__",
             "Array.flat",
             "Array.shape",
-            "Array.strides",
             "Array.ndim",
             "Array.size",
             "Array.dtype",
@@ -475,9 +479,18 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
         "imag": np.imag,
     }
     if name in unary:
+        np_unary = unary[name]
+        if name in {"real", "imag"}:
+            # sdnp intentionally returns a new array, while NumPy exposes
+            # complex components as views. Materialize NumPy's result so this
+            # benchmark compares the same copy contract.
+            return _pair_tasks(
+                lambda: getattr(sdnp, name)(sd_a),
+                lambda: np_unary(np_a).copy(),
+            )
         return _pair_tasks(
             lambda: getattr(sdnp, name)(sd_a),
-            lambda: unary[name](np_a),
+            lambda: np_unary(np_a),
         )
 
     if name in {
@@ -622,10 +635,6 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
         )
     if name == "Array.to_list":
         return _pair_tasks(lambda: sd_a.to_list(), lambda: np_a.tolist())
-    if name == "Array.__repr__":
-        return _pair_tasks(lambda: repr(sd_a), lambda: repr(np_a))
-    if name == "Array.__str__":
-        return _pair_tasks(lambda: str(sd_a), lambda: str(np_a))
     if name == "Array.__getitem__":
         index = (slice(None, None, 2),) + (slice(None),) * (case.ndim - 1)
         return _pair_tasks(lambda: sd_a[index], lambda: np_a[index])
@@ -649,6 +658,10 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
             lambda: sum(1 for _ in sd_a),
             lambda: sum(1 for _ in np_a),
         )
+    if name == "Array.__repr__":
+        return _pair_tasks(lambda: repr(sd_a), lambda: repr(np_a))
+    if name == "Array.__str__":
+        return _pair_tasks(lambda: str(sd_a), lambda: str(np_a))
     if name == "Array.flat":
         return _pair_tasks(
             lambda: sum(1 for _ in sd_a.flat),

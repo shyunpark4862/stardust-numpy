@@ -5,10 +5,16 @@
 //! output row and right row in registers. Otherwise a general path handles
 //! arbitrary strides, with an inner fast path when both contraction axes are
 //! contiguous.
+//!
+//! [`diagonal_view`] builds a zero-copy strided view over diagonal elements
+//! by sharing the source `Arc` buffer. [`trace_diagonal`] still materializes
+//! reduced sums because trace is a true reduction.
+
+use std::sync::Arc;
 
 use crate::array::Array;
 use crate::dtype::{CastTo, Scalar};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::linalg::geometry::{DiagonalPlan, MatmulPlan};
 use crate::linalg::traits::ContractElement;
 use crate::reduction::SumReduce;
@@ -283,11 +289,12 @@ where
     Array::from_vec(vec![accumulator], &[])
 }
 
-/// Copy diagonal elements into a new C-order array.
+/// Construct a zero-copy strided view over diagonal elements.
 ///
-/// Walks outer axes with [`RunPlan`], then reads `geometry.len` elements along
-/// [`DiagonalPlan::diagonal_stride`] starting at
-/// [`DiagonalPlan::diagonal_start_offset`].
+/// The output keeps all non-diagonal axes and appends one axis whose stride is
+/// [`DiagonalPlan::diagonal_stride`]. The source `Arc` buffer is shared, so
+/// construction is O(ndim) regardless of the number of diagonal elements.
+/// Writes to the view use copy-on-write and do not alias the source in place.
 ///
 /// # Arguments
 ///
@@ -296,40 +303,50 @@ where
 ///
 /// # Returns
 ///
-/// C-order array with shape [`DiagonalPlan::diagonal_output_shape`].
+/// Strided view with shape [`DiagonalPlan::diagonal_output_shape`].
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidArgument`] — output allocation exceeds limits
-pub(crate) fn gather_diagonal<T: Scalar>(
+/// * [`Error::InvalidArgument`] — view offset arithmetic overflows or the
+///   resulting layout exceeds the source buffer
+pub(crate) fn diagonal_view<T: Scalar>(
     array: &Array<T>,
     plan: &DiagonalPlan,
 ) -> Result<Array<T>> {
     let output_shape = plan.diagonal_output_shape();
-    let output_len = checked_size_of_shape(&output_shape)?;
-    checked_allocation_len::<T>(output_len)?;
-    let mut output = Vec::with_capacity(output_len);
-    let outer_plan =
-        RunPlan::<1>::new(&plan.outer_shape, [&plan.outer_strides]);
-    outer_plan.for_each_element([array.offset() as isize], |[outer_base]| {
-        let mut position = outer_base as isize + plan.diagonal_start_offset;
-        if plan.geometry.len == 0 {
-            return;
-        }
-        output.push(array.data[position as usize]);
-        // Step along the diagonal: sum of row and column strides.
-        for _ in 1..plan.geometry.len {
-            position += plan.diagonal_stride;
-            output.push(array.data[position as usize]);
-        }
-    });
-    Array::from_vec(output, &output_shape)
+    let mut output_strides = plan.outer_strides.clone();
+    output_strides.push(plan.diagonal_stride);
+
+    // An empty view has no reachable elements, so retain the source origin.
+    // This also handles offsets beyond either matrix dimension without
+    // manufacturing an out-of-bounds logical origin.
+    let output_offset = if output_shape.contains(&0) {
+        array.offset()
+    } else {
+        isize::try_from(array.offset())
+            .ok()
+            .and_then(|offset| offset.checked_add(plan.diagonal_start_offset))
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| {
+                Error::InvalidArgument(
+                    "diagonal view offset overflows address range".into(),
+                )
+            })?
+    };
+
+    Array::from_shared_parts(
+        Arc::clone(&array.data),
+        output_shape,
+        output_strides,
+        output_offset,
+        array.is_writable(),
+    )
 }
 
 /// Reduce each diagonal with the element type's sum fold.
 ///
-/// Like [`gather_diagonal`], but accumulates with [`SumReduce::accumulate`]
-/// instead of copying each element. Output rank equals `plan.outer_shape`.
+/// Accumulates each diagonal with [`SumReduce::accumulate`]. Output rank equals
+/// `plan.outer_shape`.
 ///
 /// # Arguments
 ///

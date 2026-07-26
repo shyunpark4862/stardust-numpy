@@ -13,7 +13,7 @@ use sdnp::{
     trunc_divide, Array, Complex64,
 };
 
-use crate::coerce::{coerce_array_like, coerce_scalar};
+use crate::coerce::{coerce_array_like, coerce_scalar, is_python_scalar};
 use crate::dtype::PyDType;
 use crate::error::{map_sdnp, value_error, zero_division_error};
 use crate::inner::ArrayInner;
@@ -133,11 +133,13 @@ pub fn unary_op(
     finish(py, dispatch_unary_inner(arr.inner, op)?)
 }
 
-/// Return whether `obj` is a scalar literal and not a `PyArray`.
+/// Return whether `obj` is a built-in Python scalar literal.
 ///
-/// Uses [`coerce_scalar`] success as a type probe but excludes existing
-/// `sdnp.Array` instances (including would-be 0-D arrays). Distinguishes
-/// `np.add(1, 2)` from `np.add(arr, 1)`.
+/// Checks concrete Python scalar classes without invoking fallible coercion.
+/// In particular, probing an ``sdnp.Array`` must not build a discarded
+/// [`coerce_scalar`] error: that error includes the offending object in its
+/// message and would therefore call the array's potentially expensive
+/// ``__repr__`` before normal array dispatch begins.
 ///
 /// # Arguments
 ///
@@ -145,14 +147,14 @@ pub fn unary_op(
 ///
 /// # Returns
 ///
-/// `true` when the object coerces as a bare scalar and is not an Array.
+/// `true` for bool, int, float, or complex literals; `false` for arrays and
+/// nested sequences.
 ///
 /// # Errors
 ///
 /// Never fails.
 fn is_scalar(obj: &Bound<'_, PyAny>) -> bool {
-    crate::coerce::coerce_scalar(obj).is_ok()
-        && !obj.extract::<PyRef<crate::array::PyArray>>().is_ok()
+    is_python_scalar(obj)
 }
 
 /// Coerce both operands and promote to a common storage dtype.

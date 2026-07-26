@@ -272,7 +272,9 @@ pub trait ProdReduce: Scalar {
 /// Orderable reductions: min, max, argmin, and argmax.
 ///
 /// For `f64`, [`NanPolicy`] selects propagate vs ignore paths. Integer
-/// and boolean types treat every value as finite.
+/// and boolean types treat every value as finite. Boolean `argmin`/`argmax`
+/// stop as soon as the winning value is found (`false` for min, `true` for
+/// max), matching NumPy's specialized bool kernels.
 pub trait ExtremumReduce: Scalar + PartialOrd {
     /// Minimum over selected axes.
     ///
@@ -344,7 +346,8 @@ pub trait ExtremumReduce: Scalar + PartialOrd {
     /// Index of the minimum element along an axis or over the whole array.
     ///
     /// With `axis = None`, returns a flat C-order index (0-D output). With
-    /// an axis, indices are relative to that axis length.
+    /// an axis, indices are relative to that axis length. For `bool`, the
+    /// scan stops at the first `false` because no later value can be smaller.
     ///
     /// # Arguments
     ///
@@ -367,7 +370,8 @@ pub trait ExtremumReduce: Scalar + PartialOrd {
 
     /// Index of the maximum element along an axis or over the whole array.
     ///
-    /// Index semantics match [`Self::reduce_argmin`].
+    /// Index semantics match [`Self::reduce_argmin`]. For `bool`, the scan
+    /// stops at the first `true` because no later value can be larger.
     ///
     /// # Arguments
     ///
@@ -1007,11 +1011,13 @@ impl ExtremumReduce for i64 {
                 "argmin",
                 |candidate, best| candidate < best,
                 |_| false,
+                |_| false,
             ),
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
                 |candidate, best| candidate < best,
+                |_| false,
                 |_| false,
             ),
         }
@@ -1027,11 +1033,13 @@ impl ExtremumReduce for i64 {
                 "argmax",
                 |candidate, best| candidate > best,
                 |_| false,
+                |_| false,
             ),
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
                 |candidate, best| candidate > best,
+                |_| false,
                 |_| false,
             ),
         }
@@ -1064,18 +1072,21 @@ impl ExtremumReduce for bool {
         axis: Option<isize>,
         _nan_policy: NanPolicy,
     ) -> Result<Array<i64>> {
+        // `false` is the minimum bool; once found, no later element can win.
         match axis {
             None => arg_extremum_flat(
                 a,
                 "argmin",
                 |candidate, best| !candidate && best,
                 |_| false,
+                |value| !value,
             ),
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
                 |candidate, best| !candidate && best,
                 |_| false,
+                |value| !value,
             ),
         }
     }
@@ -1084,18 +1095,21 @@ impl ExtremumReduce for bool {
         axis: Option<isize>,
         _nan_policy: NanPolicy,
     ) -> Result<Array<i64>> {
+        // `true` is the maximum bool; once found, no later element can win.
         match axis {
             None => arg_extremum_flat(
                 a,
                 "argmax",
                 |candidate, best| candidate && !best,
                 |_| false,
+                |value| value,
             ),
             Some(axis) => arg_extremum_axis(
                 a,
                 axis,
                 |candidate, best| candidate && !best,
                 |_| false,
+                |value| value,
             ),
         }
     }
@@ -1143,10 +1157,20 @@ impl ExtremumReduce for f64 {
     ) -> Result<Array<i64>> {
         match nan_policy {
             NanPolicy::Propagate => match axis {
-                None => {
-                    arg_extremum_flat(a, "argmin", |c, b| c < b, f64::is_nan)
-                }
-                Some(ax) => arg_extremum_axis(a, ax, |c, b| c < b, f64::is_nan),
+                None => arg_extremum_flat(
+                    a,
+                    "argmin",
+                    |c, b| c < b,
+                    f64::is_nan,
+                    |_| false,
+                ),
+                Some(ax) => arg_extremum_axis(
+                    a,
+                    ax,
+                    |c, b| c < b,
+                    f64::is_nan,
+                    |_| false,
+                ),
             },
             NanPolicy::Ignore => match axis {
                 None => arg_extremum_flat_ignore(
@@ -1172,10 +1196,20 @@ impl ExtremumReduce for f64 {
     ) -> Result<Array<i64>> {
         match nan_policy {
             NanPolicy::Propagate => match axis {
-                None => {
-                    arg_extremum_flat(a, "argmax", |c, b| c > b, f64::is_nan)
-                }
-                Some(ax) => arg_extremum_axis(a, ax, |c, b| c > b, f64::is_nan),
+                None => arg_extremum_flat(
+                    a,
+                    "argmax",
+                    |c, b| c > b,
+                    f64::is_nan,
+                    |_| false,
+                ),
+                Some(ax) => arg_extremum_axis(
+                    a,
+                    ax,
+                    |c, b| c > b,
+                    f64::is_nan,
+                    |_| false,
+                ),
             },
             NanPolicy::Ignore => match axis {
                 None => arg_extremum_flat_ignore(

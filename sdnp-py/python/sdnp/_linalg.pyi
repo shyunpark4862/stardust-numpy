@@ -328,10 +328,15 @@ def diagonal(
 ) -> Array[ScalarT]:
     """Extract a diagonal between two axes.
 
-    The Rust core walks the plane spanned by ``axis1`` and ``axis2``, gathering
-    elements along the requested offset into a new 1-D buffer in O(d) time
-    where *d* is the diagonal length.  This always copies; it does not return
-    a strided view over the original storage.
+    The Rust core returns a zero-copy strided view over the plane spanned by
+    ``axis1`` and ``axis2``.  Remaining axes retain their original order and
+    the diagonal is appended as the final axis with stride
+    ``stride(axis1) + stride(axis2)``.  Construction takes O(ndim) time and
+    O(ndim) metadata space regardless of the number of diagonal elements.
+
+    The view shares the input buffer.  As with other sdnp views, mutation uses
+    copy-on-write: writing to the diagonal view detaches it rather than
+    modifying the source array.
 
     Parameters
     ----------
@@ -345,7 +350,7 @@ def diagonal(
     Returns
     -------
     Array
-        Diagonal values with unchanged dtype.
+        Zero-copy diagonal view with unchanged dtype.
 
     Raises
     ------

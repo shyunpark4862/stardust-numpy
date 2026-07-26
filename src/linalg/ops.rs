@@ -9,7 +9,7 @@ use crate::dtype::{CastTo, Promote, Scalar};
 use crate::error::Result;
 use crate::linalg::geometry::{plan_dot, DiagonalPlan, MatmulPlan};
 use crate::linalg::kernels::{
-    contract, gather_diagonal, trace_diagonal, vector_dot,
+    contract, diagonal_view, trace_diagonal, vector_dot,
 };
 use crate::linalg::traits::ContractElement;
 use crate::reduction::SumReduce;
@@ -249,10 +249,12 @@ where
     Array::from_vec(output, &output_shape)
 }
 
-/// Extract diagonals along two axes into the trailing output dimension.
+/// View diagonals along two axes as the trailing output dimension.
 ///
 /// Axes may be negative. Remaining axes keep their original order; the
-/// diagonal length is appended last.
+/// diagonal length is appended last. This returns a zero-copy strided view
+/// over the source buffer rather than gathering elements into a new vector.
+/// Writes to the view detach via copy-on-write.
 ///
 /// # Arguments
 ///
@@ -263,7 +265,7 @@ where
 ///
 /// # Returns
 ///
-/// An array whose trailing dimension is the diagonal length.
+/// A zero-copy strided view whose trailing dimension is the diagonal length.
 ///
 /// # Errors
 ///
@@ -285,7 +287,7 @@ pub fn diagonal<T: Scalar>(
     axis2: isize,
 ) -> Result<Array<T>> {
     let plan = DiagonalPlan::new(array, offset, axis1, axis2)?;
-    gather_diagonal(array, &plan)
+    diagonal_view(array, &plan)
 }
 
 /// Sum elements along diagonals defined by two axes.

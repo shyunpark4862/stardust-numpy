@@ -10,6 +10,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "benches" / "results"
 MARKDOWN_PATH = ROOT / "BENCHMARK.md"
+CHART_TOP_N = 10
 
 
 def default_canvas_path() -> Path:
@@ -220,7 +221,7 @@ export default function SdnpNumpyBenchmark() {{
     (size === "all" || result.size === size) &&
     (ndim === "all" || String(result.ndim) === ndim)
   );
-  const chartRows = [...visible].sort((a, b) => b.ratio - a.ratio).slice(0, 30);
+  const chartRows = [...visible].sort((a, b) => b.ratio - a.ratio).slice(0, {CHART_TOP_N});
   const wins = visible.filter((result) => result.ratio <= 1).length;
   const medianRatio = visible.length
     ? [...visible].map((result) => result.ratio).sort((a, b) => a - b)[Math.floor(visible.length / 2)]
@@ -262,10 +263,10 @@ export default function SdnpNumpyBenchmark() {{
 
       {{chartRows.length > 0 && (
         <Stack gap={{10}}>
-          <H2>Median execution-time ratio by case</H2>
+          <H2>Top {CHART_TOP_N} slowest cases (median ratio)</H2>
           <Text tone="tertiary" size="small">
             X-axis: sdnp median / NumPy median (ratio) · Y-axis: benchmark case ·
-            1.0 is equal performance
+            1.0 is equal performance · Showing top {CHART_TOP_N} by ratio among filtered cases
           </Text>
           <BarChart
             categories={{chartRows.map((result) => result.id)}}

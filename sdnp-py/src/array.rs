@@ -15,7 +15,7 @@ use crate::dtype::PyDType;
 use crate::error::{map_sdnp, type_error};
 use crate::index_parse::{get_item, set_item};
 use crate::inner::ArrayInner;
-use crate::repr::array_repr;
+use crate::repr::{array_repr, array_str};
 use crate::unwrap::{finish, scalar_from_item, PyScalar};
 use crate::validate::{
     check_permute_axes, check_reshape_shape, check_squeeze_axes,
@@ -127,25 +127,6 @@ impl PyArray {
     fn shape(&self) -> PyResult<Vec<usize>> {
         self.reject_zero_dim_input("shape")?;
         Ok(self.inner.shape().to_vec())
-    }
-
-    /// Tuple of byte strides between consecutive elements along each axis.
-    ///
-    /// # Arguments
-    ///
-    /// None.
-    ///
-    /// # Returns
-    ///
-    /// A Python `tuple` of `int` strides in element units.
-    ///
-    /// # Errors
-    ///
-    /// * `TypeError` — 0-D array.
-    #[getter]
-    fn strides(&self) -> PyResult<Vec<isize>> {
-        self.reject_zero_dim_input("strides")?;
-        Ok(self.inner.strides())
     }
 
     /// Number of array dimensions.
@@ -505,12 +486,13 @@ impl PyArray {
     /// a = np.array([1, 2, 3])
     /// assert repr(a).startswith("array([")
     /// ```
-    fn __repr__(&self) -> PyResult<String> {
-        self.reject_zero_dim_input("repr")?;
-        array_repr(&self.inner)
+    fn __repr__(slf: PyRef<'_, Self>) -> PyResult<String> {
+        slf.reject_zero_dim_input("repr")?;
+        let address = slf.as_ptr() as usize;
+        array_repr(&slf.inner, address)
     }
 
-    /// Human-readable string (identical to [`Self::__repr__`]).
+    /// Zero-based R-style, width-bounded array display.
     ///
     /// # Arguments
     ///
@@ -518,13 +500,15 @@ impl PyArray {
     ///
     /// # Returns
     ///
-    /// Same string as `repr(self)`.
+    /// R-style vector, matrix, or leading-axis page text. Every line is at
+    /// most 80 columns; long rows, columns, and page sequences are abbreviated.
     ///
     /// # Errors
     ///
     /// * `TypeError` — 0-D array.
     fn __str__(&self) -> PyResult<String> {
-        self.__repr__()
+        self.reject_zero_dim_input("str")?;
+        array_str(&self.inner)
     }
 
     /// Return elements selected by `index`.

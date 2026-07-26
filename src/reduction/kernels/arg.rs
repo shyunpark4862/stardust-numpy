@@ -4,14 +4,19 @@
 //! reductions emit one index per outer position. Contiguous last-axis inputs
 //! scan row chunks directly; strided inputs use outer runs plus an inner
 //! axis stride loop.
+//!
+//! Callers may supply an `is_terminal` predicate so a winning value ends the
+//! scan early. Boolean reductions use this for NumPy-compatible behavior:
+//! `argmin` stops at the first `false`, `argmax` at the first `true`.
 
 use super::*;
 
 /// Flat argmin/argmax with NaN propagation in logical C order.
 ///
 /// Scans the entire array in C-order linear index. The first NaN encountered
-/// wins immediately (NumPy propagate semantics). Dispatches to a contiguous
-/// slice fast path when layout allows.
+/// wins immediately (NumPy propagate semantics). When `is_terminal` holds for
+/// the current best value, the scan stops because no later element can win.
+/// Dispatches to a contiguous slice fast path when layout allows.
 ///
 /// # Arguments
 ///
@@ -19,6 +24,7 @@ use super::*;
 /// * `_op_name` - Operation label (reserved for diagnostics).
 /// * `is_better` - Comparison: `true` when `candidate` beats `best`.
 /// * `is_nan` - Predicate marking NaN values that poison the result.
+/// * `is_terminal` - Predicate marking a value that cannot be improved.
 ///
 /// # Returns
 ///
@@ -27,16 +33,18 @@ use super::*;
 /// # Errors
 ///
 /// Returns an error when allocation fails.
-pub(crate) fn arg_extremum_flat<T, F, N>(
+pub(crate) fn arg_extremum_flat<T, F, N, E>(
     a: &Array<T>,
     _op_name: &str,
     mut is_better: F,
     is_nan: N,
+    is_terminal: E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     let n = a.size();
     if n == 0 {
@@ -44,21 +52,27 @@ where
     }
 
     if let Some(slice) = a.as_c_contiguous_slice() {
-        return arg_extremum_flat_contiguous(slice, &mut is_better, &is_nan);
+        return arg_extremum_flat_contiguous(
+            slice,
+            &mut is_better,
+            &is_nan,
+            &is_terminal,
+        );
     }
-    arg_extremum_flat_strided(a, &mut is_better, &is_nan)
+    arg_extremum_flat_strided(a, &mut is_better, &is_nan, &is_terminal)
 }
 
 /// Contiguous flat arg-extremum with NaN propagation.
 ///
 /// Linear scan over a dense slice. Stops at the first NaN and returns its
-/// index.
+/// index, or stops early when `is_terminal` marks the current best value.
 ///
 /// # Arguments
 ///
 /// * `slice` - C-contiguous input elements.
 /// * `is_better` - Comparison predicate for finite values.
 /// * `is_nan` - NaN detector.
+/// * `is_terminal` - Early-exit predicate for values that cannot be improved.
 ///
 /// # Returns
 ///
@@ -67,20 +81,26 @@ where
 /// # Errors
 ///
 /// Returns an error when allocation fails.
-fn arg_extremum_flat_contiguous<T, F, N>(
+fn arg_extremum_flat_contiguous<T, F, N, E>(
     slice: &[T],
     is_better: &mut F,
     is_nan: &N,
+    is_terminal: &E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     let mut best_linear = 0_i64;
     let mut best_value = slice[0];
     // First NaN wins immediately (NumPy propagate semantics).
     if is_nan(best_value) {
+        return Array::from_vec(vec![0], &[]);
+    }
+    // Boolean argmin/argmax use this to stop once the winning value is found.
+    if is_terminal(best_value) {
         return Array::from_vec(vec![0], &[]);
     }
     for (linear, &candidate) in slice.iter().enumerate().skip(1) {
@@ -90,6 +110,9 @@ where
         if is_better(candidate, best_value) {
             best_value = candidate;
             best_linear = linear as i64;
+            if is_terminal(candidate) {
+                break;
+            }
         }
     }
     Array::from_vec(vec![best_linear], &[])
@@ -98,13 +121,15 @@ where
 /// Strided flat arg-extremum with NaN propagation.
 ///
 /// Coalesces the full shape into outer runs and walks elements in C-order
-/// linear index without requiring a contiguous buffer.
+/// linear index without requiring a contiguous buffer. Honors `is_terminal`
+/// the same way as the contiguous flat path.
 ///
 /// # Arguments
 ///
 /// * `a` - Strided input array.
 /// * `is_better` - Comparison predicate for finite values.
 /// * `is_nan` - NaN detector.
+/// * `is_terminal` - Early-exit predicate for values that cannot be improved.
 ///
 /// # Returns
 ///
@@ -113,15 +138,17 @@ where
 /// # Errors
 ///
 /// Returns an error when allocation fails.
-fn arg_extremum_flat_strided<T, F, N>(
+fn arg_extremum_flat_strided<T, F, N, E>(
     a: &Array<T>,
     is_better: &mut F,
     is_nan: &N,
+    is_terminal: &E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     // Coalesce the full shape into outer runs + inner stride steps.
     let run_plan = RunPlan::new(a.shape(), [a.strides()]);
@@ -129,11 +156,14 @@ where
     if is_nan(best_value) {
         return Array::from_vec(vec![0], &[]);
     }
+    if is_terminal(best_value) {
+        return Array::from_vec(vec![0], &[]);
+    }
     let mut best_linear = 0_i64;
     let mut linear = 0_i64;
     let mut skip_first = true;
 
-    let nan_index = run_plan.try_for_each(
+    let early_index = run_plan.try_for_each(
         [a.offset() as isize],
         |run| -> std::result::Result<(), i64> {
             let mut pos = run.bases[0] as isize;
@@ -148,6 +178,9 @@ where
                     if is_better(candidate, best_value) {
                         best_value = candidate;
                         best_linear = linear;
+                        if is_terminal(candidate) {
+                            return Err(linear);
+                        }
                     }
                 }
                 linear += 1;
@@ -156,7 +189,7 @@ where
             Ok(())
         },
     );
-    if let Err(index) = nan_index {
+    if let Err(index) = early_index {
         return Array::from_vec(vec![index], &[]);
     }
 
@@ -167,6 +200,7 @@ where
 ///
 /// Emits one axis-relative index per outer position. Uses a contiguous row
 /// fast path when the scanned axis is last and the buffer is C-contiguous.
+/// Each row scan may stop early when `is_terminal` becomes true.
 ///
 /// # Arguments
 ///
@@ -174,6 +208,7 @@ where
 /// * `axis` - Axis along which to find extrema (may be negative).
 /// * `is_better` - Comparison predicate for finite values.
 /// * `is_nan` - NaN detector.
+/// * `is_terminal` - Predicate marking a value that cannot be improved.
 ///
 /// # Returns
 ///
@@ -182,16 +217,18 @@ where
 /// # Errors
 ///
 /// Returns an error when the axis is out of range or allocation fails.
-pub(crate) fn arg_extremum_axis<T, F, N>(
+pub(crate) fn arg_extremum_axis<T, F, N, E>(
     a: &Array<T>,
     axis: isize,
     mut is_better: F,
     is_nan: N,
+    is_terminal: E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     let axis = normalize_axis(axis, a.ndim());
     let plan = AxisTraversalPlan::new(a.shape(), axis);
@@ -211,17 +248,19 @@ where
                 &plan,
                 &mut is_better,
                 &is_nan,
+                &is_terminal,
             );
         }
     }
 
-    arg_extremum_axis_strided(a, &plan, &mut is_better, &is_nan)
+    arg_extremum_axis_strided(a, &plan, &mut is_better, &is_nan, &is_terminal)
 }
 
 /// Contiguous last-axis arg-extremum with NaN propagation.
 ///
 /// Splits the flat contiguous buffer into row chunks of length `axis_len`
-/// and finds the winning index within each chunk.
+/// and finds the winning index within each chunk. Stops scanning a row once
+/// `is_terminal` holds for the current best value.
 ///
 /// # Arguments
 ///
@@ -229,6 +268,7 @@ where
 /// * `plan` - Single-axis traversal geometry.
 /// * `is_better` - Comparison predicate for finite values.
 /// * `is_nan` - NaN detector.
+/// * `is_terminal` - Early-exit predicate for values that cannot be improved.
 ///
 /// # Returns
 ///
@@ -237,22 +277,24 @@ where
 /// # Errors
 ///
 /// Returns an error when allocation fails.
-fn arg_extremum_axis_contiguous<T, F, N>(
+fn arg_extremum_axis_contiguous<T, F, N, E>(
     slice: &[T],
     plan: &AxisTraversalPlan,
     is_better: &mut F,
     is_nan: &N,
+    is_terminal: &E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     let mut out = Vec::with_capacity(plan.output_len);
     for chunk in slice.chunks_exact(plan.axis_len) {
         let mut best_axis_index = 0_i64;
         let mut best_value = chunk[0];
-        if !is_nan(best_value) {
+        if !is_nan(best_value) && !is_terminal(best_value) {
             for (axis_index, &candidate) in chunk.iter().enumerate().skip(1) {
                 if is_nan(candidate) {
                     best_axis_index = axis_index as i64;
@@ -261,6 +303,9 @@ where
                 if is_better(candidate, best_value) {
                     best_value = candidate;
                     best_axis_index = axis_index as i64;
+                    if is_terminal(candidate) {
+                        break;
+                    }
                 }
             }
         }
@@ -272,7 +317,8 @@ where
 /// Strided single-axis arg-extremum with NaN propagation.
 ///
 /// Walks outer positions with [`RunPlan`], then steps along the axis stride
-/// for each inner comparison.
+/// for each inner comparison. Each row scan may stop early when
+/// `is_terminal` becomes true.
 ///
 /// # Arguments
 ///
@@ -280,6 +326,7 @@ where
 /// * `plan` - Single-axis traversal geometry.
 /// * `is_better` - Comparison predicate for finite values.
 /// * `is_nan` - NaN detector.
+/// * `is_terminal` - Early-exit predicate for values that cannot be improved.
 ///
 /// # Returns
 ///
@@ -288,16 +335,18 @@ where
 /// # Errors
 ///
 /// Returns an error when allocation fails.
-fn arg_extremum_axis_strided<T, F, N>(
+fn arg_extremum_axis_strided<T, F, N, E>(
     a: &Array<T>,
     plan: &AxisTraversalPlan,
     is_better: &mut F,
     is_nan: &N,
+    is_terminal: &E,
 ) -> Result<Array<i64>>
 where
     T: Scalar,
     F: FnMut(T, T) -> bool,
     N: Fn(T) -> bool,
+    E: Fn(T) -> bool,
 {
     let mut out = Vec::with_capacity(plan.output_len);
     let axis_stride = a.strides()[plan.axis];
@@ -309,7 +358,7 @@ where
         let mut best_value = a.data[buf as usize];
         let mut best_axis_index = 0_i64;
 
-        if !is_nan(best_value) {
+        if !is_nan(best_value) && !is_terminal(best_value) {
             for axis_index in 1..plan.axis_len {
                 buf += axis_stride;
                 let candidate = a.data[buf as usize];
@@ -320,6 +369,9 @@ where
                 if is_better(candidate, best_value) {
                     best_value = candidate;
                     best_axis_index = axis_index as i64;
+                    if is_terminal(candidate) {
+                        break;
+                    }
                 }
             }
         }

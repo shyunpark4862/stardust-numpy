@@ -17,6 +17,8 @@ pub(crate) mod creation;
 pub(crate) mod dtype;
 /// Error types and the crate-wide [`Result`] alias.
 pub mod error;
+/// Width-bounded textual formatting for arrays.
+pub mod format;
 /// Indexing, slicing, gather/scatter, and bounds resolution.
 pub mod index;
 pub(crate) mod iteration;
@@ -45,6 +47,10 @@ pub use creation::{
 pub use dtype::{ArrayCast, AsBool, CastTo, Complex64, Promote, Scalar};
 /// Unified error enum and result alias for the crate.
 pub use error::{Error, Result};
+/// Diagnostic array formatting and its scalar formatting contract.
+pub use format::{
+    format_array_repr, format_array_str, ArrayReprElement, ARRAY_REPR_WIDTH,
+};
 /// Gather/scatter indexing and the [`IndexSpec`] description type.
 pub use index::{gather, scatter, scatter_array, IndexSpec};
 /// Flat, axis-0, and N-dimensional iteration helpers.

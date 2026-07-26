@@ -715,7 +715,9 @@ pub fn all(
 /// Index of the minimum value along an axis or over the whole array.
 ///
 /// Returns int64 indices. For float64 with `nan_policy='ignore'`, an
-/// all-NaN slice raises `ValueError`.
+/// all-NaN slice raises `ValueError`. For bool input the Rust core stops at
+/// the first `false`, so cost depends on the winning position rather than the
+/// full axis length.
 ///
 /// # Arguments
 ///
@@ -776,7 +778,9 @@ pub fn argmin(
 /// Index of the maximum value along an axis or over the whole array.
 ///
 /// Returns int64 indices. For float64 with `nan_policy='ignore'`, an
-/// all-NaN slice raises `ValueError`.
+/// all-NaN slice raises `ValueError`. For bool input the Rust core stops at
+/// the first `true`, so cost depends on the winning position rather than the
+/// full axis length.
 ///
 /// # Arguments
 ///
