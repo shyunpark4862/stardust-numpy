@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
+MAX_CALIBRATION_ITERATIONS = 10_000
+
 
 @dataclass(frozen=True)
 class MeasureConfig:
@@ -87,32 +89,31 @@ def _run_batch(operation: Callable[[], Any], iterations: int) -> int:
 
 
 def _run_fresh_batch(task: BackendTask, iterations: int) -> int:
-    operations = [task.factory() for _ in range(iterations)]
     started = time.perf_counter_ns()
-    for operation in operations:
-        operation()
+    for _ in range(iterations):
+        task.factory()()
     return time.perf_counter_ns() - started
 
 
 def _calibrate(task: BackendTask, config: MeasureConfig) -> int:
-    if config.iterations is not None:
-        return config.iterations
     if task.fresh:
         return 1
+    if config.iterations is not None:
+        return config.iterations
 
     operation = task.factory()
     target_ns = int(config.target_sample_ms * 1_000_000)
     iterations = 1
-    while iterations < 1 << 30:
+    while iterations < MAX_CALIBRATION_ITERATIONS:
         elapsed = _run_batch(operation, iterations)
         if elapsed >= target_ns:
             return iterations
         if elapsed == 0:
-            iterations *= 10
+            iterations = min(iterations * 10, MAX_CALIBRATION_ITERATIONS)
         else:
             estimate = max(2, min(10, target_ns // elapsed))
-            iterations *= estimate
-    return iterations
+            iterations = min(iterations * estimate, MAX_CALIBRATION_ITERATIONS)
+    return MAX_CALIBRATION_ITERATIONS
 
 
 def measure(task: BackendTask, config: MeasureConfig) -> Measurement:
@@ -147,9 +148,12 @@ def measure(task: BackendTask, config: MeasureConfig) -> Measurement:
                     ns_per_call=elapsed / iterations,
                 )
             )
+            if task.fresh and gc_was_enabled:
+                gc.collect()
     finally:
         if gc_was_enabled:
             gc.enable()
+            gc.collect()
 
     values = [sample.ns_per_call for sample in raw]
     distribution = Distribution(

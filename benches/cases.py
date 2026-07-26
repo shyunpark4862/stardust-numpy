@@ -392,6 +392,13 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
             lambda: getattr(np, np_name)(side, side + 1, dtype=np_dtype),
         )
     if name in {"tril", "triu"}:
+        if case.ndim == 1:
+            vector_np = _np_values((_matrix_side(case.size),), dtype)
+            vector_sd = _sd_array(vector_np, dtype)
+            return _pair_tasks(
+                lambda: getattr(sdnp, name)(vector_sd),
+                lambda: getattr(np, name)(vector_np),
+            )
         return _pair_tasks(
             lambda: getattr(sdnp, name)(sd_a),
             lambda: getattr(np, name)(np_a),
@@ -406,11 +413,14 @@ def prepare_tasks(case: BenchmarkCase) -> tuple[BackendTask, BackendTask]:
             )
         return _pair_tasks(lambda: sdnp.diag(sd_a), lambda: np.diag(np_a))
     if name == "meshgrid":
-        other_np = _np_values(shape, dtype, 3)
-        other_sd = _sd_array(other_np, dtype)
+        vector_shape = (_matrix_side(case.size),)
+        left_np = _np_values(vector_shape, dtype)
+        right_np = _np_values(vector_shape, dtype, 3)
+        left_sd = _sd_array(left_np, dtype)
+        right_sd = _sd_array(right_np, dtype)
         return _pair_tasks(
-            lambda: sdnp.meshgrid(sd_a, other_sd, indexing="ij"),
-            lambda: np.meshgrid(np_a, other_np, indexing="ij", copy=False),
+            lambda: sdnp.meshgrid(left_sd, right_sd, indexing="ij"),
+            lambda: np.meshgrid(left_np, right_np, indexing="ij", copy=False),
         )
 
     binary = {

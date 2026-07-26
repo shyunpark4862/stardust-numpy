@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import hashlib
 import importlib
 import json
@@ -338,6 +339,8 @@ def run(args: argparse.Namespace) -> int:
                 file=sys.stdout,
             )
             progress.update(1)
+            del sd_task, np_task, measured
+            gc.collect()
         progress.close()
 
     markdown_path, canvas_path = render_outputs(SUMMARY_PATH)

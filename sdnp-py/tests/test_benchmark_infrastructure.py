@@ -1,3 +1,4 @@
+import math
 import sys
 from pathlib import Path
 
@@ -89,6 +90,25 @@ def test_measurement_supports_calibrated_and_explicit_iterations():
     assert len(explicit.raw) == 2
 
 
+def test_fresh_tasks_ignore_explicit_iterations():
+    copies: list[int] = []
+
+    def factory():
+        copies.append(1)
+        return lambda: None
+
+    measurement = measure(
+        BackendTask(factory, fresh=True),
+        MeasureConfig(
+            warmups=0,
+            samples=2,
+            iterations=100,
+        ),
+    )
+    assert measurement.distribution.iterations == 1
+    assert len(copies) == 2
+
+
 def test_report_renderers_are_data_only():
     distribution = {
         "p25_ns": 10.0,
@@ -150,3 +170,30 @@ def test_report_renderers_are_data_only():
     assert "원인" not in markdown
     assert "최적화 우선순위" not in canvas
     assert MARKDOWN_PATH == ROOT / "BENCHMARK.md"
+
+
+def test_expansion_ops_use_side_limited_inputs_for_large_1d():
+    side = math.isqrt(SIZE_ELEMENTS["large"])
+    budget = SIZE_ELEMENTS["large"]
+    for function in ("tril", "triu", "diag", "outer", "meshgrid"):
+        case = select_cases(
+            build_cases("full"),
+            functions=[function],
+            sizes=["large"],
+            ndims=[1],
+        )[0]
+        sdnp_task, numpy_task = case.prepare()
+        sdnp_result = sdnp_task.factory()()
+        numpy_result = numpy_task.factory()()
+
+        if function == "meshgrid":
+            assert len(sdnp_result) == len(numpy_result) == 2
+            for grid in sdnp_result:
+                assert math.prod(grid.shape) == budget
+            for grid in numpy_result:
+                assert math.prod(grid.shape) == budget
+            continue
+
+        assert math.prod(sdnp_result.shape) == budget
+        assert math.prod(numpy_result.shape) == budget
+        assert side * side == budget
