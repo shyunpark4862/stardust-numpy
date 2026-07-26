@@ -537,7 +537,11 @@ fn build_fancy_layout(
     // Adjacent fancy indices keep basic dims before/after; separated ones
     // place the fancy block first (NumPy "outer" vs "inner" ordering).
     let (fancy_axis_start, before_axis_start, after_axis_start) = if adjacent {
-        (basic_before_slots.len(), 0, basic_before_slots.len() + fancy_axis_len)
+        (
+            basic_before_slots.len(),
+            0,
+            basic_before_slots.len() + fancy_axis_len,
+        )
     } else {
         (0, fancy_axis_len, fancy_axis_len + basic_before_slots.len())
     };

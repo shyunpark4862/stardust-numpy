@@ -78,7 +78,10 @@ fn reshape_checks_products_and_supports_inference() {
 
 #[test]
 fn broadcast_shape_reports_incompatible_inputs() {
-    assert_eq!(broadcast_shape(&[2, 1, 3], &[1, 4, 3]).unwrap(), vec![2, 4, 3]);
+    assert_eq!(
+        broadcast_shape(&[2, 1, 3], &[1, 4, 3]).unwrap(),
+        vec![2, 4, 3]
+    );
     assert!(matches!(
         broadcast_shape(&[2, 3], &[4, 3]),
         Err(Error::Broadcast { .. })

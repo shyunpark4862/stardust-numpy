@@ -242,8 +242,7 @@ fn reduce_inner(
 /// * `py` - Python interpreter token.
 /// * `a` - Input array reference.
 /// * `name` - Reduction op tag passed to [`reduce_inner`].
-/// * `axis` - Single axis or tuple keyword (mutually exclusive with `axes`).
-/// * `axes` - Explicit axis list keyword.
+/// * `axis_args` - The mutually exclusive `axis` and `axes` keywords.
 /// * `keepdims` - Keep reduced axes as length-1 dimensions.
 /// * `nan_policy` - `"propagate"` or `"ignore"`.
 /// * `check_empty` - Whether to reject empty reduction slices first.
@@ -260,12 +259,12 @@ fn reduce_axis_fn(
     py: Python<'_>,
     a: PyRef<crate::array::PyArray>,
     name: &str,
-    axis: Option<&Bound<'_, PyAny>>,
-    axes: Option<&Bound<'_, PyAny>>,
+    axis_args: (Option<&Bound<'_, PyAny>>, Option<&Bound<'_, PyAny>>),
     keepdims: bool,
     nan_policy: &str,
     check_empty: bool,
 ) -> PyResult<PyObject> {
+    let (axis, axes) = axis_args;
     a.reject_zero_dim_input(name)?;
     let policy = parse_nan_policy(nan_policy)?;
     check_axis_xor_axes(axis.is_some(), axes.is_some())?;
@@ -328,7 +327,7 @@ pub fn sum(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "sum", axis, axes, keepdims, nan_policy, false)
+    reduce_axis_fn(py, a, "sum", (axis, axes), keepdims, nan_policy, false)
 }
 
 /// Product of array elements over the given axes.
@@ -371,7 +370,7 @@ pub fn prod(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "prod", axis, axes, keepdims, nan_policy, false)
+    reduce_axis_fn(py, a, "prod", (axis, axes), keepdims, nan_policy, false)
 }
 
 /// Minimum value over the given axes.
@@ -413,7 +412,7 @@ pub fn min(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "min", axis, axes, keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "min", (axis, axes), keepdims, nan_policy, true)
 }
 
 /// Maximum value over the given axes.
@@ -455,7 +454,7 @@ pub fn max(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "max", axis, axes, keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "max", (axis, axes), keepdims, nan_policy, true)
 }
 
 /// Arithmetic mean over the given axes.
@@ -498,7 +497,7 @@ pub fn mean(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "mean", axis, axes, keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "mean", (axis, axes), keepdims, nan_policy, true)
 }
 
 /// Population variance (`ddof=0`) over the given axes.
@@ -540,7 +539,7 @@ pub fn var(
     keepdims: bool,
     nan_policy: &str,
 ) -> PyResult<PyObject> {
-    reduce_axis_fn(py, a, "var", axis, axes, keepdims, nan_policy, true)
+    reduce_axis_fn(py, a, "var", (axis, axes), keepdims, nan_policy, true)
 }
 
 /// Population standard deviation over the given axes.

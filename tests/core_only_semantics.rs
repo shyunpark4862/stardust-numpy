@@ -7,7 +7,10 @@ use sdnp::{
 fn rust_core_boolean_arithmetic_is_explicitly_available() {
     let left = Array::from_slice(&[true, false, true], &[3]).unwrap();
     let right = Array::from_slice(&[false, false, true], &[3]).unwrap();
-    assert_eq!(add(&left, &right).unwrap().to_vec(), vec![true, false, true]);
+    assert_eq!(
+        add(&left, &right).unwrap().to_vec(),
+        vec![true, false, true]
+    );
 }
 
 #[test]
@@ -103,5 +106,8 @@ fn outer_flattens_noncontiguous_inputs_in_logical_order() {
     let right = Array::from_slice(&[2_i64, 4], &[2]).unwrap();
     let result = outer(&left, &right).unwrap();
     assert_eq!(result.shape(), &[6, 2]);
-    assert_eq!(result.to_vec(), vec![2, 4, 8, 16, 4, 8, 10, 20, 6, 12, 12, 24]);
+    assert_eq!(
+        result.to_vec(),
+        vec![2, 4, 8, 16, 4, 8, 10, 20, 6, 12, 12, 24]
+    );
 }

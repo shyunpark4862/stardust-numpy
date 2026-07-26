@@ -1234,7 +1234,9 @@ fn mean_propagate<T: MeanReduce>(
         T::accumulate,
         T::combine,
     )?;
-    Ok(transform_owned_c_order(sums, |value| T::divide_by_count(value, count)))
+    Ok(transform_owned_c_order(sums, |value| {
+        T::divide_by_count(value, count)
+    }))
 }
 
 /// Mean skipping NaN elements, dividing by per-slot finite counts.

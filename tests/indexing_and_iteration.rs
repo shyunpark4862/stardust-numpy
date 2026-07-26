@@ -12,7 +12,10 @@ fn normalized_basic_indexing_handles_reverse_ellipsis_and_new_axis() {
     )
     .unwrap();
     assert_eq!(reversed.shape(), &[3, 4]);
-    assert_eq!(reversed.to_vec(), vec![8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3]);
+    assert_eq!(
+        reversed.to_vec(),
+        vec![8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3]
+    );
 
     let expanded = gather(
         &array,
@@ -27,9 +30,11 @@ fn normalized_basic_indexing_handles_reverse_ellipsis_and_new_axis() {
 fn fancy_and_boolean_indexing_follow_c_order() {
     let array = Array::from_vec((0_i64..12).collect(), &[3, 4]).unwrap();
     let rows = Array::from_slice(&[2_i64, 0], &[2]).unwrap();
-    let fancy =
-        gather(&array, &[IndexSpec::IntegerArray(rows), IndexSpec::index(1)])
-            .unwrap();
+    let fancy = gather(
+        &array,
+        &[IndexSpec::IntegerArray(rows), IndexSpec::index(1)],
+    )
+    .unwrap();
     assert_eq!(fancy.shape(), &[2]);
     assert_eq!(fancy.to_vec(), vec![9, 1]);
 

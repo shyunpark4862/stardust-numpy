@@ -116,9 +116,9 @@ pub fn coerce_reshape_shape(obj: &Bound<'_, PyAny>) -> PyResult<Vec<isize>> {
         }
         Ok(dimensions)
     } else {
-        Ok(vec![obj
-            .extract::<isize>()
-            .map_err(|_| value_error("reshape dimensions must be integers"))?])
+        Ok(vec![obj.extract::<isize>().map_err(|_| {
+            value_error("reshape dimensions must be integers")
+        })?])
     }
 }
 
