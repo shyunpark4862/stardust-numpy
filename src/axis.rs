@@ -7,6 +7,24 @@
 
 use crate::error::{Error, Result};
 
+/// Duplicate-checked set of canonical axes.
+///
+/// Common ranks fit inline; unusually large ranks use a heap bitset.
+pub(crate) enum ResolvedAxisMask {
+    Inline(u128),
+    Heap(Vec<bool>),
+}
+
+impl ResolvedAxisMask {
+    #[inline]
+    pub(crate) fn contains(&self, axis: usize) -> bool {
+        match self {
+            Self::Inline(mask) => mask & (1_u128 << axis) != 0,
+            Self::Heap(mask) => mask[axis],
+        }
+    }
+}
+
 /// Resolve one possibly-negative axis into `0..ndim`.
 pub(crate) fn resolve_axis(axis: isize, ndim: usize) -> Result<usize> {
     let normalized = if axis < 0 {
@@ -33,6 +51,39 @@ pub(crate) fn resolve_axis_list(
         resolved.push(axis);
     }
     Ok(resolved)
+}
+
+/// Resolve a nonduplicated axis list into a membership mask.
+///
+/// Ranks up to 128 require no heap allocation. The result intentionally does
+/// not preserve input order and is intended for operations that only need axis
+/// membership.
+pub(crate) fn resolve_axis_mask(
+    axes: &[isize],
+    ndim: usize,
+) -> Result<ResolvedAxisMask> {
+    if ndim <= u128::BITS as usize {
+        let mut mask = 0_u128;
+        for &axis in axes {
+            let axis = resolve_axis(axis, ndim)?;
+            let bit = 1_u128 << axis;
+            if mask & bit != 0 {
+                return Err(Error::DuplicateAxes);
+            }
+            mask |= bit;
+        }
+        Ok(ResolvedAxisMask::Inline(mask))
+    } else {
+        let mut mask = vec![false; ndim];
+        for &axis in axes {
+            let axis = resolve_axis(axis, ndim)?;
+            if mask[axis] {
+                return Err(Error::DuplicateAxes);
+            }
+            mask[axis] = true;
+        }
+        Ok(ResolvedAxisMask::Heap(mask))
+    }
 }
 
 /// Resolve an insertion position in `0..=ndim`.
@@ -117,6 +168,14 @@ mod tests {
     #[test]
     fn rejects_duplicate_axis_lists_after_resolution() {
         assert_eq!(resolve_axis_list(&[0, -2], 2), Err(Error::DuplicateAxes));
+        assert!(matches!(
+            resolve_axis_mask(&[0, -2], 2),
+            Err(Error::DuplicateAxes)
+        ));
+        let mask = resolve_axis_mask(&[-1, 0], 3).unwrap();
+        assert!(mask.contains(0));
+        assert!(mask.contains(2));
+        assert!(!mask.contains(1));
     }
 
     #[test]

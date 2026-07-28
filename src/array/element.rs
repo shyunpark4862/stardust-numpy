@@ -15,6 +15,9 @@ use crate::shape::{c_order_strides_unchecked, offset_at};
 impl<T: Scalar> Array<T> {
     /// Read one element at the given multi-dimensional index.
     ///
+    /// TODO: Not part of the NumPy/Python surface; remove after migrating
+    /// internal callers (e.g. repr formatting) to direct stride access.
+    ///
     /// Maps `indices` through strides to a flat buffer offset without
     /// copying storage.
     ///
@@ -44,6 +47,9 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Write one element at the given multi-dimensional index.
+    ///
+    /// TODO: Not part of the NumPy/Python surface; remove after migrating
+    /// tests to [`scatter`](crate::scatter) / [`IndexSpec`](crate::IndexSpec).
     ///
     /// When other arrays share this buffer, storage is detached first via
     /// copy-on-write so peers are not mutated.
@@ -83,6 +89,20 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Ensure this array owns its storage before an in-place mutation.
+    ///
+    /// TODO: Consider splitting CoW detach into four explicit branches (already
+    /// unique, shared full-buffer `Arc::make_mut`, shared C-contiguous subview
+    /// slice copy, general strided materialization). That taxonomy matches the
+    /// real cost model, but it risks diverging from the single post-detach
+    /// behavior that [`to_vec_c_order`](Self::to_vec_c_order) enforces today:
+    /// always a fresh owned buffer with offset zero and canonical C-order
+    /// strides. Any refactor must preserve that unified layout contract for
+    /// scatter callers, not reintroduce per-branch stride/offset drift.
+    ///
+    /// TODO: After removing [`set`](Self::set), move this to a private helper
+    /// beside scatter in `index/ops.rs`; scatter is then its sole consumer and
+    /// `element.rs` has no reason to stay. Extract to `array/cow.rs` only if a
+    /// second in-place mutation site appears.
     ///
     /// When the view covers the entire contiguous buffer, only the `Arc`
     /// reference count is decremented. Otherwise logical elements are
@@ -129,6 +149,9 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Bounds-check indices and return the flat buffer offset.
+    ///
+    /// TODO: Remove with [`get`](Self::get) and [`set`](Self::set); only those
+    /// call sites use this helper today.
     ///
     /// Combines per-axis range checks with stride-based address arithmetic.
     /// Does not touch storage; safe to call on shared read-only views.

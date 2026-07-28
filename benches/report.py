@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "benches" / "results"
 MARKDOWN_PATH = ROOT / "BENCHMARK.md"
 CHART_TOP_N = 10
+TARGET_RATIO = 3.0
 
 
 def default_canvas_path() -> Path:
@@ -226,7 +227,8 @@ export default function SdnpNumpyBenchmark() {{
           <H2>Top {CHART_TOP_N} slowest cases (median ratio)</H2>
           <Text tone="tertiary" size="small">
             X-axis: sdnp median / NumPy median (ratio) · Y-axis: benchmark case ·
-            1.0 is equal performance · Showing top {CHART_TOP_N} by ratio among filtered cases
+            1.0 is equal performance · {TARGET_RATIO:.0f}.0 is the performance target ·
+            Showing top {CHART_TOP_N} by ratio among filtered cases
           </Text>
           <BarChart
             categories={{chartRows.map((result) => result.id)}}
@@ -234,7 +236,10 @@ export default function SdnpNumpyBenchmark() {{
             horizontal
             height={{Math.max(280, chartRows.length * 28)}}
             beginAtZero
-            referenceLines={{[{{ value: 1, label: "equal", tone: "neutral" }}]}}
+            referenceLines={{[
+              {{ value: 1, label: "equal", tone: "neutral" }},
+              {{ value: {TARGET_RATIO}, label: "{TARGET_RATIO:.0f}× target", tone: "warning" }},
+            ]}}
             showValues
           />
           <Text tone="tertiary" size="small">

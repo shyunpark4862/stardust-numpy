@@ -168,6 +168,7 @@ def test_report_renderers_are_data_only():
     assert "Complete Results" not in markdown
     assert 'from "cursor/canvas"' in canvas
     assert '"sdnp mean", "NumPy mean", "Ratio"' in canvas
+    assert "3× target" in canvas
     assert "sdnp p25" not in canvas
     assert "NumPy p75" not in canvas
     assert "원인" not in markdown

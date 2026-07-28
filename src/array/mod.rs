@@ -59,6 +59,13 @@ impl<T: Scalar> Array<T> {
     /// * [`Error::InvalidArgument`] — invalid shape geometry or stride
     ///   overflow
     ///
+    /// TODO: Add a trusted `from_vec` variant that skips [`validate_shape_geometry`]
+    /// (and other redundant shape checks) for internal callers whose `shape`
+    /// is already validated or derived from a valid [`Array`]. Audit each call
+    /// site before switching—keep `data.len()` vs shape-product checks even on
+    /// the fast path; never use it on Python/boundary input. Prefer a separate
+    /// function name over a `check: bool` flag.
+    ///
     /// # Examples
     ///
     /// ```
@@ -87,6 +94,10 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Build a C-contiguous [`Array`] by copying from a slice.
+    ///
+    /// TODO: Not part of the NumPy/Python surface and unused in production
+    /// code (only tests and doc examples call this today). Remove and migrate
+    /// remaining callers to [`from_vec`](Self::from_vec).
     ///
     /// Convenience wrapper around [`Array::from_vec`] for literal and
     /// borrowed inputs.
@@ -117,6 +128,12 @@ impl<T: Scalar> Array<T> {
     }
 
     /// Construct an array from shared parts after layout validation.
+    ///
+    /// TODO: This is an internal-only view assembler; the rank match and
+    /// [`validate_layout_bounds`] checks are redundant when callers uphold
+    /// their layout contract. Downgrade both to `debug_assert` (or follow the
+    /// `squeezed_layout_view` pattern) instead of hard runtime `Result`
+    /// failures in release builds.
     ///
     /// Low-level constructor for views: callers supply an existing `Arc`
     /// buffer plus shape, strides, offset, and writability. Every reachable

@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::array::Array;
 use crate::axis::{
-    resolve_axis_list, resolve_insert_axis, visit_resolved_permutation,
+    resolve_axis, resolve_axis_mask, resolve_insert_axis,
+    visit_resolved_permutation,
 };
 use crate::dtype::Scalar;
 use crate::error::{Error, Result};
@@ -66,6 +67,27 @@ impl<T: Scalar> Array<T> {
     ) -> Self {
         debug_assert_eq!(shape.len(), self.ndim());
         debug_assert_eq!(strides.len(), self.ndim());
+        Self {
+            data: Arc::clone(&self.data),
+            shape,
+            strides,
+            offset: self.offset,
+            writable: self.writable,
+        }
+    }
+
+    /// Build a view after dropping only length-one axes from a valid layout.
+    ///
+    /// Removing such axes preserves every reachable backing-buffer index, so
+    /// the general layout bounds validation would be redundant.
+    #[inline]
+    fn squeezed_layout_view(
+        &self,
+        shape: Vec<usize>,
+        strides: Vec<isize>,
+    ) -> Self {
+        debug_assert_eq!(shape.len(), strides.len());
+        debug_assert!(shape.len() <= self.ndim());
         Self {
             data: Arc::clone(&self.data),
             shape,
@@ -229,52 +251,50 @@ impl<T: Scalar> Array<T> {
     /// * [`Error::AxisOutOfBounds`] — an axis is outside the array rank
     /// * [`Error::DuplicateAxes`] — the same axis is listed more than once
     /// * [`Error::CannotSqueezeAxis`] — a listed axis has length other than one
-    /// * [`Error::InvalidArgument`] — resulting layout exceeds buffer bounds
+    /// * [`Error::InvalidArgument`] — an explicit axis list is empty
     pub fn squeeze(&self, axes: Option<&[isize]>) -> Result<Array<T>> {
-        let mut remove = vec![false; self.ndim()];
-        match axes {
-            None => {
-                for (axis, &length) in self.shape.iter().enumerate() {
-                    remove[axis] = length == 1;
-                }
+        let remove = match axes {
+            None => None,
+            Some([]) => {
+                return Err(Error::InvalidArgument(
+                    "squeeze axes must be a non-empty sequence".into(),
+                ));
             }
             Some(axes) => {
-                if axes.is_empty() {
-                    return Err(Error::InvalidArgument(
-                        "squeeze axes must be a non-empty sequence".into(),
-                    ));
-                }
-                for axis in resolve_axis_list(axes, self.ndim())? {
+                let remove = resolve_axis_mask(axes, self.ndim())?;
+                // Resolve all axes before checking lengths to preserve error
+                // precedence for bounds and duplicate failures.
+                for &axis in axes {
+                    let axis = resolve_axis(axis, self.ndim())?;
                     if self.shape[axis] != 1 {
                         return Err(Error::CannotSqueezeAxis {
                             axis,
                             axis_len: self.shape[axis],
                         });
                     }
-                    remove[axis] = true;
                 }
+                Some(remove)
+            }
+        };
+        let removed = axes.map_or_else(
+            || self.shape.iter().filter(|&&length| length == 1).count(),
+            <[isize]>::len,
+        );
+        let output_ndim = self.ndim() - removed;
+        let mut shape = Vec::with_capacity(output_ndim);
+        let mut strides = Vec::with_capacity(output_ndim);
+        for (axis, (&length, &stride)) in
+            self.shape.iter().zip(&self.strides).enumerate()
+        {
+            let should_remove = remove
+                .as_ref()
+                .map_or(length == 1, |mask| mask.contains(axis));
+            if !should_remove {
+                shape.push(length);
+                strides.push(stride);
             }
         }
-
-        let shape = self
-            .shape
-            .iter()
-            .enumerate()
-            .filter_map(|(axis, &length)| (!remove[axis]).then_some(length))
-            .collect();
-        let strides = self
-            .strides
-            .iter()
-            .enumerate()
-            .filter_map(|(axis, &stride)| (!remove[axis]).then_some(stride))
-            .collect();
-        Self::from_shared_parts(
-            Arc::clone(&self.data),
-            shape,
-            strides,
-            self.offset,
-            self.writable,
-        )
+        Ok(self.squeezed_layout_view(shape, strides))
     }
 
     /// Return a cheap alias sharing buffer, shape, strides, and offset.
