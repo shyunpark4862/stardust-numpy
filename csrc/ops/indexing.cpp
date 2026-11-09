@@ -8,6 +8,7 @@
 #include "ops/creation.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <new>
 #include <string>
@@ -386,6 +387,92 @@ NDArray block_of(const NDArray& a, int first, int skip) {
     return b;
 }
 
+// ---- the common case: one index array selecting single elements ----------
+// x[idx] / x[idx] = v on a 1-D view, same dtype. Measured in M9+ (see
+// experiments/gather_probe): the general path's per-element loop over "k
+// index arrays", re-reading their strides and shapes, and its separate
+// offset buffer cost 3.5x the work of the plain loop below (read an index,
+// fix a negative one, copy one element). Checking every index first, in a
+// pass of its own, keeps that loop free of error handling -- so it can run on
+// several threads -- and makes x[idx] = v all-or-nothing: an out-of-bounds
+// index raises before anything is written. (A gather has nothing to protect
+// and checks inside its loop instead.)
+
+struct OneIndex {
+    const std::byte* base;  // the view's data
+    std::int64_t len, stride;
+    std::atomic<bool>* bad = nullptr;
+};
+
+inline std::int64_t wrap_index(std::int64_t raw, std::int64_t len) { return raw < 0 ? raw + len : raw; }
+
+void check_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
+    const OneIndex& c = *static_cast<const OneIndex*>(ctx);
+    bool bad = false;
+    for (std::int64_t t = 0; t < n; ++t)  // branch-free: vectorizes
+        bad |= static_cast<std::uint64_t>(wrap_index(load_as<std::int64_t>(args[0] + t * s[0]), c.len)) >=
+               static_cast<std::uint64_t>(c.len);
+    if (bad) c.bad->store(true, std::memory_order_relaxed);
+}
+
+// Raises IndexError for the first (C order) index of `ix` outside [-len, len).
+void check_indices(const NDArray& ix, std::int64_t len, int axis) {
+    std::atomic<bool> bad{false};
+    OneIndex c{nullptr, len, 0, &bad};
+    const IterOperand ops[] = {operand(ix)};
+    NdIter(ix.shape_span(), ops).run(&check_loop, &c);
+    if (!bad.load()) return;
+    for_each_element<1>(ix.shape_span(), {ix.data}, {ix.strides.data()}, [&](std::byte* p) {
+        const std::int64_t raw = load_as<std::int64_t>(p);
+        if (static_cast<std::uint64_t>(wrap_index(raw, len)) >= static_cast<std::uint64_t>(len))
+            raise(PyExc_IndexError, "index " + std::to_string(raw) + " is out of bounds for axis " +
+                                        std::to_string(axis) + " with size " + std::to_string(len));
+    });
+}
+
+// args: index, out. A gather writes only its own fresh result, so it needs
+// no separate check pass: a bad index is noted (branch-free) and read as
+// index 0 to stay inside the array; the caller raises afterwards.
+template <typename T>
+void gather_one_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
+    const OneIndex& c = *static_cast<const OneIndex*>(ctx);
+    bool bad = false;
+    for (std::int64_t t = 0; t < n; ++t) {
+        std::int64_t i = wrap_index(load_as<std::int64_t>(args[0] + t * s[0]), c.len);
+        const bool out_of_bounds = static_cast<std::uint64_t>(i) >= static_cast<std::uint64_t>(c.len);
+        bad |= out_of_bounds;
+        i = out_of_bounds ? 0 : i;
+        *reinterpret_cast<T*>(args[1] + t * s[1]) = load_as<T>(c.base + i * c.stride);
+    }
+    if (bad) c.bad->store(true, std::memory_order_relaxed);
+}
+
+// args: index, value
+template <typename T>
+void scatter_one_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
+    const OneIndex& c = *static_cast<const OneIndex*>(ctx);
+    for (std::int64_t t = 0; t < n; ++t) {
+        const std::int64_t i = wrap_index(load_as<std::int64_t>(args[0] + t * s[0]), c.len);
+        *reinterpret_cast<T*>(const_cast<std::byte*>(c.base) + i * c.stride) = load_as<T>(args[1] + t * s[1]);
+    }
+}
+
+bool one_index(const Plan& plan) { return plan.indices.size() == 1 && plan.view.ndim == 1; }
+
+nb::object gather_one(const Plan& plan) {
+    const NDArray& v = plan.view;
+    const NDArray& ix = plan.indices[0];
+    NDArray out = new_array(v.dtype, ix.shape_span());  // the result shape is the index shape
+    std::atomic<bool> bad{false};
+    OneIndex c{v.data, v.shape[0], v.strides[0], &bad};
+    const IterOperand ops[] = {operand(ix), operand(out)};
+    visit_dtype(v.dtype, [&]<typename T>(std::type_identity<T>) {
+        NdIter(ix.shape_span(), ops).run(&gather_one_loop<T>, &c);  // independent outputs: may use threads
+    });
+    if (bad.load()) check_indices(ix, v.shape[0], plan.first);  // raises, naming the first bad index
+    return wrap(std::move(out));
+}
+
 // Calls visit(copy), where copy(s, d) copies one block (`src_block`'s shape
 // and strides at s) to d (`dst_block`'s layout), converting dtype. Choosing
 // the copy once, outside the per-point loop, lets the common case -- single
@@ -456,6 +543,7 @@ nb::object gather_mask(const Plan& plan) {
 }
 
 nb::object gather(const Plan& plan) {
+    if (one_index(plan)) return gather_one(plan);
     const std::vector<std::int64_t> bshape = index_shape(plan);
     const int k = static_cast<int>(plan.indices.size());
     const int bd = static_cast<int>(bshape.size());
@@ -534,6 +622,21 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
         else if (src.shape[sd] == shape[d]) w.strides[d] = src.strides[sd];
         else throw fail();
         w.shape[d] = shape[d];
+    }
+    // Every index is checked before anything is written: an IndexError
+    // leaves x as it was.
+    for (size_t j = 0; j < plan.indices.size(); ++j)
+        check_indices(plan.indices[j], plan.view.shape[plan.first + j], plan.first + static_cast<int>(j));
+    if (one_index(plan) && w.dtype == plan.view.dtype) {
+        // Index order (C order, IterMode::Naive) on one thread: with repeated
+        // indices the last write must win, as in the general path.
+        const NDArray& ix = plan.indices[0];
+        OneIndex c{plan.view.data, plan.view.shape[0], plan.view.strides[0]};
+        const IterOperand ops[] = {operand(ix), operand(w)};
+        visit_dtype(w.dtype, [&]<typename T>(std::type_identity<T>) {
+            NdIter(ix.shape_span(), ops, IterMode::Naive).run(&scatter_one_loop<T>, &c, Split::None);
+        });
+        return;
     }
     if (plan.mask_only) {
         const NDArray from = block_of(w, plan.first, 1), to = block_of(plan.view, plan.first, plan.mask.ndim);

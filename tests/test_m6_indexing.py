@@ -126,3 +126,61 @@ def test_random_integer_indices(data):
     x = sdnp.asarray(n.copy())
     x[key] = value
     assert_same(x, want)
+
+
+# ----------------------------------------- the fused one-index path (M9+)
+
+def test_failed_assignment_writes_nothing():
+    # Every index is checked before the first write (numpy behaves the same).
+    for key in ([0, 1, 10, 2], (np.array([0, 1]), np.array([0, 99]))):
+        n = np.arange(12.0).reshape(3, 4) if isinstance(key, tuple) else np.arange(5.0)
+        x = sdnp.asarray(n.copy())
+        with pytest.raises(IndexError):
+            x[key] = -1.0
+        assert_same(x, n)
+    big = sdnp.zeros(100_000)
+    idx = np.arange(100_000)
+    idx[-1] = 100_000
+    with pytest.raises(IndexError, match="index 100000 is out of bounds"):
+        big[idx] = 1.0
+    assert sdnp.sum(big) == 0.0
+
+
+def test_first_bad_index_in_c_order_is_reported():
+    x = sdnp.arange(10.0)
+    with pytest.raises(IndexError, match="index -11 "):
+        x[np.array([[0, 30], [-11, 2]]).T]  # C order of the transposed view: 0, -11, 30, 2
+
+
+@pytest.mark.parametrize("idx", [
+    np.array([3, -1, 0, 3, -10]), np.array([[1, 2, 3], [-4, -5, -6]]).T, np.arange(10)[::-3],
+    np.zeros((0,), np.int64), np.array([[[7]]]),
+])
+def test_one_index_layouts(idx):
+    n = np.arange(10.0) * 1.5
+    assert_same(sdnp.asarray(n)[sdnp.asarray(idx)], n[idx])
+    assert_same(sdnp.asarray(n[::-2])[sdnp.asarray(idx % 5)], n[::-2][idx % 5])
+    want = n.copy()
+    want[idx] = np.arange(idx.size).reshape(idx.shape) * 10.0
+    x = sdnp.asarray(n.copy())
+    x[sdnp.asarray(idx)] = sdnp.asarray(np.arange(idx.size).reshape(idx.shape) * 10.0)
+    assert_same(x, want)  # repeated indices: the last write wins, in C order
+
+
+def test_one_index_mixed_dtype_value_and_threads():
+    n = np.zeros(10)
+    x = sdnp.asarray(n.copy())
+    x[sdnp.asarray([1, 2, 1])] = sdnp.asarray([5, 6, 7])  # int64 value into float64: the general path
+    n[[1, 2, 1]] = [5, 6, 7]
+    assert_same(x, n)
+    src = np.random.default_rng(0).standard_normal(300_000)
+    idx = np.random.default_rng(1).integers(-300_000, 300_000, 500_000)
+    before = sdnp.get_num_threads()
+    try:
+        results = []
+        for t in (1, 4, 10):
+            sdnp.set_num_threads(t)
+            results.append(np.asarray(sdnp.asarray(src)[sdnp.asarray(idx)]).tobytes())
+        assert results[0] == results[1] == results[2] == src[idx].tobytes()
+    finally:
+        sdnp.set_num_threads(before)
