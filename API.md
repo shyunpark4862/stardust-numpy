@@ -162,6 +162,14 @@ cumulative_prod(x, /, *, axis=None, dtype=None, include_initial=False)
   - `any`는 `False`, `all`은 `True`다.
   - `mean`, `var`, `std`는 `nan`이다.
   - `min`, `max`, `argmin`, `argmax`는 `ValueError`다.
+    - 정확히는 "줄일 원소가 하나도 없는 출력 원소가 있을 때"다. 출력 자체가 비어 있으면(예: shape `(3, 0)`에서 `axis=0`) 빈 배열을 반환한다 (M5).
+- **`var`, `std`의 자유도**: `N - correction ≤ 0`이면 결과는 NaN이다 (M5에서 결정, Array API).
+  - 빈 배열 규칙(NaN)도 이 규칙에 포함된다.
+  - `correction`은 int 또는 float다.
+- **`dtype=`** (`sum`, `prod`, `cumulative_*`)
+  - 명시적 변환으로 취급한다. 입력을 그 dtype으로 변환한 뒤 누적한다 (M1의 `dtype=` 규칙).
+  - `dtype=bool`은 `TypeError`다 (M5에서 결정). C13에 따라 덧셈과 곱셈에는 bool 루프가 없기 때문이다. 대신 `any`/`all`을 쓴다.
+- `any`, `all`은 모든 dtype을 받는다. 판정 기준은 `x != 0`이며, NaN은 참이다.
 
 ## 7. 정렬, 집합, 선형대수
 ```

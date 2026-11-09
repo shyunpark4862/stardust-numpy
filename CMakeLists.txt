@@ -22,6 +22,7 @@ nanobind_add_module(_core NB_STATIC
   csrc/ops/copy.cpp
   csrc/ops/creation.cpp
   csrc/ops/indexing.cpp
+  csrc/ops/reduction.cpp
   csrc/ops/shape.cpp
   csrc/ops/ufunc.cpp
   csrc/bind/pyutil.cpp

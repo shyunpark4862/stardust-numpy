@@ -7,6 +7,7 @@
 #include "core/convert.hpp"
 #include "ops/copy.hpp"
 #include "ops/indexing.hpp"
+#include "ops/reduction.hpp"
 #include "ops/shape.hpp"
 #include "ops/ufunc.hpp"
 
@@ -148,6 +149,22 @@ void bind_ndarray(nb::module_& m) {
         .def("reshape", nb::overload_cast<nb::handle, nb::handle, nb::handle>(&reshape), nb::arg(), nb::kw_only(),
              nb::arg("copy").none() = nb::none())
         // .none(): x[None] is newaxis, and nanobind rejects None by default.
+        // Reductions as methods (A2): the same functions, x as self.
+        .def("sum", &sum, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("dtype").none() = nb::none(),
+             nb::arg("keepdims") = false)
+        .def("prod", &prod, nb::kw_only(), nb::arg("axis").none() = nb::none(),
+             nb::arg("dtype").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("min", &min, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("max", &max, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("mean", &mean, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("var", &var, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("correction") = 0,
+             nb::arg("keepdims") = false)
+        .def("std", &stddev, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("correction") = 0,
+             nb::arg("keepdims") = false)
+        .def("argmin", &argmin, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("argmax", &argmax, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("any", &any, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
+        .def("all", &all, nb::kw_only(), nb::arg("axis").none() = nb::none(), nb::arg("keepdims") = false)
         .def("__getitem__", &getitem, nb::arg().none())
         .def("__setitem__", &setitem, nb::arg().none(), nb::arg().none())
         .def("__len__", [](const NDArray& a) { return a.shape[0]; })

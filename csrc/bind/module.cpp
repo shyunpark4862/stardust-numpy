@@ -4,6 +4,7 @@
 #include "bind/pyutil.hpp"
 #include "ops/copy.hpp"
 #include "ops/creation.hpp"
+#include "ops/reduction.hpp"
 #include "ops/shape.hpp"
 #include "ops/ufunc.hpp"
 
@@ -58,5 +59,6 @@ NB_MODULE(_core, m) {
     sd::bind_copy(m);
     sd::bind_shape(m);
     sd::bind_ufuncs(m);
+    sd::bind_reductions(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
 }
