@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.hypothesis/
+*.egg-info/
+
+# Build
+build/
+dist/
+*.so
+
+# Experiments
+experiments/**/out/
+
+# macOS
+.DS_Store
