@@ -337,3 +337,56 @@ def test_int_min_max_vector_fold_finds_every_position(n):
         x[pos] = INT_MIN
         assert sdnp.min(sdnp.asarray(x)) == INT_MIN
         assert sdnp.max(sdnp.asarray(x)) == x.max()
+
+
+# M10+: float prod and long cumulative scans run in fixed blocks; the results
+# are compared with numpy within rounding, and must not depend on the layout
+# of the same lane's memory more than rounding does.
+
+@pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 15, 16, 17, 4095, 4096, 4097, 8191, 8192, 8193, 40_000])
+def test_blocked_float_prod_is_close(n):
+    rng = np.random.default_rng(n)
+    x = 1.0 + (rng.random(n) - 0.5) * 1e-3
+    c = np.exp(1j * rng.standard_normal(n) * 1e-2)
+    assert sdnp.prod(sdnp.asarray(x)) == pytest.approx(np.prod(x), rel=1e-12, abs=0)
+    assert sdnp.prod(sdnp.asarray(c)) == pytest.approx(np.prod(c), rel=1e-12, abs=0)
+    assert sdnp.prod(sdnp.asarray(x[::-1])) == pytest.approx(np.prod(x), rel=1e-12, abs=0)
+    k = np.resize(np.array([1, 2, 3, -1, 1, 1, 5]), n)
+    assert sdnp.prod(sdnp.asarray(k)) == np.prod(k)  # int: exact (wrapping, order-free)
+
+
+def test_blocked_prod_special_values():
+    ones = [1.0] * 30
+    assert math.isnan(sdnp.prod(sdnp.asarray([2.0, math.inf, 0.0] + ones)))
+    assert math.isnan(sdnp.prod(sdnp.asarray(ones + [math.nan])))
+    assert sdnp.prod(sdnp.asarray(ones + [-0.0])) == 0.0
+    assert math.copysign(1.0, sdnp.prod(sdnp.asarray(ones + [-0.0]))) == -1.0
+    assert sdnp.prod(sdnp.asarray(ones + [math.inf, -2.0])) == -math.inf
+
+
+@pytest.mark.parametrize("n", [8191, 8192, 8193, 16_384, 16_385, 4096 * 4 * 3 + 17, 100_000])
+@pytest.mark.parametrize("name", ["cumulative_sum", "cumulative_prod"])
+def test_blocked_scans_are_close(n, name):
+    rng = np.random.default_rng(n)
+    x = 1.0 + (rng.random(n) - 0.5) * 1e-3
+    c = x * np.exp(1j * rng.standard_normal(n) * 1e-3)
+    i = rng.integers(-5, 6, n)
+    sd, ref = getattr(sdnp, name), getattr(np, name)
+    for arr in (x, x[::-1], c):
+        np.testing.assert_allclose(np.asarray(sd(sdnp.asarray(arr))), ref(arr), rtol=1e-12)
+    m = np.stack([x, x[::-1], x * 1.0001]).T  # three long strided lanes
+    np.testing.assert_allclose(np.asarray(sd(sdnp.asarray(m), axis=0)), ref(m, axis=0), rtol=1e-12)
+    got = np.asarray(sd(sdnp.asarray(x), include_initial=True))
+    np.testing.assert_allclose(got, ref(x, include_initial=True), rtol=1e-12)
+    if name == "cumulative_sum":
+        assert np.array_equal(np.asarray(sd(sdnp.asarray(i))), ref(i))  # int: exact
+
+
+def test_blocked_scan_keeps_the_first_element():
+    x = np.zeros(20_000)
+    x[0] = -0.0
+    got = np.asarray(sdnp.cumulative_sum(sdnp.asarray(x)))
+    assert math.copysign(1.0, got[0]) == -1.0  # the first output is x[0] itself
+    x[4096] = math.nan
+    got = np.asarray(sdnp.cumulative_sum(sdnp.asarray(x)))
+    assert not np.isnan(got[:4096]).any() and np.isnan(got[4096:]).all()

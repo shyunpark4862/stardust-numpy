@@ -43,6 +43,7 @@ def battery():
     S = sdnp.asarray
     F, M, T3, I, C, B, IDX = S(f), S(m), S(t3), S(i), S(c), S(b), S(idx)
     clean = S(np.nan_to_num(f))
+    P = S(1.0 + np.nan_to_num(f) * 1e-4)
     ops = {
         "f + m-ish": lambda: F * 2.0 + 1.0,
         "exp": lambda: sdnp.exp(M),
@@ -71,6 +72,17 @@ def battery():
         "gather": lambda: F[IDX],
         "astype": lambda: sdnp.astype(M, sdnp.int64),
         "sum complex big": lambda: sdnp.sum(C),
+        # M10+: blocked over a reduced axis / multi-accumulator / blocked
+        # scans. Not numpy's bits any more, but still the same for every
+        # thread count.
+        "reduced-axis blocks": lambda: (sdnp.mean(M, axis=0), sdnp.var(M, axis=0), sdnp.prod(M, axis=0),
+                                        sdnp.max(M, axis=0), sdnp.sum(B, axis=0), sdnp.sum(I, axis=0)),
+        "prod float/complex": lambda: (sdnp.prod(P), sdnp.prod(P[::3]), sdnp.prod(S(c[:200_000] / abs(c[:200_000]))),
+                                       sdnp.prod(M[:, :400] * 0.001 + 1.0, axis=1)),
+        "long scans": lambda: (sdnp.cumulative_sum(clean), sdnp.cumulative_prod(P), sdnp.cumulative_sum(C),
+                               sdnp.cumulative_sum(F[::-2]), sdnp.cumulative_sum(I.reshape(-1)[:100_003]),
+                               sdnp.cumulative_sum(S(m.reshape(-1)[:90_000].reshape(30_000, 3)), axis=0),
+                               sdnp.cumulative_prod(P, include_initial=True)),
     }
     return ops
 

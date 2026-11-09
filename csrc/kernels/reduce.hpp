@@ -435,7 +435,7 @@ std::int64_t arg_extreme(const std::byte* p, std::int64_t n, std::int64_t stride
 // survives, as in numpy.
 
 template <typename Op, typename T>
-void scan_lane(const std::byte* x, std::int64_t xs, std::byte* o, std::int64_t os, std::int64_t n) {
+void scan_serial(const std::byte* x, std::int64_t xs, std::byte* o, std::int64_t os, std::int64_t n) {
     if (n == 0) return;
     T acc = load_as<T>(x);
     *reinterpret_cast<T*>(o) = acc;
@@ -445,6 +445,107 @@ void scan_lane(const std::byte* x, std::int64_t xs, std::byte* o, std::int64_t o
         acc = Op::f(acc, load_as<T>(x));
         *reinterpret_cast<T*>(o) = acc;
     }
+}
+
+// Long lanes are scanned in blocks of kScanBlock elements (M10+):
+//   1. each block is scanned on its own, from its own first element;
+//   2. carry[b] = the end of everything before block b, from the block ends;
+//   3. every element of block b >= 1 becomes carry[b] (op) its local value.
+// Step 1 is one dependency chain per block (an add or multiply's latency per
+// element, 0.5 ns); four blocks interleaved in one loop keep four chains in
+// flight, and blocks run in parallel on the pool. The blocks depend on n
+// only, so the result is the same for every thread count; for floats it is
+// not numpy's bits (user decision 2026-11-10). Integer scans wrap and give
+// the same bits either way: they only take this path when it can run in
+// parallel, since step 3 is an extra pass.
+inline constexpr std::int64_t kScanBlock = 4096;
+inline constexpr std::int64_t kScanGroup = 4;  // blocks interleaved in one loop (and one task)
+
+// Contig: both strides are sizeof(T), known to the compiler (a runtime
+// stride made the loop 2.3x slower, measured).
+template <typename Op, typename T, bool Contig>
+void scan_group(const std::byte* x, std::int64_t xs, std::byte* o, std::int64_t os, std::int64_t first,
+                std::int64_t blocks, std::int64_t n) {
+    if constexpr (Contig) xs = os = sizeof(T);
+    std::int64_t b = first;
+    if (blocks == kScanGroup && (first + kScanGroup) * kScanBlock <= n) {  // four full blocks side by side
+        // Eight elements of every block are loaded, scanned, then stored
+        // together. One store per block in turn ran 5.7x slower when `o` was
+        // freshly allocated memory (first-touch page faults; 1.7 ms against
+        // 0.3 ms for 1M doubles, experiments in the M10+ explainer).
+        const std::byte* xp[kScanGroup];
+        std::byte* op[kScanGroup];
+        T acc[kScanGroup];
+        for (int j = 0; j < kScanGroup; ++j) {
+            xp[j] = x + (first + j) * kScanBlock * xs;
+            op[j] = o + (first + j) * kScanBlock * os;
+        }
+        // Typed accesses when contiguous: through load_as (a memcpy) the
+        // compiler kept v on the stack, three memory operations per element.
+        auto ld = [&](int j, std::int64_t i) {
+            if constexpr (Contig) return reinterpret_cast<const T*>(xp[j])[i];
+            else return load_as<T>(xp[j] + i * xs);
+        };
+        auto st = [&](int j, std::int64_t i, T val) {
+            if constexpr (Contig) reinterpret_cast<T*>(op[j])[i] = val;
+            else *reinterpret_cast<T*>(op[j] + i * os) = val;
+        };
+        // First: each block starts from its own first element. A compile-time
+        // flag, so every loop below has constant bounds and v stays in
+        // registers (a runtime start index kept it on the stack, 2x slower).
+        auto chunk = [&]<bool First>(std::int64_t i) {
+            T v[kScanGroup][8];
+            for (int j = 0; j < kScanGroup; ++j)
+                for (int k = 0; k < 8; ++k) v[j][k] = ld(j, i + k);
+            if constexpr (First)
+                for (int j = 0; j < kScanGroup; ++j) acc[j] = v[j][0];
+            for (int k = First ? 1 : 0; k < 8; ++k)
+                for (int j = 0; j < kScanGroup; ++j) v[j][k] = acc[j] = Op::f(acc[j], v[j][k]);
+            for (int j = 0; j < kScanGroup; ++j)
+                for (int k = 0; k < 8; ++k) st(j, i + k, v[j][k]);
+        };
+        chunk.template operator()<true>(0);
+        for (std::int64_t i = 8; i < kScanBlock; i += 8) chunk.template operator()<false>(i);
+        return;
+    }
+    for (; b < first + blocks; ++b) {
+        const std::int64_t begin = b * kScanBlock;
+        scan_serial<Op, T>(x + begin * xs, xs, o + begin * os, os, std::min(kScanBlock, n - begin));
+    }
+}
+
+template <typename Op, typename T>
+void scan_lane(const std::byte* x, std::int64_t xs, std::byte* o, std::int64_t os, std::int64_t n) {
+    const bool blocked = (ops::is_float<T> || ops::is_cplx<T>) ? n >= 2 * kScanBlock
+                                                                 : n >= parallel::kThreshold && parallel::available();
+    if (!blocked) {
+        scan_serial<Op, T>(x, xs, o, os, n);
+        return;
+    }
+    const std::int64_t blocks = (n + kScanBlock - 1) / kScanBlock;
+    const std::int64_t groups = (blocks + kScanGroup - 1) / kScanGroup;
+    const bool contig = xs == sizeof(T) && os == sizeof(T);
+    parallel::parallel_for(groups, [&](std::int64_t g) {
+        const std::int64_t first = g * kScanGroup, count = std::min(kScanGroup, blocks - first);
+        if (contig) scan_group<Op, T, true>(x, xs, o, os, first, count, n);
+        else scan_group<Op, T, false>(x, xs, o, os, first, count, n);
+    });
+    auto at = [&](std::int64_t i) -> T& { return *reinterpret_cast<T*>(o + i * os); };
+    auto carry = std::make_unique_for_overwrite<T[]>(static_cast<size_t>(blocks));
+    carry[1] = at(kScanBlock - 1);
+    for (std::int64_t b = 2; b < blocks; ++b) carry[b] = Op::f(carry[b - 1], at(b * kScanBlock - 1));
+    parallel::parallel_for(groups, [&](std::int64_t g) {
+        for (std::int64_t b = std::max<std::int64_t>(g * kScanGroup, 1); b < std::min(blocks, (g + 1) * kScanGroup); ++b) {
+            const T c = carry[b];
+            const std::int64_t end = std::min(n, (b + 1) * kScanBlock);
+            if (os == sizeof(T)) {
+                T* p = reinterpret_cast<T*>(o);
+                for (std::int64_t i = b * kScanBlock; i < end; ++i) p[i] = Op::f(c, p[i]);
+            } else {
+                for (std::int64_t i = b * kScanBlock; i < end; ++i) at(i) = Op::f(c, at(i));
+            }
+        }
+    });
 }
 
 }  // namespace sd
