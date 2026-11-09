@@ -18,6 +18,10 @@ void check_assignable(DType from, DType to);
 // Conservative overlap test on the byte ranges the two arrays can touch.
 bool may_share_memory(const NDArray& a, const NDArray& b);
 
+// Same data pointer, dtype, shape and strides: reading and writing element i
+// touch the same bytes, so an elementwise op may run in place (a += a).
+bool same_view(const NDArray& a, const NDArray& b);
+
 // dst[...] = src: src is broadcast to dst's shape and converted to dst's
 // dtype. If the two overlap (and are not the very same view), src is first
 // copied to a temporary, so the result is as if every input element were read

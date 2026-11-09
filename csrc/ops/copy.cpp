@@ -37,18 +37,18 @@ ByteRange byte_range(const NDArray& a) {
     return {lo, hi + static_cast<std::uintptr_t>(a.itemsize())};
 }
 
-bool same_view(const NDArray& a, const NDArray& b) {
-    return a.data == b.data && a.ndim == b.ndim && a.dtype == b.dtype &&
-           std::equal(a.shape.begin(), a.shape.begin() + a.ndim, b.shape.begin()) &&
-           std::equal(a.strides.begin(), a.strides.begin() + a.ndim, b.strides.begin());
-}
-
 void run_cast(const NDArray& src, NDArray& dst, IterMode mode) {
     const IterOperand ops[] = {operand(src), operand(dst)};  // inputs first, output last
     NdIter(dst.shape_span(), ops, mode).run(cast_kernel(src.dtype, dst.dtype));
 }
 
 }  // namespace
+
+bool same_view(const NDArray& a, const NDArray& b) {
+    return a.data == b.data && a.ndim == b.ndim && a.dtype == b.dtype &&
+           std::equal(a.shape.begin(), a.shape.begin() + a.ndim, b.shape.begin()) &&
+           std::equal(a.strides.begin(), a.strides.begin() + a.ndim, b.strides.begin());
+}
 
 bool may_share_memory(const NDArray& a, const NDArray& b) {
     if (a.size() == 0 || b.size() == 0) return false;

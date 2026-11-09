@@ -8,6 +8,7 @@
 #include "ops/copy.hpp"
 #include "ops/indexing.hpp"
 #include "ops/shape.hpp"
+#include "ops/ufunc.hpp"
 
 namespace sd {
 
@@ -88,6 +89,40 @@ struct ArrayIterator {
     std::int64_t next = 0, stop = 0;
 };
 
+// ---- operators: thin wrappers over the elementwise functions --------------
+// An operand we do not take (a list, a numpy array, None) gives
+// NotImplemented, so Python can try the other side and then raise TypeError.
+
+nb::object not_implemented() { return nb::borrow(Py_NotImplemented); }
+
+template <typename Op>
+nb::object op_forward(nb::handle self, nb::handle other) {
+    return is_operand(other) ? binary<Op>(self, other, nb::none()) : not_implemented();
+}
+
+template <typename Op>
+nb::object op_reflected(nb::handle self, nb::handle other) {  // other <op> self
+    return is_operand(other) ? binary<Op>(other, self, nb::none()) : not_implemented();
+}
+
+// x op= y is op(x, y, out=x): same rules as out= (S6, overlap-safe), same object back.
+template <typename Op>
+nb::object op_inplace(nb::handle self, nb::handle other) {
+    return is_operand(other) ? binary<Op>(self, other, self) : not_implemented();
+}
+
+template <typename Op>
+nb::object op_unary(nb::handle self) {
+    return unary<Op>(self, nb::none());
+}
+
+template <typename Op>
+void def_arith(nb::class_<NDArray>& cls, const char* fwd, const char* refl, const char* inplace) {
+    cls.def(fwd, &op_forward<Op>, nb::arg().none());
+    cls.def(refl, &op_reflected<Op>, nb::arg().none());
+    cls.def(inplace, &op_inplace<Op>, nb::arg().none());
+}
+
 nb::object format_call(const char* fn, nb::handle self) {
     return nb::module_::import_("stardust_numpy._format").attr(fn)(self);
 }
@@ -143,8 +178,38 @@ void bind_ndarray(nb::module_& m) {
             throw nb::type_error("an array cannot be converted to complex");
         })
         .def("__index__", [](const NDArray&) -> int { throw nb::type_error("an array cannot be used as an index"); });
-    // Arrays are mutable containers: unhashable, like lists.
+    using namespace ops;
+    def_arith<Add>(cls, "__add__", "__radd__", "__iadd__");
+    def_arith<Subtract>(cls, "__sub__", "__rsub__", "__isub__");
+    def_arith<Multiply>(cls, "__mul__", "__rmul__", "__imul__");
+    def_arith<Divide>(cls, "__truediv__", "__rtruediv__", "__itruediv__");
+    def_arith<FloorDivide>(cls, "__floordiv__", "__rfloordiv__", "__ifloordiv__");
+    def_arith<Remainder>(cls, "__mod__", "__rmod__", "__imod__");
+    def_arith<Pow>(cls, "__pow__", "__rpow__", "__ipow__");
+    def_arith<BitwiseAnd>(cls, "__and__", "__rand__", "__iand__");
+    def_arith<BitwiseOr>(cls, "__or__", "__ror__", "__ior__");
+    def_arith<BitwiseXor>(cls, "__xor__", "__rxor__", "__ixor__");
+    def_arith<LeftShift>(cls, "__lshift__", "__rlshift__", "__ilshift__");
+    def_arith<RightShift>(cls, "__rshift__", "__rrshift__", "__irshift__");
+    // Python reflects comparisons itself (x > y becomes y < x).
+    cls.def("__eq__", &op_forward<Equal>, nb::arg().none());
+    cls.def("__ne__", &op_forward<NotEqual>, nb::arg().none());
+    cls.def("__lt__", &op_forward<Less>, nb::arg().none());
+    cls.def("__le__", &op_forward<LessEqual>, nb::arg().none());
+    cls.def("__gt__", &op_forward<Greater>, nb::arg().none());
+    cls.def("__ge__", &op_forward<GreaterEqual>, nb::arg().none());
+    cls.def("__neg__", &op_unary<Negative>);
+    cls.def("__pos__", &op_unary<Positive>);
+    cls.def("__abs__", &op_unary<Abs>);
+    cls.def("__invert__", &op_unary<BitwiseInvert>);
+
+    // Arrays are mutable containers: unhashable, like lists. (Defining
+    // __eq__ would also do this; being explicit documents it.)
     cls.attr("__hash__") = nb::none();
+    // numpy, seeing `np_array + sdnp_array`, would convert our array through
+    // the buffer protocol and return a numpy result. None tells numpy's
+    // ufuncs to step aside, so mixing the two raises TypeError (M4 decision).
+    cls.attr("__array_ufunc__") = nb::none();
 
     nb::class_<ArrayIterator>(m, "_ArrayIterator")
         .def("__iter__", [](nb::handle self) { return nb::borrow(self); })

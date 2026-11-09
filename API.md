@@ -112,10 +112,22 @@ bitwise_left_shift  bitwise_right_shift
 # 기타
 maximum  minimum  isnan  isinf  isfinite
 real  imag  conj                     # complex 입력에 대해 real/imag는 stride를 이용한 뷰를 반환한다
-clip(x, /, *, min=None, max=None)
-where(condition, x1, x2, /)
+clip(x, /, *, min=None, max=None, out=None)
+where(condition, x1, x2, /, *, out=None)
 ```
 - ufunc 객체는 없다. `add.reduce` 같은 메서드도 없다.
+- **피연산자**는 `sdnp.ndarray`와 Python 스칼라(`bool`, `int`, `float`, `complex`)만 받는다 (M4에서 결정).
+  - 리스트나 numpy 배열은 `TypeError`다. 필요하면 먼저 `asarray`로 변환한다.
+  - 연산자도 같다. numpy 배열과 섞어 쓰면 어느 쪽이 왼쪽이든 `TypeError`다.
+  - 피연산자가 모두 Python 스칼라이면 결과도 Python 스칼라다 (Z1). 계산은 dtype 의미론을 따른다. 예: `add(2**62, 2**62)`는 wrap된다.
+- **dtype 허용 범위**: numpy는 받지만 Array API는 거부하는 조합은 `TypeError`다 (M4에서 결정).
+  - `logical_and`, `logical_or`, `logical_xor`, `logical_not`: bool만 받는다.
+  - `where`의 `condition`: bool만 받는다.
+  - 시프트: int64만 받는다. bool은 받지 않는다.
+- `clip`의 결과는 `x`의 dtype이다 (M4에서 결정, Array API).
+  - `min`/`max`는 `x`의 dtype으로 암묵적으로 변환될 수 있어야 한다 (S6). 예: int 배열에 `min=0.5`는 `TypeError`다.
+  - NaN과 부호 있는 0은 `maximum`/`minimum`과 같은 규칙을 따른다.
+- `where`와 `clip`도 `out=`을 받는다 (M4에서 결정).
 - `abs`에 complex를 넣으면 float64를 반환한다.
 - complex가 아닌 입력에 대한 `real`, `imag` (M3에서 결정, numpy와 같다)
   - `real`은 `x` 자신을 반환한다.

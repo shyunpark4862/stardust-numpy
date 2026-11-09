@@ -37,3 +37,31 @@ def assert_same(arr, expected):
 @pytest.fixture(params=ALL_DTYPES, ids=str)
 def dtype(request):
     return request.param
+
+
+def _ordered(x):
+    """float64 bits mapped to integers that are ordered like the floats, so
+    the difference of two of them is their distance in ULPs."""
+    return [b if b >= 0 else -(2**63) - b for b in np.asarray(x, np.float64).ravel().view(np.int64).tolist()]
+
+
+def _max_ulp(got, want):
+    gn, wn = np.isnan(got).ravel(), np.isnan(want).ravel()
+    assert np.array_equal(gn, wn), "nan positions differ"
+    dist = [abs(g - w) for g, w, n in zip(_ordered(got), _ordered(want), gn) if not n]
+    return max(dist, default=0)
+
+
+def assert_ulp(arr, expected, max_ulp):
+    """Like assert_same, but floats may differ by up to `max_ulp` units in the
+    last place (the accuracy contract of the vForce functions, DESIGN.md §2.6)."""
+    expected = np.asarray(expected)
+    assert isinstance(arr, sdnp.ndarray), type(arr)
+    assert arr.shape == expected.shape
+    assert NP_DTYPE[arr.dtype] == expected.dtype, (arr.dtype, expected.dtype)
+    got = np.asarray(arr)
+    if expected.dtype.kind == "c":
+        worst = max(_max_ulp(got.real, expected.real), _max_ulp(got.imag, expected.imag))
+    else:
+        worst = _max_ulp(got, expected)
+    assert worst <= max_ulp, f"{worst} ULP apart\n got: {got!r}\nwant: {expected!r}"

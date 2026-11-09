@@ -23,6 +23,7 @@ nanobind_add_module(_core NB_STATIC
   csrc/ops/creation.cpp
   csrc/ops/indexing.cpp
   csrc/ops/shape.cpp
+  csrc/ops/ufunc.cpp
   csrc/bind/pyutil.cpp
   csrc/bind/ndarray_bind.cpp
   csrc/bind/module.cpp)
@@ -34,7 +35,12 @@ target_include_directories(_core PRIVATE csrc)
 # -ffp-contract=off: clang would otherwise fuse `a + b*c` into one FMA (one
 # rounding instead of two), silently changing results versus the source text
 # and versus numpy. Kernels that want FMA ask for it explicitly.
-target_compile_options(_core PRIVATE -mcpu=native -ffp-contract=off -Wall -Wextra -Wpedantic)
+# -fno-builtin-sin/-cos: on Apple targets clang merges sin(x) and cos(x) of the
+# same x into one __sincos_stret call, whose results can differ by 1 ULP from
+# sin()/cos() called separately (which is what numpy does). Measured in M4 on
+# complex expm1.
+target_compile_options(_core PRIVATE -mcpu=native -ffp-contract=off -fno-builtin-sin -fno-builtin-cos
+                       -Wall -Wextra -Wpedantic)
 
 # Accelerate: new LAPACK interface with 64-bit integers (DESIGN.md §2.5).
 target_compile_definitions(_core PRIVATE ACCELERATE_NEW_LAPACK ACCELERATE_LAPACK_ILP64)
