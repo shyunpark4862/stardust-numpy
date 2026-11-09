@@ -9,6 +9,7 @@
 #pragma once
 
 #include "core/iter.hpp"
+#include "kernels/neon.hpp"
 #include "kernels/scalar_ops.hpp"
 
 #include <array>
@@ -51,7 +52,11 @@ void binary_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
         const T* b = reinterpret_cast<const T*>(args[1]);
         R* o = reinterpret_cast<R*>(args[2]);
         if (s[0] == sizeof(T) && s[1] == sizeof(T)) {  // array op array
-            for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(a[i], b[i]);
+            if constexpr (neon_binary<Op, T>::available) {
+                neon_binary<Op, T>::run(a, b, o, n);  // hand-written NEON (M7.3)
+            } else {
+                for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(a[i], b[i]);
+            }
             return;
         }
         if (s[0] == sizeof(T) && s[1] == 0) {  // array op scalar (x + 1.0)

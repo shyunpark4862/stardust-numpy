@@ -119,7 +119,8 @@ def test_unary_all_dtypes(name, dtype):
         return
     with np.errstate(all="ignore"):
         want = reference_unary(name, n, loop)
-    check(fn(sdnp.asarray(n)), want, name, loop)
+    check(fn(sdnp.asarray(n)), want, name, loop)  # contiguous
+    check(fn(sdnp.asarray(n)[::-1]), want[::-1], name, loop)  # strided
 
 
 @pytest.mark.parametrize("name", sorted(BINARY))
@@ -136,7 +137,12 @@ def test_binary_all_dtype_pairs(name, da, db):
         return
     with np.errstate(all="ignore"):
         want = reference_binary(name, a, b, loop)
-    check(fn(sdnp.asarray(a), sdnp.asarray(b)), want, name, loop)
+    check(fn(sdnp.asarray(a), sdnp.asarray(b)), want, name, loop)  # scalar-broadcast inner loops
+    # The same pairs as contiguous arrays and as strided views: each layout has
+    # its own kernel path (M7), and all must give the same bits.
+    fa, fb = (np.ascontiguousarray(v) for v in np.broadcast_arrays(a, b))
+    check(fn(sdnp.asarray(fa), sdnp.asarray(fb)), want, name, loop)
+    check(fn(sdnp.asarray(fa.T), sdnp.asarray(fb.T)), want.T, name, loop)
 
 
 _ELEMENTS = {"allow_nan": True, "allow_infinity": True}
