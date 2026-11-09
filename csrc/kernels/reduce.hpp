@@ -7,33 +7,147 @@
 //   * out stride 0  -> inner-axis reduction: fold a run into one accumulator
 //   * out stride != 0 -> outer-axis reduction: add a whole row into the
 //     result row, element by element (vectorizes along the kept axis)
-// The binary operations are M4's (ops::Add, ops::Maximum, ...), so a sum is
-// exactly a chain of add() calls.
+// The binary operations are M4's (ops::Add, ops::Maximum, ...).
 //
-// M5 keeps these as plain sequential loops; M7 adds multiple accumulators and
-// pairwise summation, M8 fixed chunks for threads.
+// M7.5: a float/complex sum folds each run with numpy's pairwise summation
+// (8 accumulators in blocks of 128, halves added recursively): faster, since
+// 8 independent chains replace one, and more accurate, since the rounding
+// error grows like log n instead of n. max/min fold with NEON FMAX/FMIN.
 #pragma once
 
 #include "kernels/elementwise.hpp"
+
+#include <arm_neon.h>
 
 #include <cmath>
 #include <cstdint>
 
 namespace sd {
 
+// ---- pairwise summation (numpy's DOUBLE/CDOUBLE_pairwise_sum) --------------
+
+inline constexpr std::int64_t kPairwiseBlock = 128;  // numpy's PW_BLOCKSIZE, in doubles
+
+// Sum of get(begin), ..., get(begin + n - 1).
+template <typename Get>
+double pairwise_sum(std::int64_t begin, std::int64_t n, const Get& get) {
+    if (n < 8) {
+        double res = 0.;
+        for (std::int64_t i = 0; i < n; ++i) res += get(begin + i);
+        return res;
+    }
+    if (n <= kPairwiseBlock) {
+        double r[8];
+        for (int j = 0; j < 8; ++j) r[j] = get(begin + j);
+        std::int64_t i = 8;
+        for (; i < n - (n % 8); i += 8)
+            for (int j = 0; j < 8; ++j) r[j] += get(begin + i + j);  // 8 independent chains
+        double res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+        for (; i < n; ++i) res += get(begin + i);
+        return res;
+    }
+    std::int64_t n2 = n / 2;
+    n2 -= n2 % 8;
+    return pairwise_sum(begin, n2, get) + pairwise_sum(begin + n2, n - n2, get);
+}
+
+// The complex version: real and imaginary parts summed side by side. numpy
+// counts doubles, so a block holds 64 complex numbers and 4 accumulators.
+template <typename Get>
+complex128 pairwise_sum_complex(std::int64_t begin, std::int64_t n, const Get& get) {
+    if (n < 4) {
+        double rr = 0., ri = 0.;
+        for (std::int64_t i = 0; i < n; ++i) {
+            const complex128 z = get(begin + i);
+            rr += z.real();
+            ri += z.imag();
+        }
+        return {rr, ri};
+    }
+    if (n <= kPairwiseBlock / 2) {
+        complex128 r[4];
+        for (int j = 0; j < 4; ++j) r[j] = get(begin + j);
+        std::int64_t i = 4;
+        for (; i < n - (n % 4); i += 4)
+            for (int j = 0; j < 4; ++j) {
+                const complex128 z = get(begin + i + j);
+                r[j] = {r[j].real() + z.real(), r[j].imag() + z.imag()};
+            }
+        double rr = (r[0].real() + r[1].real()) + (r[2].real() + r[3].real());
+        double ri = (r[0].imag() + r[1].imag()) + (r[2].imag() + r[3].imag());
+        for (; i < n; ++i) {
+            const complex128 z = get(begin + i);
+            rr += z.real();
+            ri += z.imag();
+        }
+        return {rr, ri};
+    }
+    std::int64_t n2 = n;  // numpy: n2 = (2n)/2 - ((2n)/2) % 8 doubles
+    n2 -= n2 % 8;
+    n2 /= 2;
+    const complex128 a = pairwise_sum_complex(begin, n2, get), b = pairwise_sum_complex(begin + n2, n - n2, get);
+    return {a.real() + b.real(), a.imag() + b.imag()};
+}
+
+// ---- max/min of a contiguous run with NEON ---------------------------------
+
+template <bool Max>
+double neon_fold(const double* x, std::int64_t n, double acc) {
+    std::int64_t i = 0;
+    if (n >= 8) {
+        // Four independent registers (8 lanes), like the 8 sum accumulators:
+        // FMAX's latency is hidden behind the other three.
+        float64x2_t v[4];
+        for (int j = 0; j < 4; ++j) v[j] = vld1q_f64(x + 2 * j);
+        for (i = 8; i + 8 <= n; i += 8)
+            for (int j = 0; j < 4; ++j) {
+                const float64x2_t y = vld1q_f64(x + i + 2 * j);
+                v[j] = Max ? vmaxq_f64(v[j], y) : vminq_f64(v[j], y);
+            }
+        const float64x2_t m = Max ? vmaxq_f64(vmaxq_f64(v[0], v[1]), vmaxq_f64(v[2], v[3]))
+                                  : vminq_f64(vminq_f64(v[0], v[1]), vminq_f64(v[2], v[3]));
+        const double lanes = Max ? vmaxvq_f64(m) : vminvq_f64(m);  // across the two lanes
+        acc = Max ? ops::fmax_nan(acc, lanes) : ops::fmin_nan(acc, lanes);
+    }
+    for (; i < n; ++i) acc = Max ? ops::fmax_nan(acc, x[i]) : ops::fmin_nan(acc, x[i]);
+    return acc;
+}
+
 // args: x, out (read and written)
 template <typename Op, typename T>
 void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void*) {
     const std::byte* x = args[0];
     std::byte* o = args[1];
-    if (s[1] == 0) {
+    if (s[1] == 0) {  // inner-axis: fold the run into one value
         T acc = load_as<T>(o);
-        for (std::int64_t i = 0; i < n; ++i, x += s[0]) acc = Op::f(acc, load_as<T>(x));
+        auto at = [&](std::int64_t i) { return load_as<T>(x + i * s[0]); };
+        if constexpr (std::is_same_v<Op, ops::Add> && ops::is_float<T>) {
+            acc = acc + pairwise_sum(0, n, at);
+        } else if constexpr (std::is_same_v<Op, ops::Add> && ops::is_cplx<T>) {
+            const complex128 p = pairwise_sum_complex(0, n, at);
+            acc = {acc.real() + p.real(), acc.imag() + p.imag()};
+        } else if constexpr ((std::is_same_v<Op, ops::Maximum> || std::is_same_v<Op, ops::Minimum>) &&
+                             ops::is_float<T>) {
+            if (s[0] == sizeof(T)) acc = neon_fold<std::is_same_v<Op, ops::Maximum>>(reinterpret_cast<const T*>(x), n, acc);
+            else for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, at(i));
+        } else if (s[0] == sizeof(T)) {
+            const T* xp = reinterpret_cast<const T*>(x);  // indexed: integer folds vectorize
+            for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, xp[i]);
+        } else {
+            for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, at(i));
+        }
         *reinterpret_cast<T*>(o) = acc;
-    } else {
-        for (std::int64_t i = 0; i < n; ++i, x += s[0], o += s[1])
-            *reinterpret_cast<T*>(o) = Op::f(load_as<T>(o), load_as<T>(x));
+        return;
     }
+    if (s[0] == sizeof(T) && s[1] == sizeof(T)) {  // outer-axis, contiguous rows: o = f(o, x)
+        T* op = reinterpret_cast<T*>(o);
+        const T* xp = reinterpret_cast<const T*>(x);
+        if constexpr (neon_binary<Op, T>::available) neon_binary<Op, T>::run(op, xp, op, n);
+        else for (std::int64_t i = 0; i < n; ++i) op[i] = Op::f(op[i], xp[i]);
+        return;
+    }
+    for (std::int64_t i = 0; i < n; ++i, x += s[0], o += s[1])
+        *reinterpret_cast<T*>(o) = Op::f(load_as<T>(o), load_as<T>(x));
 }
 
 // Sum of squared deviations, the second pass of var: out += |x - m|^2.
@@ -43,19 +157,65 @@ void sq_dev_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
     const std::byte* x = args[0];
     const std::byte* m = args[1];
     std::byte* o = args[2];
-    for (std::int64_t i = 0; i < n; ++i, x += s[0], m += s[1], o += s[2]) {
-        const T d = load_as<T>(x) - load_as<T>(m);
-        double sq;
-        if constexpr (ops::is_cplx<T>) sq = d.real() * d.real() + d.imag() * d.imag();
-        else sq = d * d;
-        *reinterpret_cast<double*>(o) += sq;
+    auto sq = [&](std::int64_t i) {
+        const T d = load_as<T>(x + i * s[0]) - load_as<T>(m + i * s[1]);
+        if constexpr (ops::is_cplx<T>) return d.real() * d.real() + d.imag() * d.imag();
+        else return d * d;
+    };
+    if (s[2] == 0) {  // inner-axis: pairwise, like sum
+        *reinterpret_cast<double*>(o) += pairwise_sum(0, n, sq);
+        return;
     }
+    for (std::int64_t i = 0; i < n; ++i) *reinterpret_cast<double*>(o + i * s[2]) += sq(i);
 }
 
 // ---- argmin / argmax over one lane (index order, so ties keep the first) ----
 
+// float64, contiguous: two lanes, each keeping its best value and where it
+// was. Strict > keeps the first index within a lane; between the lanes a tie
+// goes to the smaller index. NaNs are only noted on the way (any NaN wins,
+// the first one) and then located by a scalar rescan, as they are rare.
+template <bool Max>
+std::int64_t neon_arg_extreme(const double* x, std::int64_t n) {
+    float64x2_t best = vld1q_f64(x);
+    int64x2_t at = {0, 1}, idx = {0, 1};
+    const int64x2_t two = vdupq_n_s64(2);
+    uint64x2_t ordered = vceqq_f64(best, best);  // all-ones while a lane has seen no NaN (x == x)
+    std::int64_t i = 2;
+    for (; i + 2 <= n; i += 2) {
+        const float64x2_t v = vld1q_f64(x + i);
+        idx = vaddq_s64(idx, two);
+        const uint64x2_t better = Max ? vcgtq_f64(v, best) : vcltq_f64(v, best);
+        best = vbslq_f64(better, v, best);
+        at = vbslq_s64(better, idx, at);
+        ordered = vandq_u64(ordered, vceqq_f64(v, v));
+    }
+    if (vminvq_u32(vreinterpretq_u32_u64(ordered)) == 0)  // some lane met a NaN
+        for (std::int64_t k = 0;; ++k)
+            if (std::isnan(x[k])) return k;
+    double b0 = vgetq_lane_f64(best, 0), b1 = vgetq_lane_f64(best, 1);
+    std::int64_t a0 = vgetq_lane_s64(at, 0), a1 = vgetq_lane_s64(at, 1);
+    double b = b0;
+    std::int64_t a = a0;
+    if (Max ? (b1 > b0 || (b1 == b0 && a1 < a0)) : (b1 < b0 || (b1 == b0 && a1 < a0))) {
+        b = b1;
+        a = a1;
+    }
+    for (; i < n; ++i) {  // the odd last element
+        if (std::isnan(x[i])) return i;
+        if (Max ? x[i] > b : x[i] < b) {
+            b = x[i];
+            a = i;
+        }
+    }
+    return a;
+}
+
 template <typename T, bool Max>
 std::int64_t arg_extreme(const std::byte* p, std::int64_t n, std::int64_t stride) {
+    if constexpr (ops::is_float<T>) {
+        if (stride == sizeof(double) && n >= 2) return neon_arg_extreme<Max>(reinterpret_cast<const double*>(p), n);
+    }
     T best = load_as<T>(p);
     std::int64_t at = 0;
     if constexpr (ops::is_float<T>) {

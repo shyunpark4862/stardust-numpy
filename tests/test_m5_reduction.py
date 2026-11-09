@@ -288,3 +288,27 @@ def test_random_shapes_and_axes(data_):
     reduced = range(len(shape)) if ax is None else [a % len(shape) for a in ax]
     if all(shape[a] > 0 for a in reduced):
         compare(sdnp.max(x, axis=axis, keepdims=keepdims), np.max(n, axis=axis, keepdims=keepdims), exact=True)
+
+
+# ------------------------------------------------- M7 kernels: vector paths
+
+@given(st.lists(st.sampled_from([0.0, -0.0, 1.0, 2.0, -3.0, math.inf, -math.inf, math.nan]), min_size=1, max_size=40))
+def test_vector_folds_match_numpy(values):
+    # Long enough lists reach the NEON paths (pairs of lanes, 8-wide folds);
+    # ties, NaNs and signed zeros land in every lane position.
+    n = np.array(values)
+    x = sdnp.asarray(n)
+    for name in ("argmax", "argmin"):
+        assert getattr(sdnp, name)(x) == getattr(np, name)(n)
+    for name in ("max", "min"):
+        got, want = getattr(sdnp, name)(x), getattr(np, name)(n)
+        assert (math.isnan(got) and math.isnan(want)) or (got == want and math.copysign(1, got) == math.copysign(1, want))
+
+
+def test_pairwise_sum_accuracy():
+    x = np.full(10**6, 0.1) + np.random.default_rng(7).random(10**6) * 1e-3
+    exact = math.fsum(x.tolist())
+    assert abs(sdnp.sum(sdnp.asarray(x)) - exact) / exact < 1e-15  # a running sum would be ~1e-14
+    c = x + 1j * x[::-1]
+    got = sdnp.sum(sdnp.asarray(c))
+    assert abs(got.real - exact) / exact < 1e-15 and abs(got.imag - exact) / exact < 1e-15
