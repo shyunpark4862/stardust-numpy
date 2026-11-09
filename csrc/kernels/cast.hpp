@@ -9,6 +9,8 @@
 #include "core/iter.hpp"
 
 #include <array>
+#include <cstring>
+#include <type_traits>
 
 namespace sd {
 
@@ -16,6 +18,12 @@ namespace sd {
 template <typename From, typename To>
 void cast_loop(std::byte* const* args, std::int64_t n, const std::int64_t* strides, void*) {
     if (strides[0] == sizeof(From) && strides[1] == sizeof(To)) {  // contiguous (M7.2)
+        if constexpr (std::is_same_v<From, To>) {
+            // A plain copy: memcpy uses the widest loads/stores the CPU has
+            // and is tuned per chip by the OS (M7.4).
+            std::memcpy(args[1], args[0], static_cast<size_t>(n) * sizeof(To));
+            return;
+        }
         const From* src = reinterpret_cast<const From*>(args[0]);
         To* dst = reinterpret_cast<To*>(args[1]);
         for (std::int64_t i = 0; i < n; ++i) dst[i] = cast_value<To>(src[i]);
