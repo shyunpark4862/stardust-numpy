@@ -1,7 +1,8 @@
 // Python entry point of the native core (`stardust_numpy._core`).
-//
-// M0 only proves that the toolchain works end to end: nanobind binding,
-// the target CPU features, and linking against Accelerate.
+
+#include "bind/ndarray_bind.hpp"
+#include "bind/pyutil.hpp"
+#include "ops/creation.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -43,5 +44,13 @@ nb::dict build_info() {
 
 NB_MODULE(_core, m) {
     m.doc() = "stardust-numpy native core";
+    // nanobind reports objects still alive when its module is torn down. A
+    // user's global dict holding sdnp.float64 at interpreter exit (finalization
+    // order is not ours to control) triggers it without any real leak, so the
+    // check is off; tests/test_m1_ndarray.py measures refcounts directly instead.
+    nb::set_leak_warnings(false);
+    sd::register_dtypes(m);  // first: other bindings use the dtype objects
+    sd::bind_ndarray(m);
+    sd::bind_creation(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
 }

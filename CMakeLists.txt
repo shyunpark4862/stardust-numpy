@@ -14,13 +14,23 @@ execute_process(
 find_package(nanobind CONFIG REQUIRED)
 
 nanobind_add_module(_core NB_STATIC
+  csrc/core/buffer.cpp
+  csrc/core/convert.cpp
+  csrc/core/ndarray.cpp
+  csrc/ops/asarray.cpp
+  csrc/ops/creation.cpp
+  csrc/bind/pyutil.cpp
+  csrc/bind/ndarray_bind.cpp
   csrc/bind/module.cpp)
 
 target_include_directories(_core PRIVATE csrc)
 
 # The only target is this Mac (Apple M4 Pro): -mcpu=native resolves to apple-m4.
 # -ffast-math is deliberately absent (DESIGN.md §2.4): it assumes no NaN/inf.
-target_compile_options(_core PRIVATE -mcpu=native -Wall -Wextra -Wpedantic)
+# -ffp-contract=off: clang would otherwise fuse `a + b*c` into one FMA (one
+# rounding instead of two), silently changing results versus the source text
+# and versus numpy. Kernels that want FMA ask for it explicitly.
+target_compile_options(_core PRIVATE -mcpu=native -ffp-contract=off -Wall -Wextra -Wpedantic)
 
 # Accelerate: new LAPACK interface with 64-bit integers (DESIGN.md §2.5).
 target_compile_definitions(_core PRIVATE ACCELERATE_NEW_LAPACK ACCELERATE_LAPACK_ILP64)
