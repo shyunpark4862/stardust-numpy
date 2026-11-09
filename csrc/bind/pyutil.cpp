@@ -49,6 +49,38 @@ std::int64_t parse_int(nb::handle o, const char* what) {
     return v;
 }
 
+int normalize_axis(std::int64_t axis, int ndim) {
+    if (axis < -ndim || axis >= ndim)
+        throw nb::value_error(("axis " + std::to_string(axis) + " is out of bounds for an array of dimension " +
+                               std::to_string(ndim)).c_str());
+    return static_cast<int>(axis < 0 ? axis + ndim : axis);
+}
+
+std::vector<int> parse_axes(nb::handle o, int ndim) {
+    std::vector<int> axes;
+    if (PyTuple_Check(o.ptr())) {
+        for (nb::handle item : nb::borrow<nb::tuple>(o)) axes.push_back(normalize_axis(parse_int(item, "axis"), ndim));
+    } else {
+        axes.push_back(normalize_axis(parse_int(o, "axis"), ndim));
+    }
+    for (size_t i = 0; i < axes.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (axes[i] == axes[j]) throw nb::value_error("repeated axis");
+    return axes;
+}
+
+NDArray& require_ndarray(nb::handle o, const char* what) {
+    if (!is_ndarray(o)) throw nb::type_error((std::string(what) + " must be an sdnp.ndarray").c_str());
+    return as_ndarray(o);
+}
+
+NDArray view_of(nb::handle x) {
+    const NDArray& a = as_ndarray(x);
+    NDArray v = a;
+    v.base = a.base.is_valid() ? a.base : nb::borrow(x);
+    return v;
+}
+
 std::vector<std::int64_t> parse_shape(nb::handle o) {
     if (PyLong_Check(o.ptr()) && !PyBool_Check(o.ptr())) return {parse_int(o, "shape")};
     if (!PyTuple_Check(o.ptr())) throw nb::type_error("shape must be an int or a tuple of ints");

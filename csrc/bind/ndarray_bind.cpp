@@ -6,8 +6,8 @@
 #include "bind/pyutil.hpp"
 #include "core/convert.hpp"
 #include "ops/copy.hpp"
-
-#include <cstring>
+#include "ops/indexing.hpp"
+#include "ops/shape.hpp"
 
 namespace sd {
 
@@ -51,19 +51,8 @@ int getbuffer(PyObject* self, Py_buffer* view, int flags) {
 
 PyType_Slot ndarray_slots[] = {{Py_bf_getbuffer, reinterpret_cast<void*>(getbuffer)}, {0, nullptr}};
 
-template <typename T>
-T load(const std::byte* p) {
-    T v;
-    std::memcpy(&v, p, sizeof(T));
-    return v;
-}
-
-nb::object element(const NDArray& a, const std::byte* p) {
-    return visit_dtype(a.dtype, [&]<typename T>(std::type_identity<T>) { return to_python(load<T>(p)); });
-}
-
 nb::object tolist(const NDArray& a, int depth, const std::byte* p) {
-    if (depth == a.ndim) return element(a, p);
+    if (depth == a.ndim) return load_python(a.dtype, p);
     nb::list out;
     for (std::int64_t i = 0; i < a.shape[depth]; ++i) out.append(tolist(a, depth + 1, p + i * a.strides[depth]));
     return out;
@@ -73,7 +62,7 @@ nb::object tolist(const NDArray& a, int depth, const std::byte* p) {
 // last `edge` items with an Ellipsis between them. Lets repr show a huge
 // array without materialising it as Python objects.
 nb::object summary(const NDArray& a, int depth, const std::byte* p, std::int64_t edge) {
-    if (depth == a.ndim) return element(a, p);
+    if (depth == a.ndim) return load_python(a.dtype, p);
     nb::list out;
     const std::int64_t n = a.shape[depth];
     auto add = [&](std::int64_t i) { out.append(summary(a, depth + 1, p + i * a.strides[depth], edge)); };
@@ -93,6 +82,12 @@ nb::tuple to_tuple(std::span<const std::int64_t> v) {
     return nb::tuple(l);
 }
 
+// What iter(x) returns: walks axis 0, yielding x[0], x[1], ...
+struct ArrayIterator {
+    nb::object array;
+    std::int64_t next = 0, stop = 0;
+};
+
 nb::object format_call(const char* fn, nb::handle self) {
     return nb::module_::import_("stardust_numpy._format").attr(fn)(self);
 }
@@ -109,10 +104,23 @@ void bind_ndarray(nb::module_& m) {
         .def_prop_ro("itemsize", [](const NDArray& a) { return a.itemsize(); })
         .def_prop_ro("nbytes", [](const NDArray& a) { return a.nbytes(); })
         .def_prop_ro("base", [](const NDArray& a) { return a.base.is_valid() ? a.base : nb::none(); })
+        .def_prop_ro("T", &transpose_2d)
+        .def_prop_ro("mT", &matrix_transpose)
         .def("tolist", [](const NDArray& a) { return tolist(a, 0, a.data); })
         .def("astype", [](nb::handle self, nb::handle dtype, nb::handle copy) { return astype(self, dtype, copy); },
              nb::arg(), nb::kw_only(), nb::arg("copy").none() = true)
         .def("copy", [](const NDArray& a) { return wrap(cast_copy(a, a.dtype)); })
+        .def("reshape", nb::overload_cast<nb::handle, nb::handle, nb::handle>(&reshape), nb::arg(), nb::kw_only(),
+             nb::arg("copy").none() = nb::none())
+        // .none(): x[None] is newaxis, and nanobind rejects None by default.
+        .def("__getitem__", &getitem, nb::arg().none())
+        .def("__setitem__", &setitem, nb::arg().none(), nb::arg().none())
+        .def("__len__", [](const NDArray& a) { return a.shape[0]; })
+        .def("__iter__", [](nb::handle self) { return ArrayIterator{nb::borrow(self), 0, as_ndarray(self).shape[0]}; })
+        // Without this, `v in x` would quietly fall back to iterating x.
+        .def("__contains__", [](const NDArray&, nb::handle) -> bool {
+            throw nb::type_error("`in` is not supported for arrays; compare with == and use any()");
+        })
         .def("_summary", [](const NDArray& a, std::int64_t edge) { return summary(a, 0, a.data, edge); })
         .def("_flags", [](const NDArray& a) {
             nb::dict d;
@@ -137,6 +145,13 @@ void bind_ndarray(nb::module_& m) {
         .def("__index__", [](const NDArray&) -> int { throw nb::type_error("an array cannot be used as an index"); });
     // Arrays are mutable containers: unhashable, like lists.
     cls.attr("__hash__") = nb::none();
+
+    nb::class_<ArrayIterator>(m, "_ArrayIterator")
+        .def("__iter__", [](nb::handle self) { return nb::borrow(self); })
+        .def("__next__", [](ArrayIterator& it) {
+            if (it.next >= it.stop) throw nb::stop_iteration();
+            return item_along_axis0(it.array, it.next++);
+        });
 }
 
 }  // namespace sd

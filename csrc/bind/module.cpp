@@ -4,6 +4,7 @@
 #include "bind/pyutil.hpp"
 #include "ops/copy.hpp"
 #include "ops/creation.hpp"
+#include "ops/shape.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -54,5 +55,6 @@ NB_MODULE(_core, m) {
     sd::bind_ndarray(m);
     sd::bind_creation(m);
     sd::bind_copy(m);
+    sd::bind_shape(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
 }

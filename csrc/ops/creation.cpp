@@ -32,11 +32,6 @@ DType require_scalar(nb::handle o, const char* what) {
     throw nb::type_error((std::string(what) + " must be a Python bool, int, float or complex").c_str());
 }
 
-const NDArray& require_ndarray(nb::handle o) {
-    if (!is_ndarray(o)) throw nb::type_error("x must be an sdnp.ndarray");
-    return as_ndarray(o);
-}
-
 }  // namespace
 
 nb::object zeros(nb::handle shape, nb::handle dtype) {

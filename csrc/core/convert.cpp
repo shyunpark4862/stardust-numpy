@@ -1,5 +1,6 @@
 #include "core/convert.hpp"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -79,5 +80,13 @@ nb::object to_python(bool v) { return nb::bool_(v); }
 nb::object to_python(std::int64_t v) { return nb::steal(PyLong_FromLongLong(v)); }
 nb::object to_python(double v) { return nb::steal(PyFloat_FromDouble(v)); }
 nb::object to_python(complex128 v) { return nb::steal(PyComplex_FromDoubles(v.real(), v.imag())); }
+
+nb::object load_python(DType d, const std::byte* p) {
+    return visit_dtype(d, [&]<typename T>(std::type_identity<T>) {
+        T v;
+        std::memcpy(&v, p, sizeof(T));
+        return to_python(v);
+    });
+}
 
 }  // namespace sd

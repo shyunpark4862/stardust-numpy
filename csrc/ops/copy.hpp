@@ -25,6 +25,11 @@ bool may_share_memory(const NDArray& a, const NDArray& b);
 // rule) belong to the caller.
 void assign(NDArray& dst, const NDArray& src);
 
+// assign() plus the policy checks shared by setitem, out= and in-place
+// operators: dst must be writeable (ValueError) and src's dtype must convert
+// to dst's implicitly (S6, TypeError).
+void assign_checked(NDArray& dst, const NDArray& src);
+
 // New array with src's values converted to `to`, laid out like src.
 NDArray cast_copy(const NDArray& src, DType to, IterMode mode = IterMode::Full);
 

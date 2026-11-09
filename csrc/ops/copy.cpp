@@ -66,6 +66,12 @@ void assign(NDArray& dst, const NDArray& src) {
     run_cast(src, dst, IterMode::Full);
 }
 
+void assign_checked(NDArray& dst, const NDArray& src) {
+    if (!dst.writeable) throw nb::value_error("assignment destination is read-only");
+    check_assignable(src.dtype, dst.dtype);
+    assign(dst, src);
+}
+
 NDArray cast_copy(const NDArray& src, DType to, IterMode mode) {
     check_castable(src.dtype, to);
     NDArray dst = new_array_like(src, to);
@@ -74,9 +80,8 @@ NDArray cast_copy(const NDArray& src, DType to, IterMode mode) {
 }
 
 nb::object astype(nb::handle x, nb::handle dtype_obj, nb::handle copy_obj) {
-    if (!is_ndarray(x)) throw nb::type_error("x must be an sdnp.ndarray");
+    const NDArray& a = require_ndarray(x);
     if (dtype_obj.is_none()) throw nb::type_error("astype requires a dtype");
-    const NDArray& a = as_ndarray(x);
     const DType to = *parse_dtype(dtype_obj);
     const std::optional<bool> copy = parse_copy(copy_obj);
     if (to == a.dtype && copy != true) return nb::borrow(x);
@@ -91,11 +96,6 @@ IterMode parse_mode(const std::string& s) {
     if (s == "reorder") return IterMode::Reorder;
     if (s == "full") return IterMode::Full;
     throw nb::value_error("mode must be 'naive', 'reorder' or 'full'");
-}
-
-const NDArray& require_ndarray(nb::handle o, const char* what) {
-    if (!is_ndarray(o)) throw nb::type_error((std::string(what) + " must be an sdnp.ndarray").c_str());
-    return as_ndarray(o);
 }
 
 // Private, for tests and the explainer: the iteration plan after
@@ -128,11 +128,7 @@ nb::dict iter_plan(nb::list arrays, const std::string& mode) {
 
 // Private: dst[...] = src with the setitem rules (writeable, S6, overlap).
 void copyto(nb::handle dst_obj, nb::handle src_obj) {
-    NDArray& dst = const_cast<NDArray&>(require_ndarray(dst_obj, "dst"));
-    const NDArray& src = require_ndarray(src_obj, "src");
-    if (!dst.writeable) throw nb::value_error("assignment destination is read-only");
-    check_assignable(src.dtype, dst.dtype);
-    assign(dst, src);
+    assign_checked(require_ndarray(dst_obj, "dst"), require_ndarray(src_obj, "src"));
 }
 
 }  // namespace

@@ -38,6 +38,12 @@ void NDArray::update_flags() {
     }
 }
 
+std::string shape_str(std::span<const std::int64_t> shape) {
+    std::string out = "(";
+    for (size_t i = 0; i < shape.size(); ++i) out += (i ? ", " : "") + std::to_string(shape[i]);
+    return out + (shape.size() == 1 ? ",)" : ")");
+}
+
 std::int64_t checked_size(std::span<const std::int64_t> shape, DType dtype) {
     if (shape.empty())
         throw nb::value_error("0-dimensional arrays are not supported (stardust-numpy has no 0-d arrays)");

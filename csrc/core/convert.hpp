@@ -12,6 +12,7 @@
 #include <nanobind/nanobind.h>
 
 #include <cmath>
+#include <cstddef>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -75,5 +76,8 @@ nb::object to_python(bool v);
 nb::object to_python(std::int64_t v);
 nb::object to_python(double v);
 nb::object to_python(complex128 v);
+
+// Reads the element of dtype `d` stored at `p` (any alignment) as a Python scalar.
+nb::object load_python(DType d, const std::byte* p);
 
 }  // namespace sd

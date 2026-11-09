@@ -68,6 +68,11 @@ astype(x, dtype, /, *, copy=True)
 concat(arrays, /, *, axis=0)
 stack(arrays, /, *, axis=0)
 ```
+- `broadcast_to`, `broadcast_arrays`의 결과는 쓰기 금지 뷰다.
+  - `broadcast_arrays`는 tuple을 반환한다 (M3에서 결정).
+- `concat`, `stack`의 `arrays`는 `sdnp.ndarray`의 list 또는 tuple만 받는다 (M3에서 결정).
+  - 다른 객체가 섞이면 `TypeError`다. 필요하면 먼저 `asarray`로 변환한다.
+  - 결과 dtype은 승격 규칙을 따른다.
 
 ## 4. 인덱싱
 - **기본 인덱스**: `int`, `slice`, `...`, `newaxis`. 결과는 뷰다.
@@ -79,6 +84,9 @@ stack(arrays, /, *, axis=0)
 - **인덱스 범위**: 범위 밖 인덱스는 `IndexError`다. 음수 인덱스는 허용한다.
 - **대입**: `x[idx] = value`
   - `value`는 브로드캐스팅된다.
+    - 브로드캐스팅은 엄격하다. `value`는 선택된 영역의 shape으로 `broadcast_to`될 수 있어야 한다 (M3에서 결정).
+    - numpy처럼 `value`의 앞쪽 길이-1 축을 떼어내지 않는다. 예: shape `(3,)` 자리에 `(1, 3)`은 에러다.
+    - 원소 하나를 고르는 인덱스에는 Python 스칼라만 대입할 수 있다.
   - 하향 캐스팅은 에러다 (S6과 같은 규칙).
 
 ## 5. 원소별 함수 (ufunc)
@@ -109,6 +117,9 @@ where(condition, x1, x2, /)
 ```
 - ufunc 객체는 없다. `add.reduce` 같은 메서드도 없다.
 - `abs`에 complex를 넣으면 float64를 반환한다.
+- complex가 아닌 입력에 대한 `real`, `imag` (M3에서 결정, numpy와 같다)
+  - `real`은 `x` 자신을 반환한다.
+  - `imag`는 같은 dtype의 0 배열을 새로 만들어 반환한다. 이 배열은 쓰기 금지다.
 - `divide`는 정수 입력도 float64로 계산한다.
 - **시프트 양**은 부호 없는 수로 해석한다.
   - 시프트 양이 64 이상이면(음수도 여기에 포함된다) 모든 비트가 밀려난다.

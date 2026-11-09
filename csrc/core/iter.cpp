@@ -6,16 +6,6 @@
 
 namespace sd {
 
-namespace {
-
-std::string shape_str(std::span<const std::int64_t> s) {
-    std::string out = "(";
-    for (size_t i = 0; i < s.size(); ++i) out += (i ? ", " : "") + std::to_string(s[i]);
-    return out + (s.size() == 1 ? ",)" : ")");
-}
-
-}  // namespace
-
 std::vector<std::int64_t> broadcast_shapes(std::span<const std::span<const std::int64_t>> shapes) {
     size_t ndim = 0;
     for (auto s : shapes) ndim = std::max(ndim, s.size());

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 
 namespace sd {
@@ -51,6 +52,9 @@ struct NDArray {
     // Recomputes c_contiguous / f_contiguous from shape and strides.
     void update_flags();
 };
+
+// "(2, 3)", "(4,)": shapes in error messages, spelled like Python tuples.
+std::string shape_str(std::span<const std::int64_t> shape);
 
 // Validates a requested shape (0 < ndim <= kMaxNdim, no negative extents, no
 // overflow of the byte size) and returns the element count.

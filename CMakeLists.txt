@@ -21,6 +21,8 @@ nanobind_add_module(_core NB_STATIC
   csrc/ops/asarray.cpp
   csrc/ops/copy.cpp
   csrc/ops/creation.cpp
+  csrc/ops/indexing.cpp
+  csrc/ops/shape.cpp
   csrc/bind/pyutil.cpp
   csrc/bind/ndarray_bind.cpp
   csrc/bind/module.cpp)
