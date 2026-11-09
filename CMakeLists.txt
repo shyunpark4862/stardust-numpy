@@ -13,7 +13,10 @@ execute_process(
   OUTPUT_VARIABLE nanobind_ROOT)
 find_package(nanobind CONFIG REQUIRED)
 
-nanobind_add_module(_core NB_STATIC
+# NOMINSIZE: nanobind compiles extensions with -Os by default (small
+# binaries), which comes after -O3 on the command line and wins. -Os keeps
+# loops small: little unrolling, little vectorization. Measured in M7.1.
+nanobind_add_module(_core NB_STATIC NOMINSIZE
   csrc/core/buffer.cpp
   csrc/core/convert.cpp
   csrc/core/iter.cpp
