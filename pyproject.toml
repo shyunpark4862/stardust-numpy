@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=1.1", "nanobind>=3.1"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "stardust-numpy"
+version = "0.0.1"
+description = "An educational rebuild of a NumPy subset in C++"
+requires-python = ">=3.15"
+
+[project.optional-dependencies]
+test = ["pytest", "hypothesis", "numpy"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+wheel.packages = ["src/stardust_numpy"]
+# Editable installs rebuild the C++ core on import when sources changed.
+editable.rebuild = true
+editable.verbose = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
