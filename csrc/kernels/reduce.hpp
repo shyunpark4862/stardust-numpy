@@ -179,6 +179,32 @@ double neon_fold(const double* x, std::int64_t n, double acc) {
     return acc;
 }
 
+// int64 max/min: NEON has no 64-bit integer max/min instruction, so each
+// step is a compare and a select, ~5 cycles of latency. The plain loop was
+// one dependency chain (1.6x slower than numpy, measured after M10); four
+// registers still left it latency-bound (no change, measured), eight
+// independent registers (16 lanes) keep enough steps in flight.
+template <bool Max>
+std::int64_t neon_fold_int(const std::int64_t* x, std::int64_t n, std::int64_t acc) {
+    constexpr int kRegs = 8;
+    std::int64_t i = 0;
+    if (n >= 2 * kRegs) {
+        int64x2_t v[kRegs];
+        for (int j = 0; j < kRegs; ++j) v[j] = vld1q_s64(x + 2 * j);
+        auto pick = [](int64x2_t a, int64x2_t b) {
+            return Max ? vbslq_s64(vcgtq_s64(a, b), a, b) : vbslq_s64(vcgtq_s64(a, b), b, a);
+        };
+        for (i = 2 * kRegs; i + 2 * kRegs <= n; i += 2 * kRegs)
+            for (int j = 0; j < kRegs; ++j) v[j] = pick(v[j], vld1q_s64(x + i + 2 * j));
+        for (int w = kRegs / 2; w >= 1; w /= 2)
+            for (int j = 0; j < w; ++j) v[j] = pick(v[j], v[j + w]);
+        for (const std::int64_t lane : {vgetq_lane_s64(v[0], 0), vgetq_lane_s64(v[0], 1)})
+            acc = Max ? std::max(acc, lane) : std::min(acc, lane);
+    }
+    for (; i < n; ++i) acc = Max ? std::max(acc, x[i]) : std::min(acc, x[i]);
+    return acc;
+}
+
 // args: x, out (read and written)
 template <typename Op, typename T>
 void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void*) {
@@ -240,6 +266,13 @@ void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
                              ops::is_float<T>) {
             if (s[0] == sizeof(T)) acc = neon_fold<std::is_same_v<Op, ops::Maximum>>(reinterpret_cast<const T*>(x), n, acc);
             else for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, at(i));
+        } else if constexpr ((std::is_same_v<Op, ops::Maximum> || std::is_same_v<Op, ops::Minimum>) &&
+                             ops::is_int<T>) {
+            if (s[0] == sizeof(T)) {
+                acc = neon_fold_int<std::is_same_v<Op, ops::Maximum>>(reinterpret_cast<const T*>(x), n, acc);
+            } else {
+                for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, at(i));
+            }
         } else if (s[0] == sizeof(T)) {
             const T* xp = reinterpret_cast<const T*>(x);  // indexed: integer folds vectorize
             for (std::int64_t i = 0; i < n; ++i) acc = Op::f(acc, xp[i]);

@@ -325,3 +325,15 @@ def test_any_all_stop_early_but_stay_right(where):
         assert np.array_equal(np.asarray(sdnp.any(sdnp.asarray(z.reshape(400, 250)), axis=1)), z.reshape(400, 250).any(axis=1))
     assert sdnp.any(sdnp.asarray(np.zeros(5000, bool))) is False and sdnp.all(sdnp.asarray(o | True)) is True
     assert sdnp.any(sdnp.asarray(np.where(z, 2.5, 0.0))) is True  # non-bool input: through the cast
+
+
+@pytest.mark.parametrize("n", [1, 15, 16, 17, 31, 32, 33, 1000])
+def test_int_min_max_vector_fold_finds_every_position(n):
+    # The NEON fold keeps 16 lanes; the extreme may sit in any lane or the tail.
+    for pos in sorted({0, min(1, n - 1), n // 2, n - 1, min(16, n - 1)}):
+        x = np.arange(n, dtype=np.int64) * 7 - 3 * n
+        x[pos] = INT_MAX
+        assert sdnp.max(sdnp.asarray(x)) == INT_MAX
+        x[pos] = INT_MIN
+        assert sdnp.min(sdnp.asarray(x)) == INT_MIN
+        assert sdnp.max(sdnp.asarray(x)) == x.max()
