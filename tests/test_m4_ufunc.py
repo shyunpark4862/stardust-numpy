@@ -429,3 +429,17 @@ def test_clip():
         sdnp.clip(sdnp.asarray([1j]), min=0)
     with pytest.raises(TypeError):
         sdnp.clip(x, 0, 1)  # bounds are keyword-only
+
+
+def test_clip_and_scalar_maximum_vector_paths_keep_the_rules():
+    # Long contiguous arrays take the NEON paths: NaN and signed zeros must
+    # come out exactly as minimum(maximum(x, lo), hi) element by element.
+    specials = [math.nan, -0.0, 0.0, 1.0, -1.0, math.inf, -math.inf, 0.5]
+    x = np.array(specials * 50)
+    for lo in specials:
+        for hi in (0.0, -0.0, 0.7, math.nan, math.inf):
+            got = sdnp.clip(sdnp.asarray(x), min=lo, max=hi)
+            ref = [sdnp.minimum(sdnp.maximum(v, lo), hi) for v in specials]  # one element at a time
+            assert_same(got, np.array(ref * 50))
+        assert_same(sdnp.maximum(sdnp.asarray(x), lo), np.maximum(x, lo))
+        assert_same(sdnp.minimum(lo, sdnp.asarray(x)), np.minimum(lo, x))

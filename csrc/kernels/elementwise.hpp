@@ -69,13 +69,21 @@ void binary_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
             return;
         }
         if (s[0] == sizeof(T) && s[1] == 0) {  // array op scalar (x + 1.0)
-            const T bv = *b;
-            for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(a[i], bv);
+            if constexpr (requires { neon_binary<Op, T>::run_scalar_b; }) {
+                neon_binary<Op, T>::run_scalar_b(a, b, o, n);
+            } else {
+                const T bv = *b;
+                for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(a[i], bv);
+            }
             return;
         }
         if (s[0] == 0 && s[1] == sizeof(T)) {  // scalar op array (1.0 - x)
-            const T av = *a;
-            for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(av, b[i]);
+            if constexpr (requires { neon_binary<Op, T>::run_scalar_a; }) {
+                neon_binary<Op, T>::run_scalar_a(a, b, o, n);
+            } else {
+                const T av = *a;
+                for (std::int64_t i = 0; i < n; ++i) o[i] = Op::f(av, b[i]);
+            }
             return;
         }
     }
@@ -101,6 +109,21 @@ void where_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, v
 // and signed-zero rules as maximum/minimum. args: x, lo, hi, out
 template <typename T>
 void clip_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void*) {
+    constexpr std::int64_t t = sizeof(T);
+    const bool bounds_ok = (s[1] == 0 || s[1] == t) && (s[2] == 0 || s[2] == t);
+    if (s[0] == t && s[3] == t && bounds_ok) {  // contiguous x and out; each bound contiguous or a scalar
+        const T* xp = reinterpret_cast<const T*>(args[0]);
+        const T* lo = reinterpret_cast<const T*>(args[1]);
+        const T* hi = reinterpret_cast<const T*>(args[2]);
+        T* op = reinterpret_cast<T*>(args[3]);
+        if constexpr (ops::is_float<T>) {
+            neon_clip(xp, lo, s[1] / t, hi, s[2] / t, op, n);  // FMAX then FMIN: the same rules (M10+)
+        } else {
+            const std::int64_t sl = s[1] / t, sh = s[2] / t;
+            for (std::int64_t i = 0; i < n; ++i) op[i] = ops::Minimum::f(ops::Maximum::f(xp[i], lo[i * sl]), hi[i * sh]);
+        }
+        return;
+    }
     const std::byte* x = args[0];
     const std::byte* lo = args[1];
     const std::byte* hi = args[2];

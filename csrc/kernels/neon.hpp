@@ -26,31 +26,67 @@ struct neon_binary {
 // instruction -- NaN propagates and -0 < +0 -- which is exactly fmax_nan.
 // The scalar version needs three branches per element, which the compiler
 // vectorizes into extra compares and selects (M7.2 measured it slower).
+namespace detail {
+
+// o = op(a, b) with FMAX/FMIN; a stride of 0 means "a broadcast scalar".
+template <bool Max>
+void fminmax(const double* a, std::int64_t sa, const double* b, std::int64_t sb, double* o, std::int64_t n) {
+    auto op = [](float64x2_t x, float64x2_t y) { return Max ? vmaxq_f64(x, y) : vminq_f64(x, y); };
+    auto load = [](const double* p, std::int64_t s, std::int64_t i) { return s ? vld1q_f64(p + i) : vld1q_dup_f64(p); };
+    std::int64_t i = 0;
+    for (; i + 4 <= n; i += 4) {  // two registers per iteration: more loads in flight
+        vst1q_f64(o + i, op(load(a, sa, i), load(b, sb, i)));
+        vst1q_f64(o + i + 2, op(load(a, sa, i + 2), load(b, sb, i + 2)));
+    }
+    for (; i < n; ++i) o[i] = Max ? ops::fmax_nan(a[i * sa], b[i * sb]) : ops::fmin_nan(a[i * sa], b[i * sb]);
+}
+
+}  // namespace detail
+
 template <>
 struct neon_binary<ops::Maximum, double> {
     static constexpr bool available = true;
-    static void run(const double* a, const double* b, double* o, std::int64_t n) {
-        std::int64_t i = 0;
-        for (; i + 4 <= n; i += 4) {  // two registers per iteration: more loads in flight
-            vst1q_f64(o + i, vmaxq_f64(vld1q_f64(a + i), vld1q_f64(b + i)));
-            vst1q_f64(o + i + 2, vmaxq_f64(vld1q_f64(a + i + 2), vld1q_f64(b + i + 2)));
-        }
-        for (; i < n; ++i) o[i] = ops::fmax_nan(a[i], b[i]);
+    static void run(const double* a, const double* b, double* o, std::int64_t n) { detail::fminmax<true>(a, 1, b, 1, o, n); }
+    // One operand a broadcast scalar (maximum(x, 0.0), clip with one bound).
+    static void run_scalar_b(const double* a, const double* b, double* o, std::int64_t n) {
+        detail::fminmax<true>(a, 1, b, 0, o, n);
+    }
+    static void run_scalar_a(const double* a, const double* b, double* o, std::int64_t n) {
+        detail::fminmax<true>(a, 0, b, 1, o, n);
     }
 };
 
 template <>
 struct neon_binary<ops::Minimum, double> {
     static constexpr bool available = true;
-    static void run(const double* a, const double* b, double* o, std::int64_t n) {
-        std::int64_t i = 0;
-        for (; i + 4 <= n; i += 4) {
-            vst1q_f64(o + i, vminq_f64(vld1q_f64(a + i), vld1q_f64(b + i)));
-            vst1q_f64(o + i + 2, vminq_f64(vld1q_f64(a + i + 2), vld1q_f64(b + i + 2)));
-        }
-        for (; i < n; ++i) o[i] = ops::fmin_nan(a[i], b[i]);
+    static void run(const double* a, const double* b, double* o, std::int64_t n) { detail::fminmax<false>(a, 1, b, 1, o, n); }
+    static void run_scalar_b(const double* a, const double* b, double* o, std::int64_t n) {
+        detail::fminmax<false>(a, 1, b, 0, o, n);
+    }
+    static void run_scalar_a(const double* a, const double* b, double* o, std::int64_t n) {
+        detail::fminmax<false>(a, 0, b, 1, o, n);
     }
 };
+
+// clip = minimum(maximum(x, lo), hi) in one pass; lo/hi strides 0 or 1 (in elements).
+inline void neon_clip(const double* x, const double* lo, std::int64_t slo, const double* hi, std::int64_t shi, double* o,
+                      std::int64_t n) {
+    std::int64_t i = 0;
+    if (slo == 0 && shi == 0) {  // the usual clip(x, min=a, max=b): bounds splatted once
+        const float64x2_t l = vld1q_dup_f64(lo), h = vld1q_dup_f64(hi);
+        for (; i + 4 <= n; i += 4) {
+            vst1q_f64(o + i, vminq_f64(vmaxq_f64(vld1q_f64(x + i), l), h));
+            vst1q_f64(o + i + 2, vminq_f64(vmaxq_f64(vld1q_f64(x + i + 2), l), h));
+        }
+    } else {
+        for (; i + 2 <= n; i += 2) {
+            const float64x2_t l = slo ? vld1q_f64(lo + i) : vld1q_dup_f64(lo);
+            const float64x2_t h = shi ? vld1q_f64(hi + i) : vld1q_dup_f64(hi);
+            vst1q_f64(o + i, vminq_f64(vmaxq_f64(vld1q_f64(x + i), l), h));
+        }
+    }
+    for (; i < n; ++i) o[i] = ops::fmin_nan(ops::fmax_nan(x[i], lo[i * slo]), hi[i * shi]);
+}
 
 // complex multiply with FCMLA (the FCMA extension): two fused multiply-adds
 // per complex number, each covering both lanes.
