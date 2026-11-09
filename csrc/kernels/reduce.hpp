@@ -146,6 +146,51 @@ complex128 pairwise_sum_complex_mt(std::int64_t n, const Get& get) {
         [](complex128 a, complex128 b) { return complex128{a.real() + b.real(), a.imag() + b.imag()}; });
 }
 
+// ---- float and complex products in fixed blocks (M10+) --------------------
+// A product folded left to right is one chain of multiplies, 4 cycles each
+// (prod of 1M float64: 0.78 ms, as numpy). Instead a run is cut into pieces
+// of kLeaf elements; within a piece, eight accumulators take every eighth
+// element and are combined as ((a0*a1)*(a2*a3))*((a4*a5)*(a6*a7)); the pieces
+// are then multiplied left to right. The structure depends on n only, the
+// pieces may run in parallel, and the bits are the same for any thread count
+// -- but not numpy's: the order of the multiplies changed (user decision
+// 2026-11-10). It can also over- or underflow at different points than a
+// left-to-right product of the same numbers.
+
+template <typename T, typename Get>
+T product_piece(std::int64_t b, std::int64_t m, const Get& get) {
+    if (m < 8) {
+        if (m == 0) return T(1);
+        T r = get(b);
+        for (std::int64_t i = 1; i < m; ++i) r = ops::Multiply::f(r, get(b + i));
+        return r;
+    }
+    T a[8];
+    for (int j = 0; j < 8; ++j) a[j] = get(b + j);
+    std::int64_t i = 8;
+    for (; i + 8 <= m; i += 8)
+        for (int j = 0; j < 8; ++j) a[j] = ops::Multiply::f(a[j], get(b + i + j));
+    for (int j = 0; i < m; ++i, ++j) a[j] = ops::Multiply::f(a[j], get(b + i));
+    for (int w = 1; w < 8; w *= 2)
+        for (int j = 0; j < 8; j += 2 * w) a[j] = ops::Multiply::f(a[j], a[j + w]);
+    return a[0];
+}
+
+template <typename T, typename Get>
+T product_mt(std::int64_t n, const Get& get) {
+    const std::int64_t pieces = std::max<std::int64_t>((n + kLeaf - 1) / kLeaf, 1);
+    auto piece = [&](std::int64_t t) { return product_piece<T>(t * kLeaf, std::min(kLeaf, n - t * kLeaf), get); };
+    T r = piece(0);
+    if (n < parallel::kThreshold || !parallel::available()) {
+        for (std::int64_t t = 1; t < pieces; ++t) r = ops::Multiply::f(r, piece(t));
+        return r;
+    }
+    auto part = std::make_unique_for_overwrite<T[]>(static_cast<size_t>(pieces));
+    parallel::parallel_for(pieces - 1, [&](std::int64_t t) { part[t + 1] = piece(t + 1); });
+    for (std::int64_t t = 1; t < pieces; ++t) r = ops::Multiply::f(r, part[t]);
+    return r;
+}
+
 // Folds that do not depend on the order at all -- wrapping integer + and *,
 // max/min, and/or -- are cut into fixed pieces, folded in parallel, and the
 // piece results folded in order.
@@ -262,6 +307,13 @@ void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
         } else if constexpr (std::is_same_v<Op, ops::Add> && ops::is_cplx<T>) {
             const complex128 p = pairwise_sum_complex_mt(n, at);
             acc = {acc.real() + p.real(), acc.imag() + p.imag()};
+        } else if constexpr (std::is_same_v<Op, ops::Multiply> && (ops::is_float<T> || ops::is_cplx<T>)) {
+            if (s[0] == sizeof(T)) {
+                const T* xp = reinterpret_cast<const T*>(x);
+                acc = Op::f(acc, product_mt<T>(n, [xp](std::int64_t i) { return xp[i]; }));
+            } else {
+                acc = Op::f(acc, product_mt<T>(n, at));
+            }
         } else if constexpr ((std::is_same_v<Op, ops::Maximum> || std::is_same_v<Op, ops::Minimum>) &&
                              ops::is_float<T>) {
             if (s[0] == sizeof(T)) acc = neon_fold<std::is_same_v<Op, ops::Maximum>>(reinterpret_cast<const T*>(x), n, acc);
