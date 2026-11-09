@@ -1,5 +1,7 @@
 #include "core/iter.hpp"
 
+#include "parallel/pool.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <string>
@@ -128,8 +130,53 @@ NdIter::NdIter(std::span<const std::int64_t> shape, std::span<const IterOperand>
     }
 }
 
-void NdIter::run(Loop kernel, void* ctx) const {
+void NdIter::run(Loop kernel, void* ctx, Split split, std::int64_t weight) const {
     if (empty_) return;
+    if (split != Split::None && parallel::available()) {
+        std::int64_t work = weight;
+        for (int d = 0; d < ndim_; ++d) work *= shape_[d];
+        const int axis = work >= parallel::kThreshold ? split_axis(split) : -1;
+        if (axis >= 0) {
+            // Cut `axis` into pieces of about kTaskWork elements each. The cut
+            // depends on the shape only, never on the thread count.
+            const std::int64_t extent = shape_[axis];
+            const std::int64_t per_index = std::max<std::int64_t>(work / extent, 1);
+            std::int64_t chunk = std::max<std::int64_t>(parallel::kTaskWork / per_index, 1);
+            // Cutting the innermost axis shortens every kernel call: keep the
+            // pieces long enough to stream. M8 measured sum(m, axis=0) of a
+            // 3000x3000 array: 10-element pieces made it 2.7x slower than one
+            // thread; 256, 1024, 4096 gave 1.50, 0.91, 1.11 ms (one thread 1.05).
+            if (axis == ndim_ - 1 && ndim_ > 1) chunk = std::max<std::int64_t>(chunk, kMinInnerPiece);
+            const std::int64_t ntasks = (extent + chunk - 1) / chunk;
+            if (ntasks > 1) {
+                parallel::parallel_for(ntasks, [&](std::int64_t t) {
+                    NdIter piece = *this;
+                    const std::int64_t begin = t * chunk;
+                    piece.shape_[axis] = std::min(extent, begin + chunk) - begin;
+                    for (int k = 0; k < nop_; ++k) piece.data_[k] += begin * strides_[k][axis];
+                    piece.run_serial(kernel, ctx);
+                });
+                return;
+            }
+        }
+    }
+    run_serial(kernel, ctx);
+}
+
+// The outermost axis long enough to give every thread several pieces, else
+// the longest one; for a reduction, only among the axes the output really
+// spans.
+int NdIter::split_axis(Split split) const {
+    int best = -1;
+    for (int d = 0; d < ndim_; ++d) {
+        if (split == Split::Reduction && strides_[nop_ - 1][d] == 0) continue;
+        if (shape_[d] >= 16) return d;
+        if (shape_[d] >= 2 && (best < 0 || shape_[d] > shape_[best])) best = d;
+    }
+    return best;
+}
+
+void NdIter::run_serial(Loop kernel, void* ctx) const {
     const int last = ndim_ - 1;
     std::array<std::byte*, kMaxOperands> p = data_;
     std::array<std::int64_t, kMaxOperands> inner{};

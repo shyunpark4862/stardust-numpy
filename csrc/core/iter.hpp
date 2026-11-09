@@ -27,6 +27,9 @@ namespace sd {
 
 inline constexpr int kMaxOperands = 4;  // e.g. where(cond, x1, x2) -> out
 
+// The shortest piece of the innermost axis a parallel run hands out (M8).
+inline constexpr std::int64_t kMinInnerPiece = 1024;
+
 // The signature every kernel ("inner loop") has: process n elements; operand
 // k starts at args[k] and advances strides[k] bytes per element. As in numpy,
 // inputs come first and outputs last.
@@ -43,6 +46,16 @@ inline IterOperand operand(const NDArray& a) { return {a.data, a.shape_span(), a
 // Naive and Reorder exist only so the effect of each step can be measured
 // (bench/m2_iterator.py); production code always uses Full.
 enum class IterMode { Naive, Reorder, Full };
+
+// How run() may split the work across threads (M8). Results never depend on
+// it -- only which splits are safe does:
+//   Elementwise  every element is computed on its own: any axis may be cut
+//   Reduction    the last operand is the output, broadcast (stride 0) along
+//                the reduced axes; only axes where it has a real stride may
+//                be cut, so each output element still folds its inputs in
+//                exactly the serial order, on one thread
+//   None         never split
+enum class Split { None, Elementwise, Reduction };
 
 // The broadcast shape of several shapes (numpy rules: align right; extents
 // must match or be 1). Raises ValueError when they are incompatible.
@@ -61,10 +74,17 @@ public:
     std::int64_t extent(int d) const { return shape_[d]; }
     std::int64_t stride(int op, int d) const { return strides_[op][d]; }
 
-    // Calls kernel(args, n, strides, ctx) once per innermost run.
-    void run(Loop kernel, void* ctx = nullptr) const;
+    // Calls kernel(args, n, strides, ctx) once per innermost run. With enough
+    // work, the runs are spread over the thread pool (see Split); the kernel
+    // and ctx must then be safe to call from several threads at once.
+    // `weight` is the work per element, for kernels that do more than one
+    // element's worth per call position (a lane kernel processes a whole lane).
+    void run(Loop kernel, void* ctx = nullptr, Split split = Split::Elementwise, std::int64_t weight = 1) const;
 
 private:
+    void run_serial(Loop kernel, void* ctx) const;
+    int split_axis(Split split) const;  // -1: no axis may be split
+
     int nop_ = 0;
     int ndim_ = 0;
     bool empty_ = false;

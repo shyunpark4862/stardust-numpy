@@ -31,12 +31,10 @@ struct BufferedLoop {
     int nop = 0;  // all operands
     std::array<Loop, kMaxOperands> cast{};          // input k -> loop dtype, or null: used in place
     std::array<std::int64_t, kMaxOperands> item{};  // loop-dtype itemsize of input k
-    std::array<std::unique_ptr<std::byte[]>, kMaxOperands> buf;
 
     void add_cast(int k, Loop c, std::int64_t itemsize) {
         cast[k] = c;
         item[k] = itemsize;
-        buf[k] = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(kBufferElements * itemsize));
     }
     bool needed() const {
         return std::any_of(cast.begin(), cast.begin() + nin, [](Loop c) { return c != nullptr; });
@@ -44,6 +42,15 @@ struct BufferedLoop {
 };
 
 // The kernel; ctx is the BufferedLoop.
+// Per-thread scratch: the ctx is shared by every thread running the loop (M8),
+// so the buffers cannot live in it. Room for every input at the widest dtype.
+inline std::byte* scratch(int k) {
+    static constexpr std::int64_t kSlot = kBufferElements * 16;  // complex128
+    thread_local std::unique_ptr<std::byte[]> mem =
+        std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(kSlot * kMaxOperands));
+    return mem.get() + k * kSlot;
+}
+
 inline void buffered_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
     const BufferedLoop& b = *static_cast<const BufferedLoop*>(ctx);
     std::array<std::byte*, kMaxOperands> p;
@@ -52,10 +59,11 @@ inline void buffered_loop(std::byte* const* args, std::int64_t n, const std::int
         const std::int64_t m = std::min(kBufferElements, n - off);
         for (int k = 0; k < b.nop; ++k) {
             if (k < b.nin && b.cast[k]) {
-                std::byte* io[] = {args[k] + off * s[k], b.buf[k].get()};
+                std::byte* buf = scratch(k);
+                std::byte* io[] = {args[k] + off * s[k], buf};
                 const std::int64_t cs[] = {s[k], b.item[k]};
                 b.cast[k](io, m, cs, nullptr);  // chunk -> buffer, in the loop dtype
-                p[k] = b.buf[k].get();
+                p[k] = buf;
                 st[k] = b.item[k];
             } else {
                 p[k] = args[k] + off * s[k];

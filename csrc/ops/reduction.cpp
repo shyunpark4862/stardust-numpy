@@ -7,6 +7,7 @@
 #include "kernels/reduce.hpp"
 #include "ops/copy.hpp"
 #include "ops/lanes.hpp"
+#include "parallel/pool.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -87,7 +88,7 @@ void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
     const IterOperand ops[] = {operand(x), operand(out)};
     const NdIter it(x.shape_span(), ops);
     if (x.dtype == out.dtype) {
-        it.run(loop);
+        it.run(loop, nullptr, Split::Reduction);
         return;
     }
     BufferedLoop buffered;
@@ -95,7 +96,7 @@ void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
     buffered.nin = 1;
     buffered.nop = 2;
     buffered.add_cast(0, cast_kernel(x.dtype, out.dtype), out.itemsize());
-    it.run(&buffered_loop, &buffered);
+    it.run(&buffered_loop, &buffered, Split::Reduction);
 }
 
 NDArray as_dtype(const NDArray& x, DType d) { return x.dtype == d ? x : cast_copy(x, d); }
@@ -147,6 +148,35 @@ void arg_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
     *reinterpret_cast<std::int64_t*>(o) = (*static_cast<const ArgFn*>(c.user))(x, c.n, c.x_stride);
 }
 
+// argmin/argmax of one long contiguous lane on several threads: each piece
+// finds its own answer, then the pieces are compared in order -- the first
+// piece with a NaN wins, otherwise the best value, earlier piece on a tie --
+// so the answer is the serial one exactly.
+std::int64_t arg_whole(const std::byte* p, std::int64_t n, std::int64_t item, DType dtype, ArgFn lane, bool max) {
+    if (n < parallel::kThreshold || !parallel::available()) return lane(p, n, item);
+    const std::int64_t pieces = (n + parallel::kTaskWork - 1) / parallel::kTaskWork;
+    std::vector<std::int64_t> at(pieces);
+    parallel::parallel_for(pieces, [&](std::int64_t t) {
+        const std::int64_t begin = t * parallel::kTaskWork;
+        at[t] = begin + lane(p + begin * item, std::min(parallel::kTaskWork, n - begin), item);
+    });
+    return visit_dtype(dtype, [&]<typename T>(std::type_identity<T>) -> std::int64_t {
+        if constexpr (ops::is_cplx<T>) {
+            return at[0];  // unreachable: complex is rejected before
+        } else {
+            std::int64_t best = at[0];
+            for (std::int64_t t = 0; t < pieces; ++t) {
+                const T v = load_as<T>(p + at[t] * item);
+                if constexpr (ops::is_float<T>) {
+                    if (std::isnan(v)) return at[t];  // the first NaN overall
+                }
+                if (t > 0 && (max ? v > load_as<T>(p + best * item) : v < load_as<T>(p + best * item))) best = at[t];
+            }
+            return best;
+        }
+    });
+}
+
 template <bool Max>
 nb::object arg_extreme_impl(nb::handle x_obj, nb::handle axis_obj, bool keepdims) {
     const char* name = Max ? "argmax" : "argmin";
@@ -169,7 +199,7 @@ nb::object arg_extreme_impl(nb::handle x_obj, nb::handle axis_obj, bool keepdims
             flat = new_array(x.dtype, x.shape_span());
             assign(flat, x);
         }
-        const std::int64_t at = lane_fn(flat.data, x.size(), x.itemsize());
+        const std::int64_t at = arg_whole(flat.data, x.size(), x.itemsize(), x.dtype, lane_fn, Max);
         if (!keepdims) return to_python(at);
         Axes all;
         for (int d = 0; d < x.ndim; ++d) all.reduced[d] = true;
@@ -272,7 +302,7 @@ NDArray var_keepdims(nb::handle x_obj, nb::handle axis_obj, nb::handle correctio
     visit_dtype(m.dtype, [&]<typename T>(std::type_identity<T>) {
         if constexpr (ops::is_float<T> || ops::is_cplx<T>) {
             const IterOperand ops[] = {operand(xin), operand(m), operand(out)};
-            NdIter(xin.shape_span(), ops).run(&sq_dev_loop<T>);
+            NdIter(xin.shape_span(), ops).run(&sq_dev_loop<T>, nullptr, Split::Reduction);
         }
     });
     const double dof = static_cast<double>(ax.per_output) - correction;

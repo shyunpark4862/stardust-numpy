@@ -9,6 +9,7 @@
 #include "ops/shape.hpp"
 #include "ops/sort.hpp"
 #include "ops/ufunc.hpp"
+#include "parallel/pool.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -65,4 +66,11 @@ NB_MODULE(_core, m) {
     sd::bind_sort(m);
     sd::bind_matmul(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
+    // API.md §9. Results never depend on the thread count (DESIGN.md §2.4).
+    m.def("set_num_threads", [](nb::handle n) {
+        const std::int64_t v = sd::parse_int(n, "n");
+        if (v < 1 || v > 1024) throw nb::value_error("the number of threads must be between 1 and 1024");
+        sd::parallel::set_num_threads(static_cast<int>(v));
+    }, nb::arg());
+    m.def("get_num_threads", &sd::parallel::num_threads);
 }

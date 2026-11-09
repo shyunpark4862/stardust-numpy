@@ -17,6 +17,7 @@
 #include "core/convert.hpp"
 #include "kernels/elementwise.hpp"
 #include "ops/copy.hpp"
+#include "parallel/pool.hpp"
 
 #include <Accelerate/Accelerate.h>
 
@@ -24,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sd {
@@ -204,13 +206,9 @@ nb::object matmul(nb::handle x1, nb::handle x2) {
     const std::byte* pb = b.data;
     const std::int64_t a_rs = a_vec ? 0 : a.strides[a.ndim - 2], a_cs = a.strides[a.ndim - 1];
     const std::int64_t b_rs = b_vec ? b.strides[0] : b.strides[b.ndim - 2], b_cs = b_vec ? 0 : b.strides[b.ndim - 1];
-    for (std::int64_t t = 0; t < count; ++t) {  // batches one after another (ARCHITECTURE.md §6.4)
-        const Mat am{pa, m, k, a_rs, a_cs}, bm{pb, k, n, b_rs, b_cs};
-        std::byte* pc = out.data + t * m * n * out.itemsize();
-        visit_dtype(d, [&]<typename T>(std::type_identity<T>) {
-            if constexpr (ops::is_int<T>) int_matmul(am, bm, reinterpret_cast<T*>(pc));
-            else if constexpr (ops::is_float<T> || ops::is_cplx<T>) blas_matmul(am, bm, reinterpret_cast<T*>(pc));
-        });
+    std::vector<std::pair<const std::byte*, const std::byte*>> starts(count);  // (a, b) of each batch
+    for (std::int64_t t = 0; t < count; ++t) {
+        starts[t] = {pa, pb};
         for (int dd = bd - 1; dd >= 0; --dd) {  // C-order odometer over the batch axes
             pa += batch_stride(a, a_batch, dd);
             pb += batch_stride(b, b_batch, dd);
@@ -218,6 +216,28 @@ nb::object matmul(nb::handle x1, nb::handle x2) {
             pa -= batch_stride(a, a_batch, dd) * batch[dd];
             pb -= batch_stride(b, b_batch, dd) * batch[dd];
             idx[dd] = 0;
+        }
+    }
+    const std::int64_t item = out.itemsize();
+    if (d == DType::Int64) {
+        // Our own loop: tasks of whole output rows, about kTaskWork multiply-adds
+        // each (rows of c are independent, so the bits do not depend on the cut).
+        const std::int64_t rows = std::max<std::int64_t>(1, parallel::kTaskWork / std::max<std::int64_t>(k * n, 1));
+        const std::int64_t per_batch = (m + rows - 1) / rows;
+        parallel::parallel_for(count * per_batch, [&](std::int64_t task) {
+            const std::int64_t t = task / per_batch, r0 = (task % per_batch) * rows, r1 = std::min(m, r0 + rows);
+            const Mat am{starts[t].first + r0 * a_rs, r1 - r0, k, a_rs, a_cs}, bm{starts[t].second, k, n, b_rs, b_cs};
+            int_matmul(am, bm, reinterpret_cast<std::int64_t*>(out.data + (t * m + r0) * n * item));
+        });
+    } else {
+        // BLAS: Accelerate threads internally; batches go one after another
+        // so the two never compete (ARCHITECTURE.md §6.4, DESIGN.md §2.7).
+        for (std::int64_t t = 0; t < count; ++t) {
+            const Mat am{starts[t].first, m, k, a_rs, a_cs}, bm{starts[t].second, k, n, b_rs, b_cs};
+            std::byte* pc = out.data + t * m * n * item;
+            visit_dtype(d, [&]<typename T>(std::type_identity<T>) {
+                if constexpr (ops::is_float<T> || ops::is_cplx<T>) blas_matmul(am, bm, reinterpret_cast<T*>(pc));
+            });
         }
     }
 

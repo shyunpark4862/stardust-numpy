@@ -7,6 +7,8 @@
 // the start of one lane, which `fn` then processes from index 0 to n-1.
 #pragma once
 
+#include <algorithm>
+
 #include "core/iter.hpp"
 #include "core/ndarray.hpp"
 
@@ -55,7 +57,8 @@ inline void run_lanes(const NDArray& x, NDArray& out, int axis, LaneCtx& ctx) {
     const detail::Outer xo = detail::drop_axis(x, axis);
     const detail::Outer oo = detail::drop_axis(out, axis);
     const IterOperand ops[] = {xo.op(x.data), oo.op(out.data)};
-    NdIter(ops[0].shape, ops).run(&detail::lane_loop, &ctx);
+    // Lanes are independent; each call does a whole lane of work.
+    NdIter(ops[0].shape, ops).run(&detail::lane_loop, &ctx, Split::Elementwise, std::max<std::int64_t>(ctx.n, 1));
 }
 
 }  // namespace sd

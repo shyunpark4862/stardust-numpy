@@ -55,6 +55,7 @@ from ._core import (
     floor_divide,
     full,
     full_like,
+    get_num_threads,
     greater,
     greater_equal,
     imag,
@@ -96,6 +97,7 @@ from ._core import (
     remainder,
     reshape,
     round,
+    set_num_threads,
     sign,
     sin,
     sinh,
@@ -156,4 +158,6 @@ __all__ = [
     "cumulative_sum", "cumulative_prod",
     # sorting, sets, linear algebra
     "sort", "argsort", "unique_values", "unique_counts", "unique_inverse", "unique_all", "matmul",
+    # execution
+    "set_num_threads", "get_num_threads",
 ]

@@ -16,11 +16,15 @@
 #pragma once
 
 #include "kernels/elementwise.hpp"
+#include "parallel/pool.hpp"
 
 #include <arm_neon.h>
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace sd {
 
@@ -89,6 +93,68 @@ complex128 pairwise_sum_complex(std::int64_t begin, std::int64_t n, const Get& g
     return {a.real() + b.real(), a.imag() + b.imag()};
 }
 
+// ---- the same sums on many threads, with the same bits (M8) ----------------
+// pairwise_sum's recursion tree depends on n only. Its subtrees of at most
+// kLeaf elements are independent: they are summed in parallel, then combined
+// along the very same tree. The result is bit-for-bit the serial one (and
+// numpy's), for any thread count.
+
+inline constexpr std::int64_t kLeaf = parallel::kTaskWork;
+
+template <typename Split, typename SumLeaf, typename Add>
+auto pairwise_parallel(std::int64_t n, std::int64_t leaf, Split split, SumLeaf sum_leaf, Add add) {
+    std::vector<std::pair<std::int64_t, std::int64_t>> leaves;  // (begin, n), left to right
+    auto collect = [&](auto&& self, std::int64_t b, std::int64_t m) -> void {
+        if (m <= leaf) {
+            leaves.emplace_back(b, m);
+            return;
+        }
+        const std::int64_t m2 = split(m);
+        self(self, b, m2);
+        self(self, b + m2, m - m2);
+    };
+    collect(collect, 0, n);
+    using R = decltype(sum_leaf(0, 0));
+    std::vector<R> part(leaves.size());
+    parallel::parallel_for(static_cast<std::int64_t>(leaves.size()),
+                           [&](std::int64_t t) { part[t] = sum_leaf(leaves[t].first, leaves[t].second); });
+    size_t next = 0;
+    auto combine = [&](auto&& self, std::int64_t m) -> R {
+        if (m <= leaf) return part[next++];
+        const std::int64_t m2 = split(m);
+        const R left = self(self, m2);
+        return add(left, self(self, m - m2));
+    };
+    return combine(combine, n);
+}
+
+template <typename Get>
+double pairwise_sum_mt(std::int64_t n, const Get& get) {
+    if (n < parallel::kThreshold || !parallel::available()) return pairwise_sum(0, n, get);
+    return pairwise_parallel(
+        n, kLeaf, [](std::int64_t m) { return m / 2 - (m / 2) % 8; },
+        [&](std::int64_t b, std::int64_t m) { return pairwise_sum(b, m, get); },
+        [](double a, double b) { return a + b; });
+}
+
+template <typename Get>
+complex128 pairwise_sum_complex_mt(std::int64_t n, const Get& get) {
+    if (n < parallel::kThreshold || !parallel::available()) return pairwise_sum_complex(0, n, get);
+    return pairwise_parallel(
+        n, kLeaf / 2, [](std::int64_t m) { return (m - m % 8) / 2; },
+        [&](std::int64_t b, std::int64_t m) { return pairwise_sum_complex(b, m, get); },
+        [](complex128 a, complex128 b) { return complex128{a.real() + b.real(), a.imag() + b.imag()}; });
+}
+
+// Folds that do not depend on the order at all -- wrapping integer + and *,
+// max/min, and/or -- are cut into fixed pieces, folded in parallel, and the
+// piece results folded in order.
+template <typename Op, typename T>
+inline constexpr bool order_free = std::is_same_v<Op, ops::Maximum> || std::is_same_v<Op, ops::Minimum> ||
+                                   std::is_same_v<Op, ops::LogicalOr> || std::is_same_v<Op, ops::LogicalAnd> ||
+                                   ((std::is_same_v<Op, ops::Add> || std::is_same_v<Op, ops::Multiply>) &&
+                                    (ops::is_int<T> || ops::is_bool<T>));
+
 // ---- max/min of a contiguous run with NEON ---------------------------------
 
 template <bool Max>
@@ -121,10 +187,29 @@ void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
     if (s[1] == 0) {  // inner-axis: fold the run into one value
         T acc = load_as<T>(o);
         auto at = [&](std::int64_t i) { return load_as<T>(x + i * s[0]); };
+        if constexpr (order_free<Op, T>) {
+            if (n >= parallel::kThreshold && parallel::available()) {
+                // A long run with one output (a full reduction): pieces in parallel.
+                const std::int64_t pieces = (n + parallel::kTaskWork - 1) / parallel::kTaskWork;
+                auto part = std::make_unique_for_overwrite<T[]>(static_cast<size_t>(pieces));  // not vector<bool>
+                parallel::parallel_for(pieces, [&](std::int64_t t) {
+                    const std::int64_t begin = t * parallel::kTaskWork;
+                    const std::int64_t m = std::min(parallel::kTaskWork, n - begin);
+                    const std::byte* first = x + begin * s[0];
+                    part[t] = load_as<T>(first);  // each piece folds onto its own first element
+                    std::byte* piece[] = {const_cast<std::byte*>(first + s[0]), reinterpret_cast<std::byte*>(&part[t])};
+                    const std::int64_t piece_strides[] = {s[0], 0};
+                    reduce_loop<Op, T>(piece, m - 1, piece_strides, nullptr);  // serial: we are inside a task
+                });
+                for (std::int64_t t = 0; t < pieces; ++t) acc = Op::f(acc, part[t]);
+                *reinterpret_cast<T*>(o) = acc;
+                return;
+            }
+        }
         if constexpr (std::is_same_v<Op, ops::Add> && ops::is_float<T>) {
-            acc = acc + pairwise_sum(0, n, at);
+            acc = acc + pairwise_sum_mt(n, at);
         } else if constexpr (std::is_same_v<Op, ops::Add> && ops::is_cplx<T>) {
-            const complex128 p = pairwise_sum_complex(0, n, at);
+            const complex128 p = pairwise_sum_complex_mt(n, at);
             acc = {acc.real() + p.real(), acc.imag() + p.imag()};
         } else if constexpr ((std::is_same_v<Op, ops::Maximum> || std::is_same_v<Op, ops::Minimum>) &&
                              ops::is_float<T>) {
@@ -163,7 +248,7 @@ void sq_dev_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
         else return d * d;
     };
     if (s[2] == 0) {  // inner-axis: pairwise, like sum
-        *reinterpret_cast<double*>(o) += pairwise_sum(0, n, sq);
+        *reinterpret_cast<double*>(o) += pairwise_sum_mt(n, sq);
         return;
     }
     for (std::int64_t i = 0; i < n; ++i) *reinterpret_cast<double*>(o + i * s[2]) += sq(i);

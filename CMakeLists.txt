@@ -30,6 +30,7 @@ nanobind_add_module(_core NB_STATIC NOMINSIZE
   csrc/ops/shape.cpp
   csrc/ops/sort.cpp
   csrc/ops/ufunc.cpp
+  csrc/parallel/pool.cpp
   csrc/bind/pyutil.cpp
   csrc/bind/ndarray_bind.cpp
   csrc/bind/module.cpp)
