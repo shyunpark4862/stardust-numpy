@@ -4,6 +4,7 @@
 #include "core/convert.hpp"
 #include "ops/copy.hpp"
 #include "kernels/cast.hpp"
+#include "kernels/elementwise.hpp"
 #include "ops/creation.hpp"
 
 #include <array>
@@ -108,10 +109,18 @@ private:
 // the consecutive run [first, first + indices.size()). Each of those axes gets
 // one int64 index array; they broadcast together to the "index shape" B, and
 // the result is  view.shape[:first] + B + view.shape[first + count:].
+//
+// A single boolean mask as the only advanced item is kept as the mask itself
+// (`mask`, covering axes [first, first + mask.ndim)): it is applied by
+// walking it once and copying where it is true ("compress", ARCHITECTURE.md
+// §6.1) instead of first turning it into coordinate arrays (M7.8).
 struct Plan {
     NDArray view;  // ndim may be 0 internally (all ints): never escapes
     int first = 0;
-    std::vector<NDArray> indices;  // empty: basic indexing only
+    std::vector<NDArray> indices;  // empty: basic indexing only (unless mask_only)
+    bool mask_only = false;
+    NDArray mask;
+    bool advanced() const { return mask_only || !indices.empty(); }
 };
 
 // The positions of the true elements of a mask, one int64 array per mask axis
@@ -177,6 +186,9 @@ Plan make_plan(nb::handle x, nb::handle key) {
                   "advanced indices (arrays, and ints next to them) separated by a slice, newaxis or ellipsis are "
                   "not supported; index in two steps, e.g. x[0][:, idx]");
 
+    int n_advanced = 0;
+    for (const Item& it : items) n_advanced += advanced(it);
+
     Plan plan;
     NDArray& v = plan.view;
     v = view_of(x);
@@ -195,9 +207,11 @@ Plan make_plan(nb::handle x, nb::handle key) {
         ++src;
     };
 
+    bool started = false;
     for (const Item& it : items) {
         if (advanced(it)) {
-            if (plan.indices.empty()) plan.first = v.ndim;
+            if (!started) plan.first = v.ndim;
+            started = true;
             if (it.kind == Kind::Int) {
                 const std::int64_t one[] = {1};
                 NDArray s = new_array(DType::Int64, one);
@@ -216,7 +230,12 @@ Plan make_plan(nb::handle x, nb::handle key) {
                                                     std::to_string(a.shape[src + d]) +
                                                     " but size of corresponding boolean axis is " +
                                                     std::to_string(m.shape[d]));
-                for (NDArray& pos : mask_positions(m)) plan.indices.push_back(std::move(pos));
+                if (n_advanced == 1) {
+                    plan.mask_only = true;
+                    plan.mask = m;
+                } else {
+                    for (NDArray& pos : mask_positions(m)) plan.indices.push_back(std::move(pos));
+                }
                 for (int d = 0; d < m.ndim; ++d) keep_axis();
             }
             continue;
@@ -264,11 +283,6 @@ Plan make_plan(nb::handle x, nb::handle key) {
 // For every point of the index shape B (C order): the byte offset into the
 // plan's view, and -- when `w_strides` is given -- the byte offset into a
 // second array laid out over the result shape (the value of a scatter).
-struct Offsets {
-    std::vector<std::int64_t> shape;  // B
-    std::vector<std::int64_t> view, other;
-};
-
 // B: the index arrays broadcast together.
 std::vector<std::int64_t> index_shape(const Plan& plan) {
     std::vector<std::span<const std::int64_t>> shapes;
@@ -279,61 +293,79 @@ std::vector<std::int64_t> index_shape(const Plan& plan) {
     return b;
 }
 
-Offsets index_offsets(const Plan& plan, const std::int64_t* w_strides) {
+// Walks the index shape B in C order, turning each point into the byte offset
+// of its block in the plan's view (bounds-checked; negative indices wrap) and,
+// when `w_strides` is given, into the offset in a second array laid out over
+// the result shape (the value of a scatter). Offsets are produced a chunk at a
+// time into small buffers and handed to emit(view_off, w_off, n, first_b)
+// right away, so they never make a full pass through memory (M7.8).
+template <typename Emit>
+void for_each_offset_chunk(const Plan& plan, std::span<const std::int64_t> bshape, const std::int64_t* w_strides,
+                           Emit&& emit) {
+    constexpr std::int64_t kChunk = 1024;
     const NDArray& v = plan.view;
     const int k = static_cast<int>(plan.indices.size());
-    Offsets off;
-    off.shape = index_shape(plan);
-    const int bd = static_cast<int>(off.shape.size());
+    const int bd = static_cast<int>(bshape.size());
     std::int64_t nb = 1;
-    for (std::int64_t e : off.shape) nb *= e;
-    if (nb == 0) return off;
+    for (std::int64_t e : bshape) nb *= e;
+    if (nb == 0) return;
 
     // Each index array broadcast to B: stride 0 on stretched axes.
-    std::vector<std::array<std::int64_t, kMaxNdim>> st(k);
+    std::array<std::array<std::int64_t, kMaxNdim>, kMaxNdim> st;
+    std::array<const std::byte*, kMaxNdim> ptr;
     for (int j = 0; j < k; ++j) {
         const NDArray& ix = plan.indices[j];
         const int offset = bd - ix.ndim;
         for (int d = 0; d < bd; ++d)
             st[j][d] = d < offset || ix.shape[d - offset] == 1 ? 0 : ix.strides[d - offset];
+        ptr[j] = ix.data;
     }
-    std::vector<const std::byte*> ptr(k);
-    for (int j = 0; j < k; ++j) ptr[j] = plan.indices[j].data;
     std::array<std::int64_t, kMaxNdim> bidx{};
-    off.view.resize(nb);
-    if (w_strides) off.other.resize(nb);
-    for (std::int64_t b = 0; b < nb; ++b) {
-        std::int64_t o = 0;
-        for (int j = 0; j < k; ++j) {
-            const int axis = plan.first + j;
-            const std::int64_t n = v.shape[axis];
-            const std::int64_t raw = *reinterpret_cast<const std::int64_t*>(ptr[j]);
-            const std::int64_t i = raw < 0 ? raw + n : raw;
-            if (i < 0 || i >= n)
-                raise(PyExc_IndexError, "index " + std::to_string(raw) + " is out of bounds for axis " +
-                                            std::to_string(axis) + " with size " + std::to_string(n));
-            o += i * v.strides[axis];
+    std::array<std::int64_t, kChunk> voff, woff;
+    std::int64_t w = 0, fill = 0, chunk_start = 0;
+    // The last B axis is a tight run; the odometer only moves between runs.
+    const int last = bd - 1;
+    const std::int64_t run = bshape[last];
+    const std::int64_t w_last = w_strides ? w_strides[plan.first + last] : 0;
+    auto check = [&](std::int64_t raw, int axis) {
+        const std::int64_t n = v.shape[axis];
+        const std::int64_t i = raw < 0 ? raw + n : raw;
+        if (i < 0 || i >= n) [[unlikely]]
+            raise(PyExc_IndexError, "index " + std::to_string(raw) + " is out of bounds for axis " +
+                                        std::to_string(axis) + " with size " + std::to_string(n));
+        return i;
+    };
+    for (std::int64_t done = 0; done < nb; done += run) {
+        for (std::int64_t t = 0; t < run; ++t) {
+            std::int64_t o = 0;
+            for (int j = 0; j < k; ++j) {
+                const std::int64_t raw = *reinterpret_cast<const std::int64_t*>(ptr[j] + t * st[j][last]);
+                o += check(raw, plan.first + j) * v.strides[plan.first + j];
+            }
+            voff[fill] = o;
+            woff[fill] = w + t * w_last;
+            if (++fill == kChunk) {
+                emit(voff.data(), woff.data(), fill, chunk_start);
+                chunk_start += fill;
+                fill = 0;
+            }
         }
-        off.view[b] = o;
-        if (w_strides) {
-            std::int64_t w = 0;
-            for (int d = 0; d < bd; ++d) w += bidx[d] * w_strides[plan.first + d];
-            off.other[b] = w;
-        }
-        for (int d = bd - 1; d >= 0; --d) {  // C-order odometer over B
+        for (int d = last - 1; d >= 0; --d) {  // C-order odometer over the other B axes
             for (int j = 0; j < k; ++j) ptr[j] += st[j][d];
-            if (++bidx[d] < off.shape[d]) break;
-            for (int j = 0; j < k; ++j) ptr[j] -= st[j][d] * off.shape[d];
+            if (w_strides) w += w_strides[plan.first + d];
+            if (++bidx[d] < bshape[d]) break;
+            for (int j = 0; j < k; ++j) ptr[j] -= st[j][d] * bshape[d];
+            if (w_strides) w -= w_strides[plan.first + d] * bshape[d];
             bidx[d] = 0;
         }
     }
-    return off;
+    if (fill > 0) emit(voff.data(), woff.data(), fill, chunk_start);
 }
 
 // The result shape: view.shape[:first] + B + view.shape[first + count:].
 std::vector<std::int64_t> result_shape(const Plan& plan, std::span<const std::int64_t> b) {
     const NDArray& v = plan.view;
-    const int k = static_cast<int>(plan.indices.size());
+    const int k = plan.mask_only ? plan.mask.ndim : static_cast<int>(plan.indices.size());
     std::vector<std::int64_t> shape(v.shape.begin(), v.shape.begin() + plan.first);
     shape.insert(shape.end(), b.begin(), b.end());
     shape.insert(shape.end(), v.shape.begin() + plan.first + k, v.shape.begin() + v.ndim);
@@ -354,38 +386,90 @@ NDArray block_of(const NDArray& a, int first, int skip) {
     return b;
 }
 
-// Copies one block per index point: src block at src_off[b] -> dst block at
-// dst_off[b], converting dtype. In order, so with repeated indices in a
-// scatter the last write wins.
-void copy_blocks(const NDArray& src_block, std::span<const std::int64_t> src_off, const NDArray& dst_block,
-                 std::span<const std::int64_t> dst_off) {
+// Calls visit(copy), where copy(s, d) copies one block (`src_block`'s shape
+// and strides at s) to d (`dst_block`'s layout), converting dtype. Choosing
+// the copy once, outside the per-point loop, lets the common case -- single
+// elements of the same dtype -- be a plain typed assignment the compiler
+// inlines, instead of a call through a kernel pointer per element (M7.8).
+template <typename Visit>
+void with_block_copy(const NDArray& src_block, const NDArray& dst_block, Visit&& visit) {
+    if (src_block.ndim == 0 && src_block.dtype == dst_block.dtype) {
+        visit_dtype(src_block.dtype, [&]<typename T>(std::type_identity<T>) {
+            visit([](const std::byte* s, std::byte* d) { *reinterpret_cast<T*>(d) = load_as<T>(s); });
+        });
+        return;
+    }
     const Loop loop = cast_kernel(src_block.dtype, dst_block.dtype);
-    const std::int64_t zero[] = {0, 0};
-    for (size_t b = 0; b < src_off.size(); ++b) {
-        std::byte* s = src_block.data + src_off[b];
-        std::byte* d = dst_block.data + dst_off[b];
-        if (src_block.ndim == 0) {  // one element per index point: no iterator needed
-            std::byte* args[] = {s, d};
+    if (src_block.ndim == 0) {
+        visit([loop](const std::byte* s, std::byte* d) {
+            static constexpr std::int64_t zero[] = {0, 0};
+            std::byte* args[] = {const_cast<std::byte*>(s), d};
             loop(args, 1, zero, nullptr);
-            continue;
-        }
-        const IterOperand ops[] = {{s, src_block.shape_span(), src_block.strides_span()},
+        });
+        return;
+    }
+    visit([&](const std::byte* s, std::byte* d) {
+        const IterOperand ops[] = {{const_cast<std::byte*>(s), src_block.shape_span(), src_block.strides_span()},
                                    {d, dst_block.shape_span(), dst_block.strides_span()}};
         NdIter(dst_block.shape_span(), ops).run(loop);
-    }
+    });
+}
+
+// Walks the mask in C order and calls on_true(b, offset) for the b-th true
+// element, `offset` being its byte offset in the view (mask axes only).
+template <typename F>
+void walk_mask(const Plan& plan, F&& on_true) {
+    const NDArray& m = plan.mask;
+    const std::int64_t* vs = plan.view.strides.data() + plan.first;
+    std::array<std::int64_t, kMaxNdim> idx{};
+    std::int64_t offset = 0, b = 0;
+    for_each_element<1>(m.shape_span(), {m.data}, {m.strides.data()}, [&](std::byte* p) {
+        if (*reinterpret_cast<const bool*>(p)) on_true(b++, offset);
+        for (int d = m.ndim - 1; d >= 0; --d) {
+            offset += vs[d];
+            if (++idx[d] < m.shape[d]) break;
+            offset -= vs[d] * m.shape[d];
+            idx[d] = 0;
+        }
+    });
+}
+
+std::int64_t mask_count(const NDArray& m) {
+    std::int64_t count = 0;
+    for_each_element<1>(m.shape_span(), {m.data}, {m.strides.data()},
+                        [&](std::byte* p) { count += *reinterpret_cast<const bool*>(p); });
+    return count;
+}
+
+// x[mask]: count, allocate, then copy the selected blocks in one walk.
+nb::object gather_mask(const Plan& plan) {
+    const NDArray& v = plan.view;
+    const int k = plan.mask.ndim;
+    const std::int64_t count[] = {mask_count(plan.mask)};
+    NDArray out = new_array(v.dtype, result_shape(plan, count));
+    const std::int64_t step = out.strides[plan.first];
+    const NDArray src = block_of(v, plan.first, k), dst = block_of(out, plan.first, 1);
+    with_block_copy(src, dst, [&](auto copy) {
+        walk_mask(plan, [&](std::int64_t b, std::int64_t offset) { copy(src.data + offset, dst.data + b * step); });
+    });
+    return wrap(std::move(out));
 }
 
 nb::object gather(const Plan& plan) {
-    const Offsets off = index_offsets(plan, nullptr);
+    const std::vector<std::int64_t> bshape = index_shape(plan);
     const int k = static_cast<int>(plan.indices.size());
-    const int bd = static_cast<int>(off.shape.size());
-    NDArray out = new_array(plan.view.dtype, result_shape(plan, off.shape));
+    const int bd = static_cast<int>(bshape.size());
+    NDArray out = new_array(plan.view.dtype, result_shape(plan, bshape));
     // The B axes of the fresh C-order result are contiguous together, so
     // index point b starts b * (stride of the last B axis) bytes in.
-    std::vector<std::int64_t> dst_off(off.view.size());
     const std::int64_t step = out.strides[plan.first + bd - 1];
-    for (size_t b = 0; b < dst_off.size(); ++b) dst_off[b] = static_cast<std::int64_t>(b) * step;
-    copy_blocks(block_of(plan.view, plan.first, k), off.view, block_of(out, plan.first, bd), dst_off);
+    const NDArray src = block_of(plan.view, plan.first, k), dst = block_of(out, plan.first, bd);
+    with_block_copy(src, dst, [&](auto copy) {
+        for_each_offset_chunk(plan, bshape, nullptr, [&](const std::int64_t* voff, const std::int64_t*, std::int64_t n,
+                                                        std::int64_t b0) {
+            for (std::int64_t i = 0; i < n; ++i) copy(src.data + voff[i], dst.data + (b0 + i) * step);
+        });
+    });
     return wrap(std::move(out));
 }
 
@@ -410,7 +494,8 @@ nb::object value_array(nb::handle value, DType target) {
 
 nb::object getitem(nb::handle x, nb::handle key) {
     Plan plan = make_plan(x, key);
-    if (!plan.indices.empty()) return gather(plan);  // advanced: always a copy
+    if (plan.mask_only) return gather_mask(plan);  // advanced: always a copy
+    if (!plan.indices.empty()) return gather(plan);
     if (plan.view.ndim == 0) return load_python(plan.view.dtype, plan.view.data);
     return wrap(std::move(plan.view));
 }
@@ -426,7 +511,13 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
     if (may_share_memory(src, as_ndarray(x))) src = cast_copy(src, src.dtype);  // e.g. x[i] = x[::-1] (R3)
 
     // The value broadcast over the result shape (strict: never more axes).
-    const std::vector<std::int64_t> shape = result_shape(plan, index_shape(plan));
+    std::vector<std::int64_t> shape;
+    if (plan.mask_only) {
+        const std::int64_t count[] = {mask_count(plan.mask)};
+        shape = result_shape(plan, count);
+    } else {
+        shape = result_shape(plan, index_shape(plan));
+    }
     const int nd = static_cast<int>(shape.size());
     const int off = nd - src.ndim;
     auto fail = [&] {
@@ -444,10 +535,23 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
         else throw fail();
         w.shape[d] = shape[d];
     }
-    const Offsets offs = index_offsets(plan, w.strides.data());
+    if (plan.mask_only) {
+        const NDArray from = block_of(w, plan.first, 1), to = block_of(plan.view, plan.first, plan.mask.ndim);
+        const std::int64_t step = w.strides[plan.first];
+        with_block_copy(from, to, [&](auto copy) {
+            walk_mask(plan, [&](std::int64_t b, std::int64_t offset) { copy(from.data + b * step, to.data + offset); });
+        });
+        return;
+    }
     const int k = static_cast<int>(plan.indices.size());
-    const int bd = static_cast<int>(offs.shape.size());
-    copy_blocks(block_of(w, plan.first, bd), offs.other, block_of(plan.view, plan.first, k), offs.view);
+    const int bd = nd - (plan.view.ndim - k);
+    const NDArray from = block_of(w, plan.first, bd), to = block_of(plan.view, plan.first, k);
+    with_block_copy(from, to, [&](auto copy) {  // in order: with repeated indices the last write wins
+        for_each_offset_chunk(plan, std::span(shape).subspan(plan.first, bd), w.strides.data(),
+                              [&](const std::int64_t* voff, const std::int64_t* woff, std::int64_t n, std::int64_t) {
+                                  for (std::int64_t i = 0; i < n; ++i) copy(from.data + woff[i], to.data + voff[i]);
+                              });
+    });
 }
 
 }  // namespace
@@ -455,7 +559,7 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
 void setitem(nb::handle x, nb::handle key, nb::handle value) {
     if (!as_ndarray(x).writeable) throw nb::value_error("assignment destination is read-only");
     Plan plan = make_plan(x, key);
-    if (!plan.indices.empty()) {
+    if (plan.advanced()) {
         scatter(x, plan, value);
         return;
     }
