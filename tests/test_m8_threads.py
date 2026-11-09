@@ -125,7 +125,10 @@ def test_several_python_threads_at_once():
     sdnp.set_num_threads(10)
     rng = np.random.default_rng(2)
     data = [rng.standard_normal(400_000) for _ in range(6)]
-    want = [(float(np.sum(d)), float(np.max(d)), np.exp(d[:1000]).tolist()) for d in data]
+    sdnp.set_num_threads(1)  # the reference: computed alone, on one thread
+    want = [(sdnp.sum(sdnp.asarray(d)), sdnp.max(sdnp.asarray(d)), sdnp.exp(sdnp.asarray(d)).tolist()[:1000])
+            for d in data]
+    sdnp.set_num_threads(10)
     errors = []
 
     def work(k):

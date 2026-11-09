@@ -11,6 +11,7 @@
 #include "core/iter.hpp"
 #include "kernels/neon.hpp"
 #include "kernels/scalar_ops.hpp"
+#include "kernels/vforce.hpp"
 
 #include <array>
 #include <type_traits>
@@ -29,6 +30,10 @@ using binary_result_t = decltype(Op::f(std::declval<T>(), std::declval<T>()));
 template <typename Op, typename T>
 void unary_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void*) {
     using R = unary_result_t<Op, T>;
+    if constexpr (ops::is_float<T> && vforce_unary<Op> != nullptr) {  // M9: Accelerate vForce, any layout
+        vforce_unary_run(vforce_unary<Op>, args[0], s[0], args[1], s[1], n);
+        return;
+    }
     if (s[0] == sizeof(T) && s[1] == sizeof(R)) {
         // Contiguous: indexed pointers instead of byte strides. Same function,
         // but now the compiler sees a[i] -> o[i] and can use vector registers.
@@ -47,6 +52,10 @@ void unary_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, v
 template <typename Op, typename T>
 void binary_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void*) {
     using R = binary_result_t<Op, T>;
+    if constexpr (ops::is_float<T> && vforce_binary<Op> != nullptr) {  // M9: pow, atan2 through vForce
+        vforce_binary_run(vforce_binary<Op>, args[0], s[0], args[1], s[1], args[2], s[2], n);
+        return;
+    }
     if (s[2] == sizeof(R)) {
         const T* a = reinterpret_cast<const T*>(args[0]);
         const T* b = reinterpret_cast<const T*>(args[1]);
