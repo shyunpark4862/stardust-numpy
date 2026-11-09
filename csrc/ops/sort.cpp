@@ -4,11 +4,14 @@
 
 #include "bind/pyutil.hpp"
 #include "kernels/elementwise.hpp"
+#include "kernels/simd_sort.hpp"
 #include "kernels/sort.hpp"
 #include "ops/copy.hpp"
 #include "ops/lanes.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <type_traits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -89,6 +92,35 @@ void sort_buffer(T* a, std::int64_t n, bool stable, auto less) {
     }
 }
 
+// Values alone (sort, unique_values). The NEON sort reorders equal values,
+// so it is used only when that cannot be seen (M7.9c decision): for int64
+// equal values are identical, and for float64 too -- NaNs are already split
+// off -- except that -0.0 == +0.0. So a stable float sort takes it unless the
+// data holds zeros of both signs. stable=False takes it always.
+inline constexpr std::int64_t kSimdMin = 32;  // below this, insertion/merge sort is as fast
+
+template <typename T>
+bool zeros_of_both_signs(const T* a, std::int64_t n) {
+    bool neg = false, pos = false;
+    for (std::int64_t i = 0; i < n; ++i)
+        if (a[i] == 0) (std::signbit(a[i]) ? neg : pos) = true;
+    return neg && pos;
+}
+
+template <typename T>
+void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
+    if constexpr (ops::is_float<T> || ops::is_int<T>) {
+        bool simd = n >= kSimdMin;
+        if constexpr (ops::is_float<T>) simd = simd && (!stable || !zeros_of_both_signs(a, n));
+        if (simd) {
+            simd_sort::sort<std::conditional_t<ops::is_float<T>, simd_sort::F64, simd_sort::I64>>(a, n);
+            if (descending) std::reverse(a, a + n);  // ties are indistinguishable here
+            return;
+        }
+    }
+    sort_buffer(a, n, stable, Order<T>{descending});
+}
+
 // ------------------------------------------------------------ sort lanes
 
 struct SortCfg {
@@ -100,7 +132,7 @@ void sort_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
     const SortCfg& cfg = *static_cast<const SortCfg*>(c.user);
     auto buf = buffer<T>(c.n);
     const std::int64_t m = load_nans_last<T>(x, c.x_stride, c.n, buf.get(), [](std::int64_t, T v) { return v; });
-    sort_buffer(buf.get(), m, cfg.stable, Order<T>{cfg.descending});
+    sort_values(buf.get(), m, cfg.stable, cfg.descending);
     for (std::int64_t i = 0; i < c.n; ++i) *reinterpret_cast<T*>(o + i * c.o_stride) = buf[i];
 }
 
@@ -209,7 +241,7 @@ nb::object unique_values(nb::handle x_obj) {
         auto buf = buffer<T>(n);
         const std::int64_t m =
             load_nans_last<T>(flat.data, flat.itemsize(), n, buf.get(), [](std::int64_t, T v) { return v; });
-        sort_buffer(buf.get(), m, /*stable=*/true, Order<T>{false});
+        sort_values(buf.get(), m, /*stable=*/true, /*descending=*/false);
         std::int64_t groups = 0;  // compact in place: keep the first of every run of equal values
         for (std::int64_t i = 0; i < n; ++i)
             if (i == 0 || !same(buf[groups - 1], buf[i])) buf[groups++] = buf[i];

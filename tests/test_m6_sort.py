@@ -156,3 +156,44 @@ def test_unique_matches_numpy_on_integers(n):
     assert r.counts.tolist() == w.counts.tolist()
     assert r.indices.tolist() == w.indices.tolist()
     assert np.array_equal(np.asarray(r.inverse_indices), w.inverse_indices.reshape(n.shape))
+
+
+# ------------------------------------------------ M7: the NEON sorting path
+
+@pytest.mark.parametrize("n", [31, 32, 33, 47, 48, 64, 100, 1000, 4097])
+@pytest.mark.parametrize("kind", ["int", "float", "float-ties", "extremes"])
+def test_simd_sort_sizes_and_values(n, kind):
+    # Sizes around the 16-element blocks and the padding; values that equal the
+    # padding (inf, INT64_MAX) and many ties.
+    rng = np.random.default_rng(n)
+    v = {
+        "int": rng.integers(-50, 50, n),
+        "float": rng.standard_normal(n),
+        "float-ties": rng.integers(-3, 3, n) * 0.5 + 0.25,
+        "extremes": np.where(rng.random(n) < 0.2, 2**63 - 1, rng.integers(-(2**63), 2**63 - 1, n)),
+    }[kind]
+    if kind == "float":
+        v[rng.random(n) < 0.1] = np.inf
+        v[rng.random(n) < 0.05] = np.nan
+    for stable in (True, False):
+        assert_same(sdnp.sort(sdnp.asarray(v), stable=stable), np.sort(v, stable=True))
+        got = np.asarray(sdnp.sort(sdnp.asarray(v), descending=True, stable=stable))
+        assert np.array_equal(got[~np.isnan(got)] if got.dtype.kind == "f" else got,
+                              np.sort(v[~np.isnan(v)] if v.dtype.kind == "f" else v)[::-1])
+    assert_same(sdnp.unique_values(sdnp.asarray(v)), np.asarray(sdnp.unique_all(sdnp.asarray(v)).values))
+
+
+def test_stable_float_sort_with_both_zero_signs_keeps_order():
+    # -0.0 == +0.0: here the order of equal values is visible, so the stable
+    # sort must not take the (unstable) NEON path.
+    v = np.array([0.0, -0.0] * 40 + [1.0, -1.0] * 10)
+    got = np.asarray(sdnp.sort(sdnp.asarray(v)))
+    assert np.array_equal(got.view(np.int64), np.sort(v, stable=True).view(np.int64))
+    u = sdnp.unique_values(sdnp.asarray(v))
+    assert u.tolist() == [-1.0, 0.0, 1.0] and math.copysign(1, u.tolist()[1]) == 1  # first occurrence: +0.0
+
+
+@given(st.lists(st.integers(-(2**63), 2**63 - 1), min_size=0, max_size=300))
+def test_simd_sort_random_int64(values):
+    n = np.array(values, dtype=np.int64)
+    assert_same(sdnp.sort(sdnp.asarray(n)), np.sort(n))
