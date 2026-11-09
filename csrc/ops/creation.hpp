@@ -26,10 +26,6 @@ nb::object arange(nb::handle start, nb::handle stop, nb::handle step, nb::handle
 nb::object linspace(nb::handle start, nb::handle stop, nb::handle num, nb::handle dtype, nb::handle endpoint);
 nb::object eye(nb::handle n_rows, nb::handle n_cols, nb::handle k, nb::handle dtype);
 
-// New array (same shape, memory order of `src`) holding src's values
-// converted to `to` under the explicit-conversion rules.
-NDArray cast_copy(const NDArray& src, DType to);
-
 void bind_creation(nb::module_& m);
 
 }  // namespace sd

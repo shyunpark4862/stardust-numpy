@@ -9,6 +9,7 @@ from . import _core
 from ._core import (
     arange,
     asarray,
+    astype,
     bool,
     complex128,
     empty,
@@ -41,4 +42,6 @@ __all__ = [
     "asarray", "zeros", "ones", "empty", "full",
     "zeros_like", "ones_like", "empty_like", "full_like",
     "arange", "linspace", "eye",
+    # conversion
+    "astype",
 ]

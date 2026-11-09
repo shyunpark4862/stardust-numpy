@@ -8,6 +8,7 @@
 
 #include "bind/pyutil.hpp"
 #include "core/convert.hpp"
+#include "ops/copy.hpp"
 #include "ops/creation.hpp"
 
 #include <algorithm>
@@ -36,18 +37,6 @@ void store(std::byte* p, T v) {
 }
 
 }  // namespace
-
-NDArray cast_copy(const NDArray& src, DType to) {
-    check_castable(src.dtype, to);
-    NDArray dst = new_array_like(src, to);
-    visit_dtype(src.dtype, [&]<typename S>(std::type_identity<S>) {
-        visit_dtype(to, [&]<typename T>(std::type_identity<T>) {
-            for_each_element<2>(src.shape_span(), {src.data, dst.data}, {src.strides.data(), dst.strides.data()},
-                                [](std::byte* ps, std::byte* pd) { store(pd, cast_value<T>(load<S>(ps))); });
-        });
-    });
-    return dst;
-}
 
 // ------------------------------------------------------- nested sequences --
 

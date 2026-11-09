@@ -5,6 +5,7 @@
 
 #include "bind/pyutil.hpp"
 #include "core/convert.hpp"
+#include "ops/copy.hpp"
 
 #include <cstring>
 
@@ -109,6 +110,9 @@ void bind_ndarray(nb::module_& m) {
         .def_prop_ro("nbytes", [](const NDArray& a) { return a.nbytes(); })
         .def_prop_ro("base", [](const NDArray& a) { return a.base.is_valid() ? a.base : nb::none(); })
         .def("tolist", [](const NDArray& a) { return tolist(a, 0, a.data); })
+        .def("astype", [](nb::handle self, nb::handle dtype, nb::handle copy) { return astype(self, dtype, copy); },
+             nb::arg(), nb::kw_only(), nb::arg("copy").none() = true)
+        .def("copy", [](const NDArray& a) { return wrap(cast_copy(a, a.dtype)); })
         .def("_summary", [](const NDArray& a, std::int64_t edge) { return summary(a, 0, a.data, edge); })
         .def("_flags", [](const NDArray& a) {
             nb::dict d;

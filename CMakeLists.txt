@@ -16,8 +16,10 @@ find_package(nanobind CONFIG REQUIRED)
 nanobind_add_module(_core NB_STATIC
   csrc/core/buffer.cpp
   csrc/core/convert.cpp
+  csrc/core/iter.cpp
   csrc/core/ndarray.cpp
   csrc/ops/asarray.cpp
+  csrc/ops/copy.cpp
   csrc/ops/creation.cpp
   csrc/bind/pyutil.cpp
   csrc/bind/ndarray_bind.cpp

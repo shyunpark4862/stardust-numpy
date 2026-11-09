@@ -2,6 +2,7 @@
 
 #include "bind/ndarray_bind.hpp"
 #include "bind/pyutil.hpp"
+#include "ops/copy.hpp"
 #include "ops/creation.hpp"
 
 #include <nanobind/nanobind.h>
@@ -52,5 +53,6 @@ NB_MODULE(_core, m) {
     sd::register_dtypes(m);  // first: other bindings use the dtype objects
     sd::bind_ndarray(m);
     sd::bind_creation(m);
+    sd::bind_copy(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
 }
