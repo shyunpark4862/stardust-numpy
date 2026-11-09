@@ -312,3 +312,16 @@ def test_pairwise_sum_accuracy():
     c = x + 1j * x[::-1]
     got = sdnp.sum(sdnp.asarray(c))
     assert abs(got.real - exact) / exact < 1e-15 and abs(got.imag - exact) / exact < 1e-15
+
+
+@pytest.mark.parametrize("where", [0, 1, 4095, 4096, 4097, 99_999])
+def test_any_all_stop_early_but_stay_right(where):
+    z = np.zeros(100_000, bool)
+    z[where] = True
+    o = ~z
+    for arr in (z, z[::-1], z.reshape(400, 250), z.reshape(400, 250).T):
+        assert sdnp.any(sdnp.asarray(arr)) is True
+        assert sdnp.all(sdnp.asarray(~arr)) is False
+        assert np.array_equal(np.asarray(sdnp.any(sdnp.asarray(z.reshape(400, 250)), axis=1)), z.reshape(400, 250).any(axis=1))
+    assert sdnp.any(sdnp.asarray(np.zeros(5000, bool))) is False and sdnp.all(sdnp.asarray(o | True)) is True
+    assert sdnp.any(sdnp.asarray(np.where(z, 2.5, 0.0))) is True  # non-bool input: through the cast

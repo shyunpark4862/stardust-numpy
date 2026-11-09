@@ -187,6 +187,31 @@ void reduce_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, 
     if (s[1] == 0) {  // inner-axis: fold the run into one value
         T acc = load_as<T>(o);
         auto at = [&](std::int64_t i) { return load_as<T>(x + i * s[0]); };
+        if constexpr (ops::is_bool<T> && (std::is_same_v<Op, ops::LogicalOr> || std::is_same_v<Op, ops::LogicalAnd>)) {
+            // any/all stop as soon as the answer is known: any at the first
+            // True, all at the first False. Checked once per block of 4096,
+            // so the block itself stays a branch-free (vectorized) fold. A
+            // later run of the same output returns at once (M10+).
+            constexpr bool decided = std::is_same_v<Op, ops::LogicalOr>;
+            for (std::int64_t off = 0; off < n && acc != decided; off += 4096) {
+                const std::int64_t m = std::min<std::int64_t>(4096, n - off);
+                bool part = !decided;
+                if (s[0] == 1) {
+                    // Folded as bytes: with `bool` the compiler turned the OR
+                    // into a find-the-first-true loop, one element per branch
+                    // (0.9 ns/element, measured); on uint8_t it is a plain vector OR.
+                    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(x) + off;
+                    std::uint8_t bits = decided ? 0 : 1;
+                    for (std::int64_t i = 0; i < m; ++i) bits = decided ? (bits | p[i]) : (bits & p[i]);
+                    part = bits != 0;
+                } else {
+                    for (std::int64_t i = 0; i < m; ++i) part = Op::f(part, at(off + i));
+                }
+                acc = Op::f(acc, part);
+            }
+            *reinterpret_cast<T*>(o) = acc;
+            return;
+        }
         if constexpr (order_free<Op, T>) {
             if (n >= parallel::kThreshold && parallel::available()) {
                 // A long run with one output (a full reduction): pieces in parallel.
