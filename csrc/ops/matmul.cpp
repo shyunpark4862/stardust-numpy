@@ -160,7 +160,22 @@ void int_matmul(const Mat& a, const Mat& b, std::int64_t* c) {
         for (std::int64_t p = 0; p < k; ++p) {
             const std::int64_t aip = load_as<std::int64_t>(a.p + i * a.rs + p * a.cs);
             const std::byte* brow = b.p + p * b.rs;
-            for (std::int64_t j = 0; j < n; ++j)
+            std::int64_t j = 0;
+            if (b.cs == sizeof(std::int64_t)) {
+                // Unrolled by 4 (DESIGN.md §2.5: scalar multiplies, unrolled):
+                // four independent multiply-adds per iteration keep the
+                // multiplier busy, and a longer loop body no longer depends on
+                // where the linker happens to place it (M10: the 7-instruction
+                // version ran 1.7x slower when it straddled a 64-byte fetch block).
+                const std::int64_t* bp = reinterpret_cast<const std::int64_t*>(brow);
+                for (; j + 4 <= n; j += 4) {
+                    crow[j] = ops::wrap_add(crow[j], ops::wrap_mul(aip, bp[j]));
+                    crow[j + 1] = ops::wrap_add(crow[j + 1], ops::wrap_mul(aip, bp[j + 1]));
+                    crow[j + 2] = ops::wrap_add(crow[j + 2], ops::wrap_mul(aip, bp[j + 2]));
+                    crow[j + 3] = ops::wrap_add(crow[j + 3], ops::wrap_mul(aip, bp[j + 3]));
+                }
+            }
+            for (; j < n; ++j)
                 crow[j] = ops::wrap_add(crow[j], ops::wrap_mul(aip, load_as<std::int64_t>(brow + j * b.cs)));
         }
     }
