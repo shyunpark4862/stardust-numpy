@@ -130,44 +130,51 @@ NdIter::NdIter(std::span<const std::int64_t> shape, std::span<const IterOperand>
     }
 }
 
+NdIter::Plan NdIter::plan(Split split, std::int64_t weight) const {
+    Plan p;
+    if (empty_ || split == Split::None) return p;
+    // Work is counted in bytes of the widest operand step, capped at 8,
+    // and compared with the limits in float64 elements (x 8). A loop
+    // over bools moves an eighth of the memory per element, so it needs
+    // 8x the elements to go parallel and gets 8x the elements per task
+    // (M10+: b & b with 4096-bool tasks ran 1.2x slower on 10 threads
+    // than on one). Wider or strided steps count as 8, as before.
+    std::int64_t bytes = 0;
+    for (int k = 0; k < nop_; ++k)
+        bytes = std::max(bytes, std::min<std::int64_t>(std::abs(strides_[k][ndim_ - 1]), 8));
+    p.work = weight * (bytes ? bytes : 8);
+    for (int d = 0; d < ndim_; ++d) p.work *= shape_[d];
+    const int axis = p.work >= 8 * parallel::kThreshold ? split_axis(split) : -1;
+    if (axis < 0) return p;
+    // Cut `axis` into pieces of about kTaskWork elements' worth each.
+    const std::int64_t extent = shape_[axis];
+    const std::int64_t per_index = std::max<std::int64_t>(p.work / extent, 1);
+    std::int64_t chunk = std::max<std::int64_t>(8 * parallel::kTaskWork / per_index, 1);
+    // Cutting the innermost axis shortens every kernel call: keep the
+    // pieces long enough to stream. M8 measured sum(m, axis=0) of a
+    // 3000x3000 array: 10-element pieces made it 2.7x slower than one
+    // thread; 256, 1024, 4096 gave 1.50, 0.91, 1.11 ms (one thread 1.05).
+    if (axis == ndim_ - 1 && ndim_ > 1) chunk = std::max<std::int64_t>(chunk, kMinInnerPiece);
+    p.axis = axis;
+    p.chunk = chunk;
+    p.tasks = (extent + chunk - 1) / chunk;
+    return p;
+}
+
 void NdIter::run(Loop kernel, void* ctx, Split split, std::int64_t weight) const {
     if (empty_) return;
     if (split != Split::None && parallel::available()) {
-        // Work is counted in bytes of the widest operand step, capped at 8,
-        // and compared with the limits in float64 elements (x 8). A loop
-        // over bools moves an eighth of the memory per element, so it needs
-        // 8x the elements to go parallel and gets 8x the elements per task
-        // (M10+: b & b with 4096-bool tasks ran 1.2x slower on 10 threads
-        // than on one). Wider or strided steps count as 8, as before.
-        std::int64_t bytes = 0;
-        for (int k = 0; k < nop_; ++k)
-            bytes = std::max(bytes, std::min<std::int64_t>(std::abs(strides_[k][ndim_ - 1]), 8));
-        std::int64_t work = weight * (bytes ? bytes : 8);
-        for (int d = 0; d < ndim_; ++d) work *= shape_[d];
-        const int axis = work >= 8 * parallel::kThreshold ? split_axis(split) : -1;
-        if (axis >= 0) {
-            // Cut `axis` into pieces of about kTaskWork elements' worth each.
-            // The cut depends on the shape and dtypes only, never on the
-            // thread count.
-            const std::int64_t extent = shape_[axis];
-            const std::int64_t per_index = std::max<std::int64_t>(work / extent, 1);
-            std::int64_t chunk = std::max<std::int64_t>(8 * parallel::kTaskWork / per_index, 1);
-            // Cutting the innermost axis shortens every kernel call: keep the
-            // pieces long enough to stream. M8 measured sum(m, axis=0) of a
-            // 3000x3000 array: 10-element pieces made it 2.7x slower than one
-            // thread; 256, 1024, 4096 gave 1.50, 0.91, 1.11 ms (one thread 1.05).
-            if (axis == ndim_ - 1 && ndim_ > 1) chunk = std::max<std::int64_t>(chunk, kMinInnerPiece);
-            const std::int64_t ntasks = (extent + chunk - 1) / chunk;
-            if (ntasks > 1) {
-                parallel::parallel_for(ntasks, [&](std::int64_t t) {
-                    NdIter piece = *this;
-                    const std::int64_t begin = t * chunk;
-                    piece.shape_[axis] = std::min(extent, begin + chunk) - begin;
-                    for (int k = 0; k < nop_; ++k) piece.data_[k] += begin * strides_[k][axis];
-                    piece.run_serial(kernel, ctx);
-                });
-                return;
-            }
+        const Plan p = plan(split, weight);
+        if (p.tasks > 1) {
+            const std::int64_t extent = shape_[p.axis];
+            parallel::parallel_for(p.tasks, [&](std::int64_t t) {
+                NdIter piece = *this;
+                const std::int64_t begin = t * p.chunk;
+                piece.shape_[p.axis] = std::min(extent, begin + p.chunk) - begin;
+                for (int k = 0; k < nop_; ++k) piece.data_[k] += begin * strides_[k][p.axis];
+                piece.run_serial(kernel, ctx);
+            });
+            return;
         }
     }
     run_serial(kernel, ctx);

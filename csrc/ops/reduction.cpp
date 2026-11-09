@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -81,13 +83,11 @@ void fill(NDArray& a, T v) {
     std::fill(p, p + a.size(), v);
 }
 
-// x folded into `out` (keepdims shape, pre-filled with the starting value) by
-// `loop`, which works in out's dtype; an x of another dtype is converted
-// chunk by chunk on the way (buffered casting, M7.6).
-void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
-    const IterOperand ops[] = {operand(x), operand(out)};
-    const NdIter it(x.shape_span(), ops);
-    if (x.dtype == out.dtype) {
+// Runs a reduction iterator over (x, out): `loop` works in out's dtype; an x
+// of another dtype is converted chunk by chunk on the way (buffered casting,
+// M7.6).
+void run_fold(const NdIter& it, DType from, DType to, Loop loop) {
+    if (from == to) {
         it.run(loop, nullptr, Split::Reduction);
         return;
     }
@@ -95,8 +95,94 @@ void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
     buffered.inner = loop;
     buffered.nin = 1;
     buffered.nop = 2;
-    buffered.add_cast(0, cast_kernel(x.dtype, out.dtype), out.itemsize());
+    buffered.add_cast(0, cast_kernel(from, to), itemsize(to));
     it.run(&buffered_loop, &buffered, Split::Reduction);
+}
+
+// ------------------------------------------------ blocked reductions (M10+)
+//
+// When the reduced axes come first in memory -- sum(m, axis=0) of a C-ordered
+// matrix -- the kept axes form the innermost run, and run() cuts that into
+// pieces of at least kMinInnerPiece: often a single task, so the reduction
+// ran on one thread. Instead one reduced axis is cut into a fixed number of
+// blocks. Each block folds into its own copy of the output (holding the start
+// value) on the pool, then the copies fold into the output in block order.
+//
+// The blocks depend on the shape, layout and dtypes only, never on the thread
+// count, so the result is the same for every thread count -- but for float
+// add and multiply it is not numpy's bits: the order of the operations
+// changed (user decision 2026-11-10; DESIGN.md §2.4).
+
+constexpr std::int64_t kMaxBlocks = 16;
+// Each block costs extra passes over the output (its start-value copy and
+// its fold at the end). Measured on one thread, sum(axis=0) of (64, 2000) in
+// 8 blocks of 8 rows was 30% slower; at least 32 indices per block keeps
+// that near a tenth.
+constexpr std::int64_t kMinBlock = 32;
+
+struct Blocks {
+    int axis = -1;
+    std::int64_t size = 0, count = 0;  // count == 0: do not block
+};
+
+Blocks plan_blocks(const NDArray& x, const NDArray& out, const NdIter& it) {
+    if (out.size() <= 1) return {};  // a full reduction already splits its long runs
+    const NdIter::Plan p = it.plan(Split::Reduction);
+    if (p.tasks >= 8 || p.work < 8 * parallel::kThreshold) return {};  // run() splits well enough, or too small
+    Blocks b;
+    for (int d = 0; d < x.ndim; ++d)  // the longest reduced axis
+        if (out.shape[d] == 1 && x.shape[d] > 1 && (b.axis < 0 || x.shape[d] > x.shape[b.axis])) b.axis = d;
+    if (b.axis < 0) return {};
+    const std::int64_t extent = x.shape[b.axis];
+    const std::int64_t want = std::min({kMaxBlocks, extent / kMinBlock, p.work / (8 * parallel::kTaskWork)});
+    if (want < 2 || want <= p.tasks) return {};
+    b.size = (extent + want - 1) / want;
+    b.count = (extent + b.size - 1) / b.size;
+    return b;
+}
+
+// fold(x_block, part) folds one block of x into one partial output; combine
+// is the reduction loop in out's dtype. Every fold here has a start value
+// that the extra fold into `out` leaves alone (0 + p, 1 * p, max(lowest, p),
+// false || p, ...), so out keeps it while the partials each hold it too.
+template <typename Fold>
+void reduce_blocked(const NDArray& x, NDArray& out, const Blocks& b, Loop combine, Fold fold) {
+    const std::int64_t bytes = out.nbytes();  // dense, non-negative strides (new_array_like)
+    auto store = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(b.count * bytes));
+    // The views are made here: copying an NDArray touches Python references,
+    // which the tasks (running without the GIL) must not.
+    std::vector<NDArray> xs(b.count, x), parts(b.count, out);
+    for (std::int64_t t = 0; t < b.count; ++t) {
+        const std::int64_t begin = t * b.size;
+        xs[t].shape[b.axis] = std::min(x.shape[b.axis] - begin, b.size);
+        xs[t].data += begin * x.strides[b.axis];
+        parts[t].data = store.get() + t * bytes;
+    }
+    parallel::parallel_for(b.count, [&](std::int64_t t) {
+        std::memcpy(parts[t].data, out.data, static_cast<size_t>(bytes));
+        fold(xs[t], parts[t]);
+    });
+    NDArray all = out;
+    all.data = store.get();
+    all.shape[b.axis] = b.count;
+    all.strides[b.axis] = bytes;
+    const IterOperand ops[] = {operand(all), operand(out)};
+    NdIter(all.shape_span(), ops).run(combine, nullptr, Split::Reduction);
+}
+
+// x folded into `out` (keepdims shape, pre-filled with the starting value) by
+// `loop`, which works in out's dtype.
+void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
+    const IterOperand ops[] = {operand(x), operand(out)};
+    const NdIter it(x.shape_span(), ops);
+    if (const Blocks b = plan_blocks(x, out, it); b.count) {
+        reduce_blocked(x, out, b, loop, [&](const NDArray& xb, NDArray& part) {
+            const IterOperand block_ops[] = {operand(xb), operand(part)};
+            run_fold(NdIter(xb.shape_span(), block_ops), x.dtype, out.dtype, loop);
+        });
+        return;
+    }
+    run_fold(it, x.dtype, out.dtype, loop);
 }
 
 NDArray as_dtype(const NDArray& x, DType d) { return x.dtype == d ? x : cast_copy(x, d); }
@@ -302,7 +388,15 @@ NDArray var_keepdims(nb::handle x_obj, nb::handle axis_obj, nb::handle correctio
     visit_dtype(m.dtype, [&]<typename T>(std::type_identity<T>) {
         if constexpr (ops::is_float<T> || ops::is_cplx<T>) {
             const IterOperand ops[] = {operand(xin), operand(m), operand(out)};
-            NdIter(xin.shape_span(), ops).run(&sq_dev_loop<T>, nullptr, Split::Reduction);
+            const NdIter it(xin.shape_span(), ops);
+            if (const Blocks b = plan_blocks(xin, out, it); b.count) {
+                reduce_blocked(xin, out, b, &reduce_loop<ops::Add, double>, [&](const NDArray& xb, NDArray& part) {
+                    const IterOperand block_ops[] = {operand(xb), operand(m), operand(part)};
+                    NdIter(xb.shape_span(), block_ops).run(&sq_dev_loop<T>, nullptr, Split::Reduction);
+                });
+            } else {
+                it.run(&sq_dev_loop<T>, nullptr, Split::Reduction);
+            }
         }
     });
     const double dof = static_cast<double>(ax.per_output) - correction;

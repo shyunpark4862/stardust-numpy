@@ -81,6 +81,16 @@ public:
     // element's worth per call position (a lane kernel processes a whole lane).
     void run(Loop kernel, void* ctx = nullptr, Split split = Split::Elementwise, std::int64_t weight = 1) const;
 
+    // How run() cuts the work: `tasks` pieces of `chunk` indices along
+    // `axis` (tasks == 1: not split), and the work in bytes it counted.
+    // Depends on the shape, layout and dtypes only, never on the thread
+    // count, so callers may base decisions that change results on it.
+    struct Plan {
+        int axis = -1;
+        std::int64_t chunk = 0, tasks = 1, work = 0;
+    };
+    Plan plan(Split split, std::int64_t weight = 1) const;
+
 private:
     void run_serial(Loop kernel, void* ctx) const;
     int split_axis(Split split) const;  // -1: no axis may be split
