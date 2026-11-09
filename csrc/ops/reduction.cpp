@@ -2,6 +2,8 @@
 
 #include "bind/pyutil.hpp"
 #include "core/convert.hpp"
+#include "kernels/buffered.hpp"
+#include "kernels/cast.hpp"
 #include "kernels/reduce.hpp"
 #include "ops/copy.hpp"
 #include "ops/lanes.hpp"
@@ -78,11 +80,22 @@ void fill(NDArray& a, T v) {
     std::fill(p, p + a.size(), v);
 }
 
-// x (already in the loop dtype) folded into `out` (keepdims shape, pre-filled
-// with the starting value).
+// x folded into `out` (keepdims shape, pre-filled with the starting value) by
+// `loop`, which works in out's dtype; an x of another dtype is converted
+// chunk by chunk on the way (buffered casting, M7.6).
 void run_reduce(const NDArray& x, NDArray& out, Loop loop) {
     const IterOperand ops[] = {operand(x), operand(out)};
-    NdIter(x.shape_span(), ops).run(loop);
+    const NdIter it(x.shape_span(), ops);
+    if (x.dtype == out.dtype) {
+        it.run(loop);
+        return;
+    }
+    BufferedLoop buffered;
+    buffered.inner = loop;
+    buffered.nin = 1;
+    buffered.nop = 2;
+    buffered.add_cast(0, cast_kernel(x.dtype, out.dtype), out.itemsize());
+    it.run(&buffered_loop, &buffered);
 }
 
 NDArray as_dtype(const NDArray& x, DType d) { return x.dtype == d ? x : cast_copy(x, d); }
@@ -107,12 +120,11 @@ DType accumulate_dtype(const NDArray& x, nb::handle dtype_obj, const char* name)
 
 template <typename Op>
 nb::object fold(const NDArray& x, const Axes& ax, DType loop_dtype, bool keepdims, auto start) {
-    const NDArray xin = as_dtype(x, loop_dtype);
     NDArray out = keepdims_result(x, ax, loop_dtype);
     visit_dtype(loop_dtype, [&]<typename T>(std::type_identity<T>) {
         if constexpr (Op::template ok<T>) {
             fill<T>(out, start(std::type_identity<T>{}));
-            run_reduce(xin, out, &reduce_loop<Op, T>);
+            run_reduce(x, out, &reduce_loop<Op, T>);
         } else {
             unsupported(Op::name, loop_dtype);
         }
@@ -227,12 +239,11 @@ DType inexact(DType d) { return promote(d, DType::Float64); }
 // Sum over `ax` in the inexact dtype, divided by the count, keepdims shape.
 NDArray mean_keepdims(const NDArray& x, const Axes& ax) {
     const DType d = inexact(x.dtype);
-    const NDArray xin = as_dtype(x, d);
     NDArray out = keepdims_result(x, ax, d, /*zeroed=*/true);  // +0.0 (and 0+0j): the start of a sum
     const double n = static_cast<double>(ax.per_output);
     visit_dtype(d, [&]<typename T>(std::type_identity<T>) {
         if constexpr (ops::is_float<T> || ops::is_cplx<T>) {
-            run_reduce(xin, out, &reduce_loop<ops::Add, T>);
+            run_reduce(x, out, &reduce_loop<ops::Add, T>);
             T* p = reinterpret_cast<T*>(out.data);
             for (std::int64_t i = 0; i < out.size(); ++i) p[i] = p[i] / n;  // empty: 0/0 = nan
         }

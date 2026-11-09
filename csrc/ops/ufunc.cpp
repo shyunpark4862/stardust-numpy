@@ -2,6 +2,7 @@
 
 #include "bind/pyutil.hpp"
 #include "core/convert.hpp"
+#include "kernels/buffered.hpp"
 #include "kernels/cast.hpp"
 #include "ops/copy.hpp"
 
@@ -37,14 +38,13 @@ DType select(const LoopTable& table, DType d, const char* name, std::span<const 
     no_loop(name, inputs);
 }
 
-// Operand `o` as an array of dtype `to`. A Python scalar becomes a 1-element
-// array (broadcast by the iterator); conversion follows Z4, so an int that
-// does not fit raises OverflowError only when the loop runs in int64.
+// Operand `o` as an array. Arrays are used as they are -- a dtype that
+// differs from the loop's is converted chunk by chunk while the loop runs
+// (buffered casting, M7.6). A Python scalar becomes a 1-element array of the
+// loop dtype `to` (broadcast by the iterator); conversion follows Z4, so an
+// int that does not fit raises OverflowError only when the loop runs in int64.
 NDArray prepare(nb::handle o, DType to) {
-    if (is_ndarray(o)) {
-        const NDArray& a = as_ndarray(o);
-        return a.dtype == to ? a : cast_copy(a, to);
-    }
+    if (is_ndarray(o)) return as_ndarray(o);
     const DType kind = *scalar_dtype(o);
     const std::int64_t one[] = {1};
     NDArray s = new_array(to, one);
@@ -64,11 +64,24 @@ NDArray new_result(std::span<const nb::handle> objs, std::span<const std::int64_
     return new_array(dtype, shape);
 }
 
-void run_loop(std::span<const NDArray> ins, const NDArray& out, std::span<const std::int64_t> shape, Loop loop) {
+// Runs `loop` over ins + out. Inputs whose dtype is not the loop's
+// (`in_types`) are converted through small buffers on the way in.
+void run_loop(std::span<const NDArray> ins, std::span<const DType> in_types, const NDArray& out,
+              std::span<const std::int64_t> shape, Loop loop) {
     std::array<IterOperand, kMaxOperands> ops;
-    for (size_t k = 0; k < ins.size(); ++k) ops[k] = operand(ins[k]);
+    BufferedLoop buffered;
+    buffered.inner = loop;
+    buffered.nin = static_cast<int>(ins.size());
+    buffered.nop = buffered.nin + 1;
+    for (size_t k = 0; k < ins.size(); ++k) {
+        ops[k] = operand(ins[k]);
+        if (ins[k].dtype != in_types[k])
+            buffered.add_cast(static_cast<int>(k), cast_kernel(ins[k].dtype, in_types[k]), itemsize(in_types[k]));
+    }
     ops[ins.size()] = operand(out);
-    NdIter(shape, std::span(ops.data(), ins.size() + 1)).run(loop);
+    const NdIter it(shape, std::span(ops.data(), ins.size() + 1));
+    if (buffered.needed()) it.run(&buffered_loop, &buffered);
+    else it.run(loop);
 }
 
 // Steps 3 and 4 (see ufunc.hpp): convert, then run into out= or a new array.
@@ -95,18 +108,18 @@ nb::object launch(std::span<const nb::handle> objs, std::span<const DType> in_ty
             // since each element is read just before the same place is written.
             for (size_t k = 0; k < nin; ++k)
                 if (may_share_memory(ins[k], out) && !same_view(ins[k], out)) ins[k] = cast_copy(ins[k], ins[k].dtype);
-            run_loop(inputs, out, out.shape_span(), loop);
+            run_loop(inputs, in_types, out, out.shape_span(), loop);
         } else {
             // out is a wider dtype: compute, then convert into it.
             NDArray tmp = new_result(objs, shape, result);
-            run_loop(inputs, tmp, shape, loop);
+            run_loop(inputs, in_types, tmp, shape, loop);
             assign(out, tmp);
         }
         return nb::borrow(out_obj);
     }
 
     NDArray res = new_result(objs, shape, result);
-    run_loop(inputs, res, shape, loop);
+    run_loop(inputs, in_types, res, shape, loop);
     if (scalars_only) return load_python(result, res.data);
     return wrap(std::move(res));
 }
