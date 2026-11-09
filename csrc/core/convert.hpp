@@ -11,6 +11,8 @@
 
 #include <nanobind/nanobind.h>
 
+#include <arm_neon.h>
+
 #include <cmath>
 #include <cstddef>
 #include <complex>
@@ -29,15 +31,13 @@ template <typename T> inline constexpr bool is_complex_v<std::complex<T>> = true
 // Dtype-level check; value-level conversion below never fails.
 void check_castable(DType from, DType to);
 
-// float -> int64 the way the ARM `fcvtzs` instruction does it. A plain C++
-// cast is undefined behaviour for nan/inf/out-of-range values, so the
-// saturation is spelled out.
-inline std::int64_t saturate_to_int64(double x) {
-    if (std::isnan(x)) return 0;
-    if (x >= 9223372036854775808.0) return std::numeric_limits<std::int64_t>::max();  // 2^63
-    if (x < -9223372036854775808.0) return std::numeric_limits<std::int64_t>::min();
-    return static_cast<std::int64_t>(x);
-}
+// float -> int64 by S3: truncate toward zero, saturate out-of-range values,
+// nan -> 0. That is exactly what the ARM `FCVTZS` instruction does, so it is
+// called directly. (A plain C++ cast is undefined behaviour for nan, inf and
+// out-of-range values; the three branches that used to spell the rule out
+// kept the conversion from vectorizing: 1.8x slower than numpy, measured
+// after M10.) The compiler turns a loop of these into the vector FCVTZS.
+inline std::int64_t saturate_to_int64(double x) { return vcvtd_s64_f64(x); }
 
 // Converts one value of any source element type (including the narrower
 // types met in buffer import, e.g. int16 or float32) to storage type To.

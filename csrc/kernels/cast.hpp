@@ -8,6 +8,8 @@
 #include "core/convert.hpp"
 #include "core/iter.hpp"
 
+#include <arm_neon.h>
+
 #include <array>
 #include <cstring>
 #include <type_traits>
@@ -26,7 +28,15 @@ void cast_loop(std::byte* const* args, std::int64_t n, const std::int64_t* strid
         }
         const From* src = reinterpret_cast<const From*>(args[0]);
         To* dst = reinterpret_cast<To*>(args[1]);
-        for (std::int64_t i = 0; i < n; ++i) dst[i] = cast_value<To>(src[i]);
+        std::int64_t i = 0;
+        if constexpr (std::is_same_v<From, double> && std::is_same_v<To, std::int64_t>) {
+            // S3 float -> int64 is the vector FCVTZS, two lanes at a time.
+            for (; i + 4 <= n; i += 4) {
+                vst1q_s64(dst + i, vcvtq_s64_f64(vld1q_f64(src + i)));
+                vst1q_s64(dst + i + 2, vcvtq_s64_f64(vld1q_f64(src + i + 2)));
+            }
+        }
+        for (; i < n; ++i) dst[i] = cast_value<To>(src[i]);
         return;
     }
     const std::byte* src = args[0];
