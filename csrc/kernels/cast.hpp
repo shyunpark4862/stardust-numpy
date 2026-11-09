@@ -1,8 +1,8 @@
 // Cast kernels: one inner loop per (from, to) dtype pair, 4 x 4 = 16 loops,
 // generated from a single template and looked up in a table at runtime.
 //
-// M2 keeps these as plain strided scalar loops on purpose: they are the
-// baseline that M7's contiguous/NEON fast paths are measured against.
+// Contiguous runs take an indexed loop the compiler can vectorize (M7.2);
+// anything else the general strided loop.
 #pragma once
 
 #include "core/convert.hpp"
@@ -15,6 +15,12 @@ namespace sd {
 // args[0] = source, args[1] = destination.
 template <typename From, typename To>
 void cast_loop(std::byte* const* args, std::int64_t n, const std::int64_t* strides, void*) {
+    if (strides[0] == sizeof(From) && strides[1] == sizeof(To)) {  // contiguous (M7.2)
+        const From* src = reinterpret_cast<const From*>(args[0]);
+        To* dst = reinterpret_cast<To*>(args[1]);
+        for (std::int64_t i = 0; i < n; ++i) dst[i] = cast_value<To>(src[i]);
+        return;
+    }
     const std::byte* src = args[0];
     std::byte* dst = args[1];
     for (std::int64_t i = 0; i < n; ++i, src += strides[0], dst += strides[1])
