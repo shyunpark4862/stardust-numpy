@@ -16,6 +16,7 @@ from ._core import (
     arange,
     argmax,
     argmin,
+    argsort,
     asarray,
     asin,
     asinh,
@@ -72,6 +73,7 @@ from ._core import (
     logical_not,
     logical_or,
     logical_xor,
+    matmul,
     matrix_transpose,
     max,
     maximum,
@@ -97,6 +99,7 @@ from ._core import (
     sign,
     sin,
     sinh,
+    sort,
     sqrt,
     square,
     squeeze,
@@ -107,6 +110,10 @@ from ._core import (
     tan,
     tanh,
     trunc,
+    unique_all,
+    unique_counts,
+    unique_inverse,
+    unique_values,
     var,
     where,
     zeros,
@@ -147,4 +154,6 @@ __all__ = [
     # reductions
     "sum", "prod", "min", "max", "mean", "var", "std", "argmin", "argmax", "any", "all",
     "cumulative_sum", "cumulative_prod",
+    # sorting, sets, linear algebra
+    "sort", "argsort", "unique_values", "unique_counts", "unique_inverse", "unique_all", "matmul",
 ]

@@ -43,7 +43,7 @@ def test_full_integer_index_gives_python_scalars(dtype):
 @pytest.mark.parametrize("key,exc", [
     (3, IndexError), (-4, IndexError), ((0, 0, 0), IndexError), ((Ellipsis, Ellipsis), IndexError),
     (1.0, IndexError), ("a", IndexError), (slice(None, None, 0), ValueError), (2**70, IndexError),
-    ([0, 1], NotImplementedError), (True, NotImplementedError),
+    (True, IndexError),  # no 0-d masks (M6 decision)
 ])
 def test_getitem_errors(key, exc):
     _, a = grid(3, 4)

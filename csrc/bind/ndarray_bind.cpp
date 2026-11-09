@@ -7,6 +7,7 @@
 #include "core/convert.hpp"
 #include "ops/copy.hpp"
 #include "ops/indexing.hpp"
+#include "ops/matmul.hpp"
 #include "ops/reduction.hpp"
 #include "ops/shape.hpp"
 #include "ops/ufunc.hpp"
@@ -215,6 +216,23 @@ void bind_ndarray(nb::module_& m) {
     cls.def("__le__", &op_forward<LessEqual>, nb::arg().none());
     cls.def("__gt__", &op_forward<Greater>, nb::arg().none());
     cls.def("__ge__", &op_forward<GreaterEqual>, nb::arg().none());
+    // @ takes arrays only (no Python scalars). x @= y needs the result to
+    // have x's shape, and S6 like every in-place operator.
+    cls.def("__matmul__", [](nb::handle self, nb::handle other) {
+        return is_ndarray(other) ? matmul(self, other) : not_implemented();
+    }, nb::arg().none());
+    cls.def("__rmatmul__", [](nb::handle self, nb::handle other) {
+        return is_ndarray(other) ? matmul(other, self) : not_implemented();
+    }, nb::arg().none());
+    cls.def("__imatmul__", [](nb::handle self, nb::handle other) -> nb::object {
+        if (!is_ndarray(other)) return not_implemented();
+        nb::object r = matmul(self, other);
+        NDArray& x = as_ndarray(self);
+        if (!is_ndarray(r) || !std::ranges::equal(as_ndarray(r).shape_span(), x.shape_span()))
+            throw nb::value_error("x @= y needs a result with the shape of x");
+        assign_checked(x, as_ndarray(r));
+        return nb::borrow(self);
+    }, nb::arg().none());
     cls.def("__neg__", &op_unary<Negative>);
     cls.def("__pos__", &op_unary<Positive>);
     cls.def("__abs__", &op_unary<Abs>);

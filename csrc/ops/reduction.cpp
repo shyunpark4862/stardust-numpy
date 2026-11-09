@@ -4,6 +4,7 @@
 #include "core/convert.hpp"
 #include "kernels/reduce.hpp"
 #include "ops/copy.hpp"
+#include "ops/lanes.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -126,57 +127,12 @@ void require_nonempty(const NDArray& x, const Axes& ax, const char* name) {
                                   .c_str());
 }
 
-// ------------------------------------------------------------------ lanes
-// argmin/argmax and the cumulative scans work lane by lane along one axis, in
-// index order. The iterator walks the *other* axes; each element it visits
-// is the start of a lane.
-
-struct LaneCtx {
-    std::int64_t n, x_stride, o_stride;
-    void (*fn)(const std::byte* x, std::byte* o, const LaneCtx& c);
-    std::int64_t (*arg)(const std::byte*, std::int64_t, std::int64_t) = nullptr;  // argmin/argmax only
-};
-
-void lane_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
-    const LaneCtx& c = *static_cast<const LaneCtx*>(ctx);
-    for (std::int64_t i = 0; i < n; ++i) c.fn(args[0] + i * s[0], args[1] + i * s[1], c);
-}
-
-// a without `axis` (shape and strides), as an iterator operand.
-struct Outer {
-    Dims shape{}, strides{};
-    int ndim = 0;
-    IterOperand op(std::byte* data) const {
-        if (ndim == 0) return {data, {kOne, 1}, {kZero, 1}};
-        return {data, {shape.data(), static_cast<size_t>(ndim)}, {strides.data(), static_cast<size_t>(ndim)}};
-    }
-    static constexpr std::int64_t kOne[1] = {1}, kZero[1] = {0};
-};
-
-Outer drop_axis(const NDArray& a, int axis) {
-    Outer o;
-    for (int d = 0; d < a.ndim; ++d) {
-        if (d == axis) continue;
-        o.shape[o.ndim] = a.shape[d];
-        o.strides[o.ndim] = a.strides[d];
-        ++o.ndim;
-    }
-    return o;
-}
-
-// `out` has the same ndim as x (keepdims, or the scanned axis kept).
-void run_lanes(const NDArray& x, NDArray& out, int axis, LaneCtx& ctx) {
-    const Outer xo = drop_axis(x, axis);
-    const Outer oo = drop_axis(out, axis);
-    const IterOperand ops[] = {xo.op(x.data), oo.op(out.data)};
-    const std::span<const std::int64_t> shape = ops[0].shape;
-    NdIter(shape, ops).run(&lane_loop, &ctx);
-}
-
 // ---------------------------------------------------------- argmin / argmax
 
+using ArgFn = std::int64_t (*)(const std::byte*, std::int64_t, std::int64_t);
+
 void arg_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
-    *reinterpret_cast<std::int64_t*>(o) = c.arg(x, c.n, c.x_stride);
+    *reinterpret_cast<std::int64_t*>(o) = (*static_cast<const ArgFn*>(c.user))(x, c.n, c.x_stride);
 }
 
 template <bool Max>
@@ -185,7 +141,7 @@ nb::object arg_extreme_impl(nb::handle x_obj, nb::handle axis_obj, bool keepdims
     const NDArray& x = require_ndarray(x_obj);
     if (x.dtype == DType::Complex128) unsupported(name, x.dtype);  // S5
     // complex was rejected above; its branch only satisfies visit_dtype.
-    const auto lane_fn = visit_dtype(x.dtype, [&]<typename T>(std::type_identity<T>) {
+    ArgFn lane_fn = visit_dtype(x.dtype, [&]<typename T>(std::type_identity<T>) {
         if constexpr (ops::is_cplx<T>) return &arg_extreme<double, Max>;
         else return &arg_extreme<T, Max>;
     });
@@ -217,7 +173,7 @@ nb::object arg_extreme_impl(nb::handle x_obj, nb::handle axis_obj, bool keepdims
     ax.per_output = x.shape[axis];
     if (ax.per_output == 0 && output_size(x, ax) > 0) throw empty_error();
     NDArray out = keepdims_result(x, ax, DType::Int64);
-    LaneCtx ctx{x.shape[axis], x.strides[axis], 0, &arg_lane, lane_fn};
+    LaneCtx ctx{x.shape[axis], x.strides[axis], 0, &arg_lane, &lane_fn};
     if (ctx.n > 0) run_lanes(x, out, axis, ctx);
     return finish(std::move(out), ax, keepdims);
 }

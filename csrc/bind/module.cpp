@@ -4,8 +4,10 @@
 #include "bind/pyutil.hpp"
 #include "ops/copy.hpp"
 #include "ops/creation.hpp"
+#include "ops/matmul.hpp"
 #include "ops/reduction.hpp"
 #include "ops/shape.hpp"
+#include "ops/sort.hpp"
 #include "ops/ufunc.hpp"
 
 #include <nanobind/nanobind.h>
@@ -60,5 +62,7 @@ NB_MODULE(_core, m) {
     sd::bind_shape(m);
     sd::bind_ufuncs(m);
     sd::bind_reductions(m);
+    sd::bind_sort(m);
+    sd::bind_matmul(m);
     m.def("_build_info", &build_info, "Toolchain facts captured at compile time.");
 }
