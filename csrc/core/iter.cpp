@@ -133,15 +133,25 @@ NdIter::NdIter(std::span<const std::int64_t> shape, std::span<const IterOperand>
 void NdIter::run(Loop kernel, void* ctx, Split split, std::int64_t weight) const {
     if (empty_) return;
     if (split != Split::None && parallel::available()) {
-        std::int64_t work = weight;
+        // Work is counted in bytes of the widest operand step, capped at 8,
+        // and compared with the limits in float64 elements (x 8). A loop
+        // over bools moves an eighth of the memory per element, so it needs
+        // 8x the elements to go parallel and gets 8x the elements per task
+        // (M10+: b & b with 4096-bool tasks ran 1.2x slower on 10 threads
+        // than on one). Wider or strided steps count as 8, as before.
+        std::int64_t bytes = 0;
+        for (int k = 0; k < nop_; ++k)
+            bytes = std::max(bytes, std::min<std::int64_t>(std::abs(strides_[k][ndim_ - 1]), 8));
+        std::int64_t work = weight * (bytes ? bytes : 8);
         for (int d = 0; d < ndim_; ++d) work *= shape_[d];
-        const int axis = work >= parallel::kThreshold ? split_axis(split) : -1;
+        const int axis = work >= 8 * parallel::kThreshold ? split_axis(split) : -1;
         if (axis >= 0) {
-            // Cut `axis` into pieces of about kTaskWork elements each. The cut
-            // depends on the shape only, never on the thread count.
+            // Cut `axis` into pieces of about kTaskWork elements' worth each.
+            // The cut depends on the shape and dtypes only, never on the
+            // thread count.
             const std::int64_t extent = shape_[axis];
             const std::int64_t per_index = std::max<std::int64_t>(work / extent, 1);
-            std::int64_t chunk = std::max<std::int64_t>(parallel::kTaskWork / per_index, 1);
+            std::int64_t chunk = std::max<std::int64_t>(8 * parallel::kTaskWork / per_index, 1);
             // Cutting the innermost axis shortens every kernel call: keep the
             // pieces long enough to stream. M8 measured sum(m, axis=0) of a
             // 3000x3000 array: 10-element pieces made it 2.7x slower than one
