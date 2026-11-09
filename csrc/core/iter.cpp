@@ -6,10 +6,12 @@
 
 namespace sd {
 
-std::vector<std::int64_t> broadcast_shapes(std::span<const std::span<const std::int64_t>> shapes) {
+int broadcast_into(std::span<const std::span<const std::int64_t>> shapes, Dims& out) {
     size_t ndim = 0;
     for (auto s : shapes) ndim = std::max(ndim, s.size());
-    std::vector<std::int64_t> out(ndim, 1);
+    if (ndim > static_cast<size_t>(kMaxNdim))
+        throw nb::value_error(("arrays may have at most " + std::to_string(kMaxNdim) + " dimensions").c_str());
+    std::fill(out.begin(), out.begin() + ndim, 1);
     for (auto s : shapes) {
         const size_t offset = ndim - s.size();
         for (size_t d = 0; d < s.size(); ++d) {
@@ -21,7 +23,13 @@ std::vector<std::int64_t> broadcast_shapes(std::span<const std::span<const std::
             throw nb::value_error(msg.c_str());
         }
     }
-    return out;
+    return static_cast<int>(ndim);
+}
+
+std::vector<std::int64_t> broadcast_shapes(std::span<const std::span<const std::int64_t>> shapes) {
+    Dims out;
+    const int ndim = broadcast_into(shapes, out);
+    return {out.begin(), out.begin() + ndim};
 }
 
 NdIter::NdIter(std::span<const std::int64_t> shape, std::span<const IterOperand> ops, IterMode mode) {
@@ -82,8 +90,10 @@ NdIter::NdIter(std::span<const std::int64_t> shape, std::span<const IterOperand>
         };
         for (int i = 1; i < ndim_; ++i)
             for (int j = i; j > 0 && outer(perm[j], perm[j - 1]); --j) std::swap(perm[j], perm[j - 1]);
-        Dims shape_p = shape_;
-        std::array<Dims, kMaxOperands> strides_p = strides_;
+        Dims shape_p;  // copies of the live part only
+        std::array<Dims, kMaxOperands> strides_p;
+        std::copy(shape_.begin(), shape_.begin() + ndim_, shape_p.begin());
+        for (int k = 0; k < nop_; ++k) std::copy(strides_[k].begin(), strides_[k].begin() + ndim_, strides_p[k].begin());
         for (int d = 0; d < ndim_; ++d) {
             shape_[d] = shape_p[perm[d]];
             for (int k = 0; k < nop_; ++k) strides_[k][d] = strides_p[k][perm[d]];
@@ -124,7 +134,8 @@ void NdIter::run(Loop kernel, void* ctx) const {
     std::array<std::byte*, kMaxOperands> p = data_;
     std::array<std::int64_t, kMaxOperands> inner{};
     for (int k = 0; k < nop_; ++k) inner[k] = strides_[k][last];
-    Dims index{};
+    Dims index;
+    std::fill(index.begin(), index.begin() + ndim_, 0);
     for (;;) {
         kernel(p.data(), shape_[last], inner.data(), ctx);
         // Odometer over the outer axes.

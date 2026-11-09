@@ -11,6 +11,7 @@
 
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -34,8 +35,8 @@ struct NDArray {
     std::byte* data = nullptr;
     DType dtype = DType::Float64;
     int ndim = 0;
-    Dims shape{};
-    Dims strides{};
+    Dims shape;    // only [0, ndim) is meaningful, and only that part is copied
+    Dims strides;
     bool c_contiguous = true;
     bool f_contiguous = true;
     bool writeable = true;
@@ -51,6 +52,38 @@ struct NDArray {
 
     // Recomputes c_contiguous / f_contiguous from shape and strides.
     void update_flags();
+
+    // Copies move only the live ndim entries of shape/strides, not all 32
+    // (512 bytes): views and results are copied and moved a lot (M7.7).
+    NDArray() = default;
+    NDArray(const NDArray& o) { *this = o; }
+    NDArray(NDArray&& o) noexcept { *this = std::move(o); }
+    NDArray& operator=(const NDArray& o) {
+        if (this == &o) return *this;
+        buffer = o.buffer;
+        base = o.base;
+        copy_meta(o);
+        return *this;
+    }
+    NDArray& operator=(NDArray&& o) noexcept {
+        if (this == &o) return *this;
+        buffer = std::move(o.buffer);
+        base = std::move(o.base);
+        copy_meta(o);
+        return *this;
+    }
+
+private:
+    void copy_meta(const NDArray& o) {
+        data = o.data;
+        dtype = o.dtype;
+        ndim = o.ndim;
+        std::copy(o.shape.begin(), o.shape.begin() + o.ndim, shape.begin());
+        std::copy(o.strides.begin(), o.strides.begin() + o.ndim, strides.begin());
+        c_contiguous = o.c_contiguous;
+        f_contiguous = o.f_contiguous;
+        writeable = o.writeable;
+    }
 };
 
 // "(2, 3)", "(4,)": shapes in error messages, spelled like Python tuples.

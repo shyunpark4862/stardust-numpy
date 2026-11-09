@@ -92,9 +92,11 @@ NDArray new_array_like(const NDArray& proto, DType dtype, bool zeroed) {
     // Sort axes by decreasing |stride|; ties keep the original (C) order.
     std::array<int, kMaxNdim> order;
     std::iota(order.begin(), order.begin() + proto.ndim, 0);
-    std::stable_sort(order.begin(), order.begin() + proto.ndim, [&](int a, int b) {
-        return std::llabs(proto.strides[a]) > std::llabs(proto.strides[b]);
-    });
+    // Insertion sort (stable): at most 32 axes, and std::stable_sort would
+    // allocate a scratch buffer on every call (M7.7).
+    for (int i = 1; i < proto.ndim; ++i)
+        for (int j = i; j > 0 && std::llabs(proto.strides[order[j]]) > std::llabs(proto.strides[order[j - 1]]); --j)
+            std::swap(order[j], order[j - 1]);
     return allocate(dtype, proto.shape_span(), {order.data(), static_cast<size_t>(proto.ndim)}, zeroed);
 }
 

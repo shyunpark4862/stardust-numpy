@@ -47,6 +47,8 @@ enum class IterMode { Naive, Reorder, Full };
 // The broadcast shape of several shapes (numpy rules: align right; extents
 // must match or be 1). Raises ValueError when they are incompatible.
 std::vector<std::int64_t> broadcast_shapes(std::span<const std::span<const std::int64_t>> shapes);
+// The same into a fixed array, without allocating; returns the ndim.
+int broadcast_into(std::span<const std::span<const std::int64_t>> shapes, Dims& out);
 
 class NdIter {
 public:
@@ -66,8 +68,11 @@ private:
     int nop_ = 0;
     int ndim_ = 0;
     bool empty_ = false;
-    Dims shape_{};
-    std::array<Dims, kMaxOperands> strides_{};
+    // Left uninitialized: only the first ndim_ entries (and nop_ operands)
+    // are ever written or read. Zero-filling 1.3 KB per iterator was a
+    // visible cost on tiny arrays (M7.7).
+    Dims shape_;
+    std::array<Dims, kMaxOperands> strides_;
     std::array<std::byte*, kMaxOperands> data_{};
 };
 

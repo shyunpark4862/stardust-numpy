@@ -31,13 +31,22 @@ public:
 
     std::byte* data() const { return data_; }
 
-private:
-    Buffer() = default;
+    // Arrays of up to kInline bytes keep their data inside the Buffer object
+    // itself, which make_shared allocates together with the reference count:
+    // one allocation for a small array instead of three (M7.7).
+    static constexpr std::size_t kInline = 256;
 
+    struct Key {  // lets make_shared call the constructor; nobody else can
+        explicit Key() = default;
+    };
+    explicit Buffer(Key) {}
+
+private:
     void* raw_ = nullptr;  // pointer returned by malloc/calloc (own memory only)
     std::byte* data_ = nullptr;
     bool external_ = false;
     Py_buffer view_{};
+    alignas(kAlignment) std::byte inline_[kInline];
 };
 
 }  // namespace sd

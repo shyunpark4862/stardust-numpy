@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,32 @@ Item classify(nb::handle o) {
           "valid indices");
 }
 
+// The items of one key, stored in place: a key has at most 32 axis-consuming
+// items, 32 newaxis and one ellipsis, so a fixed capacity is enough, and a
+// std::vector's growth allocations were most of the cost of x[1, 2] (M7.7).
+class Items {
+public:
+    static constexpr int kCapacity = 2 * kMaxNdim + 1;
+    Items() = default;
+    Items(const Items&) = delete;
+    Items& operator=(const Items&) = delete;
+    ~Items() {
+        for (int i = 0; i < n_; ++i) (*this)[i].~Item();
+    }
+    void push_back(Item&& it) { new (slot(n_++)) Item(std::move(it)); }
+    int size() const { return n_; }
+    Item& operator[](int i) { return *std::launder(reinterpret_cast<Item*>(slot(i))); }
+    const Item& operator[](int i) const { return *std::launder(reinterpret_cast<const Item*>(slot(i))); }
+    Item* begin() { return &(*this)[0]; }
+    Item* end() { return begin() + n_; }
+
+private:
+    std::byte* slot(int i) { return storage_ + static_cast<size_t>(i) * sizeof(Item); }
+    const std::byte* slot(int i) const { return storage_ + static_cast<size_t>(i) * sizeof(Item); }
+    alignas(Item) std::byte storage_[kCapacity * sizeof(Item)];  // uninitialized until pushed
+    int n_ = 0;
+};
+
 // How x[key] is computed. The basic items (slices, newaxis, ...) are applied
 // to make `view`; the axes the advanced items aim at are kept whole in it, as
 // the consecutive run [first, first + indices.size()). Each of those axes gets
@@ -113,8 +140,10 @@ std::vector<NDArray> mask_positions(const NDArray& m) {
 
 Plan make_plan(nb::handle x, nb::handle key) {
     const NDArray& a = as_ndarray(x);
-    std::vector<Item> items;
+    Items items;
     if (PyTuple_Check(key.ptr())) {
+        if (PyTuple_GET_SIZE(key.ptr()) > Items::kCapacity)
+            raise(PyExc_IndexError, "too many indices (more than " + std::to_string(Items::kCapacity) + ")");
         for (nb::handle h : nb::borrow<nb::tuple>(key)) items.push_back(classify(h));
     } else {
         items.push_back(classify(key));
@@ -137,7 +166,7 @@ Plan make_plan(nb::handle x, nb::handle key) {
     // to the front otherwise, a rule stardust removes by refusing (API.md §4).
     auto advanced = [&](const Item& it) { return it.kind == Kind::Array || (any_array && it.kind == Kind::Int); };
     int first_item = -1, last_item = -1;
-    for (int i = 0; i < static_cast<int>(items.size()); ++i)
+    for (int i = 0; i < items.size(); ++i)
         if (advanced(items[i])) {
             if (first_item < 0) first_item = i;
             last_item = i;

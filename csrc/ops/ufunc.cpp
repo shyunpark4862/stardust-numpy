@@ -89,13 +89,17 @@ nb::object launch(std::span<const nb::handle> objs, std::span<const DType> in_ty
                   nb::handle out_obj) {
     const size_t nin = objs.size();
     std::array<NDArray, kMaxInputs> ins;
-    std::vector<std::span<const std::int64_t>> shapes;
+    std::array<std::span<const std::int64_t>, kMaxInputs> shapes;  // fixed arrays: no allocation per call
+    size_t narrays = 0;
     for (size_t k = 0; k < nin; ++k) {
         ins[k] = prepare(objs[k], in_types[k]);
-        if (is_ndarray(objs[k])) shapes.push_back(as_ndarray(objs[k]).shape_span());
+        if (is_ndarray(objs[k])) shapes[narrays++] = as_ndarray(objs[k]).shape_span();
     }
-    const bool scalars_only = shapes.empty();
-    const std::vector<std::int64_t> shape = scalars_only ? std::vector<std::int64_t>{1} : broadcast_shapes(shapes);
+    const bool scalars_only = narrays == 0;
+    Dims dims;
+    dims[0] = 1;
+    const int ndim = scalars_only ? 1 : broadcast_into(std::span(shapes.data(), narrays), dims);
+    const std::span<const std::int64_t> shape(dims.data(), static_cast<size_t>(ndim));
     const std::span<const NDArray> inputs(ins.data(), nin);
 
     if (!out_obj.is_none()) {
