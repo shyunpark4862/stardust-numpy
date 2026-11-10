@@ -93,7 +93,9 @@ def battery():
                                          S(c[:32_000].reshape(500, 8, 8)) @ S(c[:32_000].reshape(500, 8, 8))),
         # Tier 3 item 13: one long lane sorted in pieces and merged
         "long 1-D sort": lambda: (sdnp.sort(F), sdnp.argsort(F), sdnp.sort(F, stable=False),
-                                  sdnp.argsort(S(idx), descending=True), sdnp.unique_all(S(idx % 5000))),
+                                  sdnp.argsort(S(idx), descending=True), sdnp.unique_all(S(idx % 5000)),
+                                  sdnp.argsort(S(b.reshape(-1)), stable=False), sdnp.argsort(S(i.reshape(-1) % 50.0),
+                                                                                       stable=False)),
         # review fix: full reductions with a cast, now blocked
         "full reductions with a cast": lambda: (sdnp.sum(B), sdnp.mean(I), sdnp.mean(B), sdnp.sum(I, dtype=sdnp.float64),
                                                 sdnp.var(I), sdnp.any(M), sdnp.all(F), sdnp.prod(B[:, :5]),

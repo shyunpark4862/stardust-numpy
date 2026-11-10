@@ -299,9 +299,10 @@ void sort_keyed_serial(Keyed<T>* a, std::int64_t n, bool stable, bool descending
 // The merges cost passes a one-thread sort does not make (sort(i) of 1M:
 // 5.8 ms radix, 13.6 ms in pieces on one thread), so pieces are used only
 // when the pool can run them -- the result is the same either way. Except
-// for a float sort with stable=False: there the NEON sort's order of -0.0
-// and +0.0 depends on the pieces, so it always takes them, keeping the
-// result independent of the thread count (DESIGN §2.4).
+// with stable=False: the NEON sort's order of -0.0 and +0.0 (sort) and
+// introsort's order of equal values (argsort) depend on the pieces, so
+// those always take them, keeping the result independent of the thread
+// count (DESIGN §2.4).
 
 inline constexpr std::int64_t kMergeChunk = 1 << 15;
 
@@ -371,7 +372,9 @@ void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
 
 template <typename T>
 void sort_keyed(Keyed<T>* a, std::int64_t n, bool stable, bool descending) {
-    if (ops::is_int<T> || !use_pieces(n, false)) return sort_keyed_serial(a, n, stable, descending);  // pairs: always stable
+    // stable=False sorts pieces and whole lanes with introsort, whose order
+    // of equal values depends on the pieces: then they are always taken.
+    if (ops::is_int<T> || !use_pieces(n, !stable)) return sort_keyed_serial(a, n, stable, descending);
     const Order<T> order{descending};
     sort_long(a, n, [&](Keyed<T>* p, std::int64_t m) { sort_keyed_serial(p, m, stable, descending); },
               [order](const Keyed<T>& x, const Keyed<T>& y) { return order(x.value, y.value); });
