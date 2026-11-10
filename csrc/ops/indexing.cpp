@@ -711,113 +711,108 @@ void walk_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, F&& on_t
               });
 }
 
-// x[mask] for single elements of one dtype, chunk c. A run is taken 256
-// elements at a time; the trues of each piece are counted first (a vector
-// sum), then
-//   - few (< 32): only those are visited, skipping eight falses at a time;
-//   - more: every element is copied into a small buffer and the buffer
-//     position moves by the mask byte -- no branch to mispredict (a random
-//     half-true mask cost 2.2 ms per 1M with one branch per element) --
-//     and the buffer goes out with one memcpy.
-// Writing the buffer, not the result, keeps every write inside the chunk's
-// own part of the result.
-template <typename T>
-void compress_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, std::byte* out, std::int64_t step) {
+// The pieces of chunk c for compress_chunk and expand_chunk. A contiguous
+// run is taken 256 elements at a time; the trues of each piece are counted
+// first (a vector sum), then
+//   - none: skipped;
+//   - few (< 32): sparse(mask, 1, view_offset, view_step, m) visits only
+//     those, skipping eight falses at a time (for_true);
+//   - more: dense(q, view_offset, view_step, m, trues) handles every
+//     element without a branch to mispredict (a random half-true mask cost
+//     2.2 ms per 1M with one branch per element).
+// A strided run goes to sparse(mask, mask_step, ...) whole.
+template <typename Sparse, typename Dense>
+void mask_pieces(const Plan& plan, const MaskChunks& mc, std::int64_t c, Sparse&& sparse, Dense&& dense) {
     constexpr std::int64_t kPiece = 256;
-    const std::byte* src = plan.view.data;
-    std::int64_t b = mc.start[c];
-    auto put = [&](const T* buf, std::int64_t cnt) {
-        if (step == sizeof(T)) std::memcpy(out + b * step, buf, static_cast<size_t>(cnt) * sizeof(T));
-        else for (std::int64_t j = 0; j < cnt; ++j) *reinterpret_cast<T*>(out + (b + j) * step) = buf[j];
-        b += cnt;
-    };
     mask_runs(plan.mask, plan.view.strides.data() + plan.first, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
               [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
-                  if (ms != 1) {
-                      for_true(mp, ms, vo, vstep, n, [&](std::int64_t off) {
-                          *reinterpret_cast<T*>(out + b++ * step) = load_as<T>(src + off);
-                      });
-                      return;
-                  }
+                  if (ms != 1) return sparse(mp, ms, vo, vstep, n);
                   const std::uint8_t* q = reinterpret_cast<const std::uint8_t*>(mp);
-                  T buf[kPiece];
                   for (std::int64_t t0 = 0; t0 < n; t0 += kPiece) {
                       const std::int64_t m = std::min(kPiece, n - t0);
-                      std::uint32_t trues = 0;
+                      std::uint32_t trues = 0;  // bytes are 0/1: asarray normalizes foreign bool buffers
                       for (std::int64_t t = 0; t < m; ++t) trues += q[t0 + t];
                       if (trues == 0) continue;
-                      std::int64_t cnt = 0;
-                      if (trues < 32) {
-                          for_true(mp + t0, 1, vo + t0 * vstep, vstep, m,
-                                   [&](std::int64_t off) { buf[cnt++] = load_as<T>(src + off); });
-                      } else {
-                          const std::byte* p = src + vo + t0 * vstep;
-                          for (std::int64_t t = 0; t < m; ++t) {
-                              buf[cnt] = load_as<T>(p + t * vstep);
-                              cnt += q[t0 + t];
-                          }
-                      }
-                      put(buf, cnt);
+                      if (trues < 32) sparse(mp + t0, 1, vo + t0 * vstep, vstep, m);
+                      else dense(q + t0, vo + t0 * vstep, vstep, m, trues);
                   }
               });
 }
 
+// x[mask] for single elements of one dtype, chunk c. A dense piece copies
+// every element into a small buffer and moves the buffer position by the
+// mask byte, then the buffer goes out with one memcpy. Writing the buffer,
+// not the result, keeps every write inside the chunk's own part of the
+// result.
+template <typename T>
+void compress_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, std::byte* out, std::int64_t step) {
+    const std::byte* src = plan.view.data;
+    std::int64_t b = mc.start[c];
+    mask_pieces(
+        plan, mc, c,
+        [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
+            for_true(mp, ms, vo, vstep, n,
+                     [&](std::int64_t off) { *reinterpret_cast<T*>(out + b++ * step) = load_as<T>(src + off); });
+        },
+        [&](const std::uint8_t* q, std::int64_t vo, std::int64_t vstep, std::int64_t m, std::uint32_t) {
+            T buf[256];
+            std::int64_t cnt = 0;
+            const std::byte* p = src + vo;
+            for (std::int64_t t = 0; t < m; ++t) {
+                buf[cnt] = load_as<T>(p + t * vstep);
+                cnt += q[t];
+            }
+            if (step == sizeof(T)) std::memcpy(out + b * step, buf, static_cast<size_t>(cnt) * sizeof(T));
+            else for (std::int64_t j = 0; j < cnt; ++j) *reinterpret_cast<T*>(out + (b + j) * step) = buf[j];
+            b += cnt;
+        });
+}
+
 // x[mask] = w for single elements of one dtype, chunk c (w: the value laid
-// over the selection, step bytes apart, 0 for a broadcast scalar). The same
-// pieces as compress_chunk; with many trues every element of the piece is
-// rewritten, with w's next value or its own: x[i] = mask[i] ? w[b] : x[i].
-// Only this chunk's elements are touched, so chunks stay independent.
+// over the selection, step bytes apart, 0 for a broadcast scalar). A dense
+// piece rewrites every element, with w's next value or its own:
+// x[i] = mask[i] ? w[b] : x[i]. Only this chunk's elements are touched, so
+// chunks stay independent.
 template <typename T>
 void expand_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, const std::byte* w, std::int64_t step) {
-    constexpr std::int64_t kPiece = 256;
     std::byte* dst = plan.view.data;
     std::int64_t b = mc.start[c];
-    mask_runs(plan.mask, plan.view.strides.data() + plan.first, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
-              [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
-                  auto sparse = [&](const std::byte* mq, std::int64_t mstep, std::int64_t off0, std::int64_t m) {
-                      for_true(mq, mstep, off0, vstep, m, [&](std::int64_t off) {
-                          *reinterpret_cast<T*>(dst + off) = load_as<T>(w + b++ * step);
-                      });
-                  };
-                  if (ms != 1) return sparse(mp, ms, vo, n);
-                  const std::uint8_t* q = reinterpret_cast<const std::uint8_t*>(mp);
-                  for (std::int64_t t0 = 0; t0 < n; t0 += kPiece) {
-                      const std::int64_t m = std::min(kPiece, n - t0);
-                      std::uint32_t trues = 0;
-                      for (std::int64_t t = 0; t < m; ++t) trues += q[t0 + t];
-                      // The dense loop loads w[b] for false elements too; after the
-                      // selection's last true that is w[total], one past the end,
-                      // so the piece holding it takes the sparse path.
-                      if (trues < 32 || b + trues == mc.total) {
-                          if (trues > 0) sparse(mp + t0, 1, vo + t0 * vstep, m);
-                          continue;
-                      }
-                      std::byte* p = dst + vo + t0 * vstep;
-                      if (step == 0) {
-                          // A broadcast scalar: a select on the raw words with
-                          // a mask made from the mask byte. Written as
-                          // `q ? val : *e` the compiler turned it back into a
-                          // branch around the store (2.2 ms per 1M, measured).
-                          using W = std::conditional_t<sizeof(T) % 8 == 0, std::uint64_t, std::uint8_t>;
-                          constexpr int kWords = sizeof(T) / sizeof(W);
-                          W val[kWords];
-                          std::memcpy(val, w, sizeof(T));
-                          for (std::int64_t t = 0; t < m; ++t) {
-                              W* e = reinterpret_cast<W*>(p + t * vstep);
-                              const W keep = static_cast<W>(q[t0 + t]) - 1;  // all ones where false
-                              for (int j = 0; j < kWords; ++j) e[j] = (e[j] & keep) | (val[j] & ~keep);
-                          }
-                      } else {
-                          for (std::int64_t t = 0; t < m; ++t) {
-                              T* e = reinterpret_cast<T*>(p + t * vstep);
-                              const T val = load_as<T>(w + b * step);  // b < total (see above)
-                              *e = q[t0 + t] ? val : *e;
-                              b += q[t0 + t];
-                          }
-                      }
-                      if (step == 0) b += trues;
-                  }
-              });
+    auto sparse = [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
+        for_true(mp, ms, vo, vstep, n,
+                 [&](std::int64_t off) { *reinterpret_cast<T*>(dst + off) = load_as<T>(w + b++ * step); });
+    };
+    mask_pieces(plan, mc, c, sparse,
+                [&](const std::uint8_t* q, std::int64_t vo, std::int64_t vstep, std::int64_t m, std::uint32_t trues) {
+                    std::byte* p = dst + vo;
+                    if (step == 0) {
+                        // A broadcast scalar: a select on the raw words with a
+                        // mask made from the mask byte. Written as `q ? val : *e`
+                        // the compiler turned it back into a branch around the
+                        // store (2.2 ms per 1M, measured).
+                        using W = std::conditional_t<sizeof(T) % 8 == 0, std::uint64_t, std::uint8_t>;
+                        constexpr int kWords = sizeof(T) / sizeof(W);
+                        W val[kWords];
+                        std::memcpy(val, w, sizeof(T));
+                        for (std::int64_t t = 0; t < m; ++t) {
+                            W* e = reinterpret_cast<W*>(p + t * vstep);
+                            const W keep = static_cast<W>(q[t]) - 1;  // all ones where false
+                            for (int j = 0; j < kWords; ++j) e[j] = (e[j] & keep) | (val[j] & ~keep);
+                        }
+                        b += trues;
+                        return;
+                    }
+                    // The loop below loads w[b] for false elements too; after
+                    // the selection's last true that is w[total], one past the
+                    // end, so the piece holding it goes the sparse way.
+                    if (b + trues == mc.total)
+                        return sparse(reinterpret_cast<const std::byte*>(q), 1, vo, vstep, m);
+                    for (std::int64_t t = 0; t < m; ++t) {
+                        T* e = reinterpret_cast<T*>(p + t * vstep);
+                        const T val = load_as<T>(w + b * step);  // b < total (see above)
+                        *e = q[t] ? val : *e;
+                        b += q[t];
+                    }
+                });
 }
 
 // x[mask]: count, allocate, then copy the selected blocks chunk by chunk.

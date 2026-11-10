@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace sd {
@@ -106,9 +107,12 @@ nb::object arange(nb::handle start_obj, nb::handle stop_obj, nb::handle step_obj
         const std::int64_t s = scalar_from_python<std::int64_t>(step_obj, kinds[2]);
         if (s == 0) throw nb::value_error("arange step must not be zero");
         const __int128 span = static_cast<__int128>(b) - a;
-        std::int64_t n = 0;
-        if (s > 0 && span > 0) n = static_cast<std::int64_t>((span + s - 1) / s);
-        if (s < 0 && span < 0) n = static_cast<std::int64_t>((-span - s - 1) / -static_cast<__int128>(s));
+        __int128 count = 0;  // up to 2^64 - 1: arange(-2**63, 2**63 - 1) does not fit int64
+        if (s > 0 && span > 0) count = (span + s - 1) / s;
+        if (s < 0 && span < 0) count = (-span - s - 1) / -static_cast<__int128>(s);
+        if (count > std::numeric_limits<std::int64_t>::max())
+            throw nb::value_error("arange would produce too many elements");
+        const auto n = static_cast<std::int64_t>(count);
         NDArray out = new_array(dtype.value_or(DType::Int64), std::vector<std::int64_t>{n});
         visit_dtype(out.dtype, [&]<typename T>(std::type_identity<T>) {
             T* p = reinterpret_cast<T*>(out.data);

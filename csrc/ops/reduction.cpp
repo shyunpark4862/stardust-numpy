@@ -126,7 +126,13 @@ struct Blocks {
 };
 
 Blocks plan_blocks(const NDArray& x, const NDArray& out, const NdIter& it) {
-    if (out.size() <= 1) return {};  // a full reduction already splits its long runs
+    // A full reduction in x's own dtype already splits its long runs (the
+    // kernel's pieces, or the pairwise sum's blocks). With a cast it does
+    // not: buffered casting hands the kernel 4096 elements at a time, too
+    // few to split, so sum(bool) and mean(int64) ran on one thread (review
+    // fix: 1.47 ms on 1 thread, 1.33 ms on 10 for 1e7 bools). Blocking
+    // gives each block its own serial buffered fold.
+    if (out.size() <= 1 && x.dtype == out.dtype) return {};
     const NdIter::Plan p = it.plan(Split::Reduction);
     if (p.tasks >= 8 || p.work < 8 * parallel::kThreshold) return {};  // run() splits well enough, or too small
     Blocks b;

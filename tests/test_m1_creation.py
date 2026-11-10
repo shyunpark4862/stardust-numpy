@@ -100,6 +100,10 @@ def test_arange_dtype_and_errors():
         sdnp.arange(1j)
     with pytest.raises(TypeError):
         sdnp.arange(0, 5, dtype=float)
+    # more than 2**63 - 1 elements: not a "negative dimensions" error (review fix)
+    for args in [(-2**63, 2**63 - 1), (2**63 - 1, -2**63, -1)]:
+        with pytest.raises(ValueError, match="too many elements"):
+            sdnp.arange(*args)
 
 
 # ----------------------------------------------------------- linspace ----

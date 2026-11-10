@@ -62,6 +62,34 @@ std::unique_ptr<T[]> buffer(std::int64_t n) {
     return std::make_unique_for_overwrite<T[]>(static_cast<size_t>(n));
 }
 
+// A lane's working buffer: short lanes use per-thread scratch, so sorting
+// many short lanes (sort(x, axis=1) of a (100000, 8) array) does not
+// allocate twice per lane. Slot 0 holds the lane, slot 1 the merge sort's
+// half copy. Longer lanes allocate, so a thread keeps at most 2 x 64 KB
+// per element type.
+inline constexpr std::int64_t kScratchBytes = 64 * 1024;
+
+template <typename T>
+class LaneBuffer {
+public:
+    LaneBuffer(std::int64_t n, int slot) {
+        if (n * static_cast<std::int64_t>(sizeof(T)) <= kScratchBytes) {
+            thread_local std::unique_ptr<std::byte[]> mem =
+                std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(2 * kScratchBytes));
+            ptr_ = reinterpret_cast<T*>(mem.get() + slot * kScratchBytes);
+        } else {
+            heap_ = buffer<T>(n);
+            ptr_ = heap_.get();
+        }
+    }
+    T* get() const { return ptr_; }
+    T& operator[](std::int64_t i) const { return ptr_[i]; }
+
+private:
+    std::unique_ptr<T[]> heap_;
+    T* ptr_;
+};
+
 // Fills buf[0, n) from a strided lane with make(i, value): values that are
 // not NaN first, then the NaNs, each part in its original order. Returns
 // how many are not NaN (the part that still needs sorting).
@@ -85,7 +113,7 @@ std::int64_t load_nans_last(const std::byte* x, std::int64_t stride, std::int64_
 template <typename T>
 void sort_buffer(T* a, std::int64_t n, bool stable, auto less) {
     if (stable) {
-        auto tmp = buffer<T>(n / 2 + 1);
+        const LaneBuffer<T> tmp(n / 2 + 1, 1);
         sorting::merge_sort(a, tmp.get(), n, less);
     } else {
         sorting::unstable_sort(a, n, less);
@@ -130,7 +158,7 @@ struct SortCfg {
 template <typename T>
 void sort_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
     const SortCfg& cfg = *static_cast<const SortCfg*>(c.user);
-    auto buf = buffer<T>(c.n);
+    const LaneBuffer<T> buf(c.n, 0);
     const std::int64_t m = load_nans_last<T>(x, c.x_stride, c.n, buf.get(), [](std::int64_t, T v) { return v; });
     sort_values(buf.get(), m, cfg.stable, cfg.descending);
     for (std::int64_t i = 0; i < c.n; ++i) *reinterpret_cast<T*>(o + i * c.o_stride) = buf[i];
@@ -139,7 +167,7 @@ void sort_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
 template <typename T>
 void argsort_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
     const SortCfg& cfg = *static_cast<const SortCfg*>(c.user);
-    auto buf = buffer<Keyed<T>>(c.n);
+    const LaneBuffer<Keyed<T>> buf(c.n, 0);
     const std::int64_t m = load_nans_last<T>(x, c.x_stride, c.n, buf.get(),
                                              [](std::int64_t i, T v) { return Keyed<T>{v, i}; });
     const Order<T> order{cfg.descending};

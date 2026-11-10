@@ -197,3 +197,17 @@ def test_stable_float_sort_with_both_zero_signs_keeps_order():
 def test_simd_sort_random_int64(values):
     n = np.array(values, dtype=np.int64)
     assert_same(sdnp.sort(sdnp.asarray(n)), np.sort(n))
+
+
+def test_many_lanes_short_and_long():
+    # Short lanes reuse per-thread scratch, long ones allocate (review fix,
+    # 2026-11-10): 4096 Keyed pairs (64 KB) is the last that fits.
+    rng = np.random.default_rng(3)
+    for shape in [(20_000, 8), (3, 4096), (3, 4097), (2, 50_000)]:
+        n = rng.integers(-5, 5, shape).astype(np.float64)
+        n[::7, ::3] = np.nan
+        x = sdnp.asarray(n)
+        assert_same(sdnp.sort(x, axis=1), np.sort(n, axis=1, kind="stable"))
+        assert_same(sdnp.argsort(x, axis=1), np.argsort(n, axis=1, kind="stable"))
+        assert_same(sdnp.sort(x, axis=1, descending=True), -np.sort(-n, axis=1, kind="stable"))
+

@@ -87,6 +87,10 @@ def battery():
         "take with blocks": lambda: (M[:, S(idx[:500] % 900)], T3[:, :, S(idx[:40] % 70)], M[S(idx[:300] % 700)]),
         "mask gather": lambda: (F[S(f > 0.3)], F[S(f > 2.5)], M[S(m > 0)], M[:, S(m[0] > 0)]),
         "mask scatter": lambda: masked_assign(F, S(f > 0.3)),
+        # review fix: full reductions with a cast, now blocked
+        "full reductions with a cast": lambda: (sdnp.sum(B), sdnp.mean(I), sdnp.mean(B), sdnp.sum(I, dtype=sdnp.float64),
+                                                sdnp.var(I), sdnp.any(M), sdnp.all(F), sdnp.prod(B[:, :5]),
+                                                sdnp.sum(S(c), dtype=sdnp.complex128), sdnp.mean(S(t3 > 0))),
     }
     return ops
 
@@ -191,3 +195,19 @@ def test_resize_while_others_compute():
     t.join()
     assert errors == []
     assert math.isfinite(sdnp.sum(x))
+
+
+def test_full_reductions_with_a_cast_are_exact_or_close():
+    # Blocked now (review fix): integer results exact, float sums within
+    # rounding of numpy (not its bits: DESIGN.md §2.4).
+    rng = np.random.default_rng(2)
+    b = rng.random(3_000_001) < 0.3
+    i = rng.integers(-10**6, 10**6, (1500, 2001))
+    for n in (1, 10):
+        sdnp.set_num_threads(n)
+        assert sdnp.sum(sdnp.asarray(b)) == np.sum(b)
+        assert sdnp.sum(sdnp.asarray(b[::3])) == np.sum(b[::3])
+        assert sdnp.sum(sdnp.asarray(i), dtype=sdnp.float64) == pytest.approx(np.sum(i, dtype=np.float64), rel=1e-15)
+        assert sdnp.mean(sdnp.asarray(i)) == pytest.approx(np.mean(i), rel=1e-12)
+        assert sdnp.mean(sdnp.asarray(b)) == np.mean(b)  # an integer-valued sum is exact
+
