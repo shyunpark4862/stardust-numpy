@@ -10,7 +10,9 @@
 #include "ops/lanes.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <utility>
 #include <type_traits>
 #include <memory>
 #include <string>
@@ -110,6 +112,64 @@ std::int64_t load_nans_last(const std::byte* x, std::int64_t stride, std::int64_
     }
 }
 
+// ---- int64: LSD radix sort (Tier 3 item 12, user decision 2026-11-10) ----
+// Picked by dtype and lane length only, never by looking at the data. Stable,
+// so it serves sort and argsort alike. The key maps signed order to unsigned
+// order (sign bit flipped); for descending it is inverted, so larger values
+// come first and equal ones keep their order -- what the comparator gives.
+//
+// Keys are counted relative to the smallest one, so only the 8-bit digits
+// of (max - min) are sorted: a lane of values in [-1000, 1000) takes two
+// passes, not eight. (Without that, mixed signs made every digit vary --
+// 0x7F/0x80 on top, 0xFF/0x00 below -- and the narrow range was the slower
+// one, measured.) One pass counts every digit; a digit where all keys have
+// the same byte moves nothing and is skipped.
+
+// Below these lengths the fixed cost (clearing and summing up to 8 x 256
+// counts per lane) loses. Measured on 2^20 int64 in lanes of n, one thread:
+// values against the NEON sort, n = 512: 6.4 ms radix vs 5.9 (wide range),
+// n = 1024: 6.0 vs 6.8; pairs against merge sort, n = 64: 15.2 vs 13.2,
+// n = 128: 10.6 vs 16.0.
+inline constexpr std::int64_t kRadixMinValues = 1024;
+inline constexpr std::int64_t kRadixMinPairs = 128;
+
+inline std::uint64_t radix_key(std::int64_t v, bool descending) {
+    const std::uint64_t u = static_cast<std::uint64_t>(v) ^ (std::uint64_t{1} << 63);
+    return descending ? ~u : u;
+}
+
+template <typename E, typename Key>
+void radix_sort(E* a, std::int64_t n, Key key) {
+    std::uint64_t lo = ~std::uint64_t{0}, hi = 0;
+    for (std::int64_t i = 0; i < n; ++i) {
+        const std::uint64_t k = key(a[i]);
+        lo = std::min(lo, k);
+        hi = std::max(hi, k);
+    }
+    int digits = 0;
+    while (digits < 8 && ((hi - lo) >> (8 * digits)) != 0) ++digits;
+    if (digits == 0) return;  // every key equal: a stable sort leaves the lane as it is
+    std::array<std::array<std::int64_t, 256>, 8> count;
+    for (int d = 0; d < digits; ++d) count[d].fill(0);
+    for (std::int64_t i = 0; i < n; ++i) {
+        const std::uint64_t k = key(a[i]) - lo;
+        for (int d = 0; d < digits; ++d) ++count[d][(k >> (8 * d)) & 255];
+    }
+    const LaneBuffer<E> tmp(n, 1);
+    E* src = a;
+    E* dst = tmp.get();
+    for (int d = 0; d < digits; ++d) {
+        std::array<std::int64_t, 256>& c = count[d];
+        auto digit = [&](const E& e) { return ((key(e) - lo) >> (8 * d)) & 255; };
+        if (c[digit(a[0])] == n) continue;  // one byte value for all keys
+        std::int64_t sum = 0;
+        for (std::int64_t& v : c) sum += std::exchange(v, sum);  // counts -> first slots
+        for (std::int64_t i = 0; i < n; ++i) dst[c[digit(src[i])]++] = src[i];
+        std::swap(src, dst);
+    }
+    if (src != a) std::copy(src, src + n, a);
+}
+
 template <typename T>
 void sort_buffer(T* a, std::int64_t n, bool stable, auto less) {
     if (stable) {
@@ -137,6 +197,9 @@ bool zeros_of_both_signs(const T* a, std::int64_t n) {
 
 template <typename T>
 void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
+    if constexpr (ops::is_int<T>) {
+        if (n >= kRadixMinValues) return radix_sort(a, n, [descending](T v) { return radix_key(v, descending); });
+    }
     if constexpr (ops::is_float<T> || ops::is_int<T>) {
         bool simd = n >= kSimdMin;
         if constexpr (ops::is_float<T>) simd = simd && (!stable || !zeros_of_both_signs(a, n));
@@ -147,6 +210,17 @@ void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
         }
     }
     sort_buffer(a, n, stable, Order<T>{descending});
+}
+
+// (value, index) pairs: argsort and unique_parts.
+template <typename T>
+void sort_keyed(Keyed<T>* a, std::int64_t n, bool stable, bool descending) {
+    if constexpr (ops::is_int<T>) {
+        if (n >= kRadixMinPairs)
+            return radix_sort(a, n, [descending](const Keyed<T>& e) { return radix_key(e.value, descending); });
+    }
+    const Order<T> order{descending};
+    sort_buffer(a, n, stable, [&](const Keyed<T>& x, const Keyed<T>& y) { return order(x.value, y.value); });
 }
 
 // ------------------------------------------------------------ sort lanes
@@ -170,9 +244,7 @@ void argsort_lane(const std::byte* x, std::byte* o, const LaneCtx& c) {
     const LaneBuffer<Keyed<T>> buf(c.n, 0);
     const std::int64_t m = load_nans_last<T>(x, c.x_stride, c.n, buf.get(),
                                              [](std::int64_t i, T v) { return Keyed<T>{v, i}; });
-    const Order<T> order{cfg.descending};
-    sort_buffer(buf.get(), m, cfg.stable,
-                [&](const Keyed<T>& a, const Keyed<T>& b) { return order(a.value, b.value); });
+    sort_keyed(buf.get(), m, cfg.stable, cfg.descending);
     for (std::int64_t i = 0; i < c.n; ++i) *reinterpret_cast<std::int64_t*>(o + i * c.o_stride) = buf[i].index;
 }
 
@@ -223,9 +295,7 @@ UniqueParts unique_parts(const NDArray& x) {
         auto buf = buffer<Keyed<T>>(n);
         const std::int64_t m = load_nans_last<T>(flat.data, flat.itemsize(), n, buf.get(),
                                                  [](std::int64_t i, T v) { return Keyed<T>{v, i}; });
-        const Order<T> ascending{false};
-        sort_buffer(buf.get(), m, /*stable=*/true,
-                    [&](const Keyed<T>& a, const Keyed<T>& b) { return ascending(a.value, b.value); });
+        sort_keyed(buf.get(), m, /*stable=*/true, /*descending=*/false);
         for (std::int64_t i = 0; i < n; ++i) {
             order[i] = buf[i].index;
             if (i == 0 || !same(buf[i - 1].value, buf[i].value)) starts.push_back(i);

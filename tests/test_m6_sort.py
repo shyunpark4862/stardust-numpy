@@ -211,3 +211,25 @@ def test_many_lanes_short_and_long():
         assert_same(sdnp.argsort(x, axis=1), np.argsort(n, axis=1, kind="stable"))
         assert_same(sdnp.sort(x, axis=1, descending=True), -np.sort(-n, axis=1, kind="stable"))
 
+
+
+@pytest.mark.parametrize("n", [127, 128, 1023, 1024, 5000, 70_000])
+@pytest.mark.parametrize("kind", ["wide", "narrow", "extremes", "equal", "one-digit"])
+def test_int64_radix_sort_matches_stable_numpy(n, kind):
+    # Tier 3 item 12: int64 lanes from 128 (pairs) / 1024 (values) elements
+    # are radix sorted, relative to the smallest key.
+    rng = np.random.default_rng(n)
+    lo, hi = {"wide": (-2**63, 2**63 - 1), "narrow": (-1000, 1000), "extremes": (-2**63, 2**63 - 1),
+              "equal": (7, 8), "one-digit": (-100, 100)}[kind]
+    a = rng.integers(lo, hi, n, endpoint=True)
+    if kind == "extremes":
+        a[::3] = -2**63
+        a[1::5] = 2**63 - 1
+    x = sdnp.asarray(a)
+    assert_same(sdnp.sort(x), np.sort(a, kind="stable"))
+    assert_same(sdnp.argsort(x), np.argsort(a, kind="stable"))
+    assert_same(sdnp.sort(x, descending=True), np.sort(a)[::-1])
+    want_desc = np.argsort(-a.astype(object), kind="stable").astype(np.int64)  # ties keep their order
+    assert_same(sdnp.argsort(x, descending=True), want_desc)
+    two = sdnp.asarray(np.stack([a, a[::-1]]))
+    assert_same(sdnp.argsort(two, axis=1), np.argsort(np.stack([a, a[::-1]]), axis=1, kind="stable"))
