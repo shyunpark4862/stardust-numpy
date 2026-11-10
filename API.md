@@ -183,6 +183,10 @@ cumulative_prod(x, /, *, axis=None, dtype=None, include_initial=False)
   - 명시적 변환으로 취급한다. 입력을 그 dtype으로 변환한 뒤 누적한다 (M1의 `dtype=` 규칙).
   - `dtype=bool`은 `TypeError`다 (M5에서 결정). C13에 따라 덧셈과 곱셈에는 bool 루프가 없기 때문이다. 대신 `any`/`all`을 쓴다.
 - `any`, `all`은 모든 dtype을 받는다. 판정 기준은 `x != 0`이며, NaN은 참이다.
+- **float/complex `prod`, `cumulative_prod`의 오버플로**: 곱하는 순서가 numpy와 다르다 (DESIGN.md §2.4).
+  - 중간값이 float 범위를 넘는 입력에서는 결과가 numpy와 크게 다를 수 있다. numpy가 유한한 값일 때 `inf`나 `nan`이 나올 수 있고, 그 반대도 있다.
+  - 예: `prod(asarray([1e200, 1e-200] * 8))`은 `nan`이다. numpy는 `1.0`이다.
+  - 결과는 스레드 수와 무관하다.
 
 ## 7. 정렬, 집합, 선형대수
 ```
