@@ -473,6 +473,70 @@ nb::object gather_one(const Plan& plan) {
     return wrap(std::move(out));
 }
 
+// ---- one index array with whole blocks around it (M10+) ------------------
+// x[..., idx, ...] = take along one axis: result[pre, b, post] =
+// view[pre, idx[b], post]. The general path walked the index points and
+// copied each point's block through an iterator of its own -- fine for long
+// contiguous blocks (m[rows]), slow when the blocks are short (p3[idx]: one
+// iterator per 3 elements, 3.4x numpy) or far apart (m[:, rows]: 1000
+// strided columns written into a C-order result, 1.4x numpy).
+//
+// Instead it is one elementwise loop over the result shape with three
+// operands: the view without the indexed axis (stride 0 along B), the index
+// array (stride 0 along the block axes) and the result. The iterator then
+// picks the memory-friendly order and the parallel split, as for any
+// elementwise operation; the kernel turns the index into a byte offset.
+// Every index is checked first (B elements, not the result's), so the loop
+// itself has no error path.
+
+struct Take {
+    std::int64_t len, stride;  // the indexed axis of the view
+};
+
+// args: view (block base), index, out
+template <typename T>
+void take_loop(std::byte* const* args, std::int64_t n, const std::int64_t* s, void* ctx) {
+    const Take& c = *static_cast<const Take*>(ctx);
+    if (s[1] == 0) {  // one index for the whole run: a block copy (m[rows])
+        const std::byte* src = args[0] + wrap_index(load_as<std::int64_t>(args[1]), c.len) * c.stride;
+        if (s[0] == sizeof(T) && s[2] == sizeof(T)) {
+            std::memcpy(args[2], src, static_cast<size_t>(n) * sizeof(T));
+        } else {
+            for (std::int64_t t = 0; t < n; ++t) *reinterpret_cast<T*>(args[2] + t * s[2]) = load_as<T>(src + t * s[0]);
+        }
+        return;
+    }
+    for (std::int64_t t = 0; t < n; ++t) {
+        const std::int64_t i = wrap_index(load_as<std::int64_t>(args[1] + t * s[1]), c.len);
+        *reinterpret_cast<T*>(args[2] + t * s[2]) = load_as<T>(args[0] + t * s[0] + i * c.stride);
+    }
+}
+
+nb::object gather_take(const Plan& plan) {
+    const NDArray& v = plan.view;
+    const NDArray& ix = plan.indices[0];
+    check_indices(ix, v.shape[plan.first], plan.first);
+    NDArray out = new_array(v.dtype, result_shape(plan, ix.shape_span()));
+    // The view and the index array, both stretched to the result shape.
+    Dims vs{}, is{};
+    for (int d = 0; d < out.ndim; ++d) {
+        if (d < plan.first) {
+            vs[d] = v.strides[d];
+        } else if (d < plan.first + ix.ndim) {
+            is[d] = ix.strides[d - plan.first];
+        } else {
+            vs[d] = v.strides[d - ix.ndim + 1];
+        }
+    }
+    const auto rshape = out.shape_span();
+    const IterOperand ops[] = {{v.data, rshape, {vs.data(), rshape.size()}},
+                               {ix.data, rshape, {is.data(), rshape.size()}},
+                               operand(out)};
+    Take c{v.shape[plan.first], v.strides[plan.first]};
+    visit_dtype(v.dtype, [&]<typename T>(std::type_identity<T>) { NdIter(rshape, ops).run(&take_loop<T>, &c); });
+    return wrap(std::move(out));
+}
+
 // Calls visit(copy), where copy(s, d) copies one block (`src_block`'s shape
 // and strides at s) to d (`dst_block`'s layout), converting dtype. Choosing
 // the copy once, outside the per-point loop, lets the common case -- single
@@ -544,6 +608,7 @@ nb::object gather_mask(const Plan& plan) {
 
 nb::object gather(const Plan& plan) {
     if (one_index(plan)) return gather_one(plan);
+    if (plan.indices.size() == 1) return gather_take(plan);
     const std::vector<std::int64_t> bshape = index_shape(plan);
     const int k = static_cast<int>(plan.indices.size());
     const int bd = static_cast<int>(bshape.size());
