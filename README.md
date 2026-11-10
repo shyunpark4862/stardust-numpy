@@ -52,6 +52,7 @@ python3.15 -m venv .venv && .venv/bin/pip install nanobind scikit-build-core pyt
 배율은 numpy 시간 대비다. 1보다 작으면 우리가 빠르다.
 
 ## 문서
+- **처음 본다면**: [안내서](docs/guide/README.md). 구조, 알고리즘, 설계 이유를 주제별로 설명한 13장짜리 교과서다.
 - 설계: [DESIGN.md](DESIGN.md), [API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md), [ROADMAP.md](ROADMAP.md)
 - 마일스톤별 해설: [docs/learn/](docs/learn/README.md)
 - 벤치마크: `bench/`, 측정 기록은 `bench/results/`
