@@ -87,6 +87,10 @@ def battery():
         "take with blocks": lambda: (M[:, S(idx[:500] % 900)], T3[:, :, S(idx[:40] % 70)], M[S(idx[:300] % 700)]),
         "mask gather": lambda: (F[S(f > 0.3)], F[S(f > 2.5)], M[S(m > 0)], M[:, S(m[0] > 0)]),
         "mask scatter": lambda: masked_assign(F, S(f > 0.3)),
+        # Tier 3 item 15: small batched BLAS matmuls on the pool
+        "batched small matmul": lambda: (S(m[:640].reshape(10, 64, 900)[:, :, :64]) @ S(m[:640, :64].reshape(10, 64, 64)),
+                                         S(m.reshape(-1)[:64_000].reshape(1000, 8, 8)) @ M[:8, :8],
+                                         S(c[:32_000].reshape(500, 8, 8)) @ S(c[:32_000].reshape(500, 8, 8))),
         # Tier 3 item 13: one long lane sorted in pieces and merged
         "long 1-D sort": lambda: (sdnp.sort(F), sdnp.argsort(F), sdnp.sort(F, stable=False),
                                   sdnp.argsort(S(idx), descending=True), sdnp.unique_all(S(idx % 5000))),

@@ -183,6 +183,13 @@ void int_matmul(const Mat& a, const Mat& b, std::int64_t* c) {
 
 }  // namespace
 
+// Batched BLAS on the pool (Tier 3 item 15, user decision 2026-11-10):
+// matrices of at most kSmallBlas multiply-adds, grouped into tasks of about
+// kBlasTaskWork. Accelerate ran a square dgemm on one thread up to 256
+// (CPU time / wall time 1.00) and on several from 288 (1.62), measured.
+inline constexpr std::int64_t kSmallBlas = 256 * 256 * 256;
+inline constexpr std::int64_t kBlasTaskWork = 1 << 15;
+
 nb::object matmul(nb::handle x1, nb::handle x2) {
     const NDArray& a0 = require_ndarray(x1, "x1");
     const NDArray& b0 = require_ndarray(x2, "x2");
@@ -245,14 +252,26 @@ nb::object matmul(nb::handle x1, nb::handle x2) {
             int_matmul(am, bm, reinterpret_cast<std::int64_t*>(out.data + (t * m + r0) * n * item));
         });
     } else {
-        // BLAS: Accelerate threads internally; batches go one after another
-        // so the two never compete (ARCHITECTURE.md §6.4, DESIGN.md §2.7).
-        for (std::int64_t t = 0; t < count; ++t) {
+        auto one_batch = [&](std::int64_t t) {
             const Mat am{starts[t].first, m, k, a_rs, a_cs}, bm{starts[t].second, k, n, b_rs, b_cs};
             std::byte* pc = out.data + t * m * n * item;
             visit_dtype(d, [&]<typename T>(std::type_identity<T>) {
                 if constexpr (ops::is_float<T> || ops::is_cplx<T>) blas_matmul(am, bm, reinterpret_cast<T*>(pc));
             });
+        };
+        // BLAS: Accelerate threads internally on large matrices; their batches
+        // go one after another so the two never compete (ARCHITECTURE.md §6.4).
+        // Small ones it runs on the calling thread (Tier 3 item 15): those
+        // batches go to the pool, several per task. Each matrix is still one
+        // BLAS call of its own, so the bits do not change.
+        const std::int64_t work = m * n * k;
+        if (count > 1 && work <= kSmallBlas && parallel::available()) {
+            const std::int64_t per_task = std::max<std::int64_t>(1, kBlasTaskWork / std::max<std::int64_t>(work, 1));
+            parallel::parallel_for((count + per_task - 1) / per_task, [&](std::int64_t task) {
+                for (std::int64_t t = task * per_task; t < std::min(count, (task + 1) * per_task); ++t) one_batch(t);
+            });
+        } else {
+            for (std::int64_t t = 0; t < count; ++t) one_batch(t);
         }
     }
 

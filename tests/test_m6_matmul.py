@@ -109,3 +109,17 @@ def test_large_against_numpy():
     np.testing.assert_allclose(np.asarray(sdnp.asarray(a) @ sdnp.asarray(b)), a @ b, rtol=1e-10, atol=1e-10)
     ia, ib = rng.integers(-100, 100, (120, 80)), rng.integers(-100, 100, (80, 90))
     assert_same(sdnp.asarray(ia) @ sdnp.asarray(ib), ia @ ib)
+
+
+def test_small_batches_on_the_pool_match_numpy():
+    # Tier 3 item 15: batches of matrices up to 256^3 multiply-adds run on
+    # the pool, each still one BLAS call.
+    rng = np.random.default_rng(5)
+    for shape_a, shape_b in [((1000, 8, 8), (1000, 8, 8)), ((3, 50, 4, 7), (50, 7, 5)), ((40, 128, 64), (64, 32)),
+                             ((300, 1, 6), (300, 6, 1)), ((4, 300, 300), (4, 300, 300))]:
+        a, b = rng.random(shape_a), rng.random(shape_b)
+        got = np.asarray(sdnp.asarray(a) @ sdnp.asarray(b))
+        assert got.shape == (a @ b).shape
+        np.testing.assert_allclose(got, a @ b, rtol=1e-13)
+    c = rng.random((200, 5, 5)) + 1j * rng.random((200, 5, 5))
+    np.testing.assert_allclose(np.asarray(sdnp.asarray(c) @ sdnp.asarray(c)), c @ c, rtol=1e-13)
