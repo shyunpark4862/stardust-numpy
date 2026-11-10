@@ -8,6 +8,7 @@
 #include "kernels/sort.hpp"
 #include "ops/copy.hpp"
 #include "ops/lanes.hpp"
+#include "parallel/pool.hpp"
 
 #include <algorithm>
 #include <array>
@@ -138,8 +139,69 @@ inline std::uint64_t radix_key(std::int64_t v, bool descending) {
     return descending ? ~u : u;
 }
 
+// A long lane is cut into pieces of kSortPiece elements for the pool (Tier
+// 3 item 13, below); only when the pool can run them, unless the pieces
+// show in the result.
+inline constexpr std::int64_t kSortPiece = 1 << 16;
+
+inline bool use_pieces(std::int64_t n, bool pieces_show) {
+    return n >= 2 * kSortPiece && (pieces_show || parallel::available());
+}
+
+// The radix sort on the pool: every pass counts its digit piece by piece,
+// turns the counts into each piece's first slot per byte value (byte value
+// first, then piece, in order) and scatters the pieces in parallel. The
+// result is the stable order, whatever the pieces.
+template <typename E, typename Key>
+void radix_sort_parallel(E* a, std::int64_t n, Key key) {
+    const std::int64_t pieces = (n + kSortPiece - 1) / kSortPiece;
+    auto range = [&](std::int64_t t) { return std::pair{t * kSortPiece, std::min(n, (t + 1) * kSortPiece)}; };
+    std::vector<std::uint64_t> los(pieces), his(pieces);
+    parallel::parallel_for(pieces, [&](std::int64_t t) {
+        std::uint64_t lo = ~std::uint64_t{0}, hi = 0;
+        for (auto [i, end] = range(t); i < end; ++i) {
+            const std::uint64_t k = key(a[i]);
+            lo = std::min(lo, k);
+            hi = std::max(hi, k);
+        }
+        los[t] = lo;
+        his[t] = hi;
+    });
+    const std::uint64_t lo = *std::min_element(los.begin(), los.end());
+    const std::uint64_t hi = *std::max_element(his.begin(), his.end());
+    int digits = 0;
+    while (digits < 8 && ((hi - lo) >> (8 * digits)) != 0) ++digits;
+    auto tmp = buffer<E>(n);
+    E* src = a;
+    E* dst = tmp.get();
+    std::vector<std::array<std::int64_t, 256>> slot(pieces);
+    for (int d = 0; d < digits; ++d) {
+        auto digit = [&](const E& e) { return ((key(e) - lo) >> (8 * d)) & 255; };
+        parallel::parallel_for(pieces, [&](std::int64_t t) {
+            slot[t].fill(0);
+            for (auto [i, end] = range(t); i < end; ++i) ++slot[t][digit(src[i])];
+        });
+        std::int64_t sum = 0;
+        bool moves = true;
+        for (int b = 0; b < 256; ++b) {
+            std::int64_t total = 0;
+            for (std::int64_t t = 0; t < pieces; ++t) total += slot[t][b];
+            if (total == n) moves = false;  // one byte value for all keys
+            for (std::int64_t t = 0; t < pieces; ++t) sum += std::exchange(slot[t][b], sum);
+        }
+        if (!moves) continue;
+        parallel::parallel_for(pieces, [&](std::int64_t t) {
+            std::array<std::int64_t, 256>& c = slot[t];
+            for (auto [i, end] = range(t); i < end; ++i) dst[c[digit(src[i])]++] = src[i];
+        });
+        std::swap(src, dst);
+    }
+    if (src != a) std::copy(src, src + n, a);
+}
+
 template <typename E, typename Key>
 void radix_sort(E* a, std::int64_t n, Key key) {
+    if (use_pieces(n, false)) return radix_sort_parallel(a, n, key);
     std::uint64_t lo = ~std::uint64_t{0}, hi = 0;
     for (std::int64_t i = 0; i < n; ++i) {
         const std::uint64_t k = key(a[i]);
@@ -196,7 +258,7 @@ bool zeros_of_both_signs(const T* a, std::int64_t n) {
 }
 
 template <typename T>
-void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
+void sort_values_serial(T* a, std::int64_t n, bool stable, bool descending) {
     if constexpr (ops::is_int<T>) {
         if (n >= kRadixMinValues) return radix_sort(a, n, [descending](T v) { return radix_key(v, descending); });
     }
@@ -214,13 +276,105 @@ void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
 
 // (value, index) pairs: argsort and unique_parts.
 template <typename T>
-void sort_keyed(Keyed<T>* a, std::int64_t n, bool stable, bool descending) {
+void sort_keyed_serial(Keyed<T>* a, std::int64_t n, bool stable, bool descending) {
     if constexpr (ops::is_int<T>) {
         if (n >= kRadixMinPairs)
             return radix_sort(a, n, [descending](const Keyed<T>& e) { return radix_key(e.value, descending); });
     }
     const Order<T> order{descending};
     sort_buffer(a, n, stable, [&](const Keyed<T>& x, const Keyed<T>& y) { return order(x.value, y.value); });
+}
+
+// ---- one long lane on several threads (Tier 3 item 13) ---------------------
+// ARCHITECTURE §6.2 used to sort a single lane on one thread (user decision
+// 2026-11-10 to change it). A lane of 2 x kSortPiece or more is cut into
+// pieces of kSortPiece elements -- by length alone, never by thread count --
+// each sorted by the serial algorithm on the pool. Then the sorted runs are
+// merged pairwise, level by level. A merge is cut into output chunks of
+// kMergeChunk; where a chunk starts in each run is found by binary search
+// (the "merge path"), so the chunks of every level run in parallel too.
+// Ties take the left run first: merging stable runs gives the stable result
+// exactly, and a values-only sort gives the same values.
+//
+// The merges cost passes a one-thread sort does not make (sort(i) of 1M:
+// 5.8 ms radix, 13.6 ms in pieces on one thread), so pieces are used only
+// when the pool can run them -- the result is the same either way. Except
+// for a float sort with stable=False: there the NEON sort's order of -0.0
+// and +0.0 depends on the pieces, so it always takes them, keeping the
+// result independent of the thread count (DESIGN §2.4).
+
+inline constexpr std::int64_t kMergeChunk = 1 << 15;
+
+// How many elements of A come first among the first k of merge(A, B), A
+// winning ties.
+template <typename E, typename Less>
+std::int64_t co_rank(std::int64_t k, const E* A, std::int64_t na, const E* B, std::int64_t nb, Less less) {
+    std::int64_t lo = std::max<std::int64_t>(0, k - nb), hi = std::min(k, na);
+    while (lo < hi) {
+        const std::int64_t i = lo + (hi - lo) / 2, j = k - i;
+        if (j > 0 && i < na && !less(B[j - 1], A[i])) lo = i + 1;  // A[i] goes before B[j-1]: take more of A
+        else hi = i;
+    }
+    return lo;
+}
+
+template <typename E, typename SortPiece, typename Less>
+void sort_long(E* a, std::int64_t n, SortPiece sort_piece, Less less) {
+    const std::int64_t pieces = (n + kSortPiece - 1) / kSortPiece;
+    parallel::parallel_for(pieces, [&](std::int64_t t) {
+        const std::int64_t begin = t * kSortPiece;
+        sort_piece(a + begin, std::min(kSortPiece, n - begin));
+    });
+    auto tmp = buffer<E>(n);
+    E* src = a;
+    E* dst = tmp.get();
+    struct Task {
+        std::int64_t left, mid, right, k0, k1;  // runs [left, mid) and [mid, right); output [left+k0, left+k1)
+    };
+    std::vector<Task> tasks;
+    for (std::int64_t w = kSortPiece; w < n; w *= 2) {
+        tasks.clear();
+        for (std::int64_t left = 0; left < n; left += 2 * w) {
+            const std::int64_t mid = std::min(left + w, n), right = std::min(left + 2 * w, n);
+            for (std::int64_t k = 0; k < right - left; k += kMergeChunk)
+                tasks.push_back({left, mid, right, k, std::min(k + kMergeChunk, right - left)});
+        }
+        parallel::parallel_for(static_cast<std::int64_t>(tasks.size()), [&](std::int64_t t) {
+            const Task& c = tasks[t];
+            const E* A = src + c.left;
+            const E* B = src + c.mid;
+            const std::int64_t na = c.mid - c.left, nb = c.right - c.mid;
+            std::int64_t i = co_rank(c.k0, A, na, B, nb, less), j = c.k0 - i;
+            const std::int64_t i1 = co_rank(c.k1, A, na, B, nb, less), j1 = c.k1 - i1;
+            E* out = dst + c.left + c.k0;
+            while (i < i1 && j < j1) {  // branch-free: random data mispredicts half the time
+                const bool take_b = less(B[j], A[i]);
+                *out++ = take_b ? B[j] : A[i];
+                j += take_b;
+                i += !take_b;
+            }
+            out = std::copy(A + i, A + i1, out);
+            std::copy(B + j, B + j1, out);
+        });
+        std::swap(src, dst);
+    }
+    if (src != a) std::copy(src, src + n, a);
+}
+
+template <typename T>
+void sort_values(T* a, std::int64_t n, bool stable, bool descending) {
+    // int64 takes the radix sort, parallel by itself
+    if (ops::is_int<T> || !use_pieces(n, ops::is_float<T> && !stable))
+        return sort_values_serial(a, n, stable, descending);
+    sort_long(a, n, [&](T* p, std::int64_t m) { sort_values_serial(p, m, stable, descending); }, Order<T>{descending});
+}
+
+template <typename T>
+void sort_keyed(Keyed<T>* a, std::int64_t n, bool stable, bool descending) {
+    if (ops::is_int<T> || !use_pieces(n, false)) return sort_keyed_serial(a, n, stable, descending);  // pairs: always stable
+    const Order<T> order{descending};
+    sort_long(a, n, [&](Keyed<T>* p, std::int64_t m) { sort_keyed_serial(p, m, stable, descending); },
+              [order](const Keyed<T>& x, const Keyed<T>& y) { return order(x.value, y.value); });
 }
 
 // ------------------------------------------------------------ sort lanes

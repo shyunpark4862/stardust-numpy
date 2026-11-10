@@ -87,6 +87,9 @@ def battery():
         "take with blocks": lambda: (M[:, S(idx[:500] % 900)], T3[:, :, S(idx[:40] % 70)], M[S(idx[:300] % 700)]),
         "mask gather": lambda: (F[S(f > 0.3)], F[S(f > 2.5)], M[S(m > 0)], M[:, S(m[0] > 0)]),
         "mask scatter": lambda: masked_assign(F, S(f > 0.3)),
+        # Tier 3 item 13: one long lane sorted in pieces and merged
+        "long 1-D sort": lambda: (sdnp.sort(F), sdnp.argsort(F), sdnp.sort(F, stable=False),
+                                  sdnp.argsort(S(idx), descending=True), sdnp.unique_all(S(idx % 5000))),
         # review fix: full reductions with a cast, now blocked
         "full reductions with a cast": lambda: (sdnp.sum(B), sdnp.mean(I), sdnp.mean(B), sdnp.sum(I, dtype=sdnp.float64),
                                                 sdnp.var(I), sdnp.any(M), sdnp.all(F), sdnp.prod(B[:, :5]),

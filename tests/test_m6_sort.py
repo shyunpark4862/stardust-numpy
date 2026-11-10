@@ -233,3 +233,25 @@ def test_int64_radix_sort_matches_stable_numpy(n, kind):
     assert_same(sdnp.argsort(x, descending=True), want_desc)
     two = sdnp.asarray(np.stack([a, a[::-1]]))
     assert_same(sdnp.argsort(two, axis=1), np.argsort(np.stack([a, a[::-1]]), axis=1, kind="stable"))
+
+
+@pytest.mark.parametrize("n", [2 * 65536 - 1, 2 * 65536, 3 * 65536 + 17, 600_001])
+def test_long_lane_parallel_sort_is_the_stable_result(n):
+    # Tier 3 item 13: pieces of 65536 sorted on the pool, then merged.
+    rng = np.random.default_rng(n)
+    f = rng.integers(-50, 50, n).astype(np.float64) * 0.5  # many ties
+    f[::101] = np.nan
+    f[::7] = 0.0
+    f[3::7] = -0.0
+    i = rng.integers(-2**40, 2**40, n)
+    for a in (f, i):
+        x = sdnp.asarray(a)
+        assert_same(sdnp.sort(x), np.sort(a, kind="stable"))
+        assert_same(sdnp.argsort(x), np.argsort(a, kind="stable"))
+        if a is i:
+            assert_same(sdnp.argsort(x, descending=True), np.argsort(-a, kind="stable"))
+        assert np.array_equal(np.asarray(sdnp.sort(x, stable=False)), np.sort(a), equal_nan=True)
+    want = np.unique_counts(i[: n // 2] % 1000)
+    got = sdnp.unique_counts(sdnp.asarray(i[: n // 2] % 1000))
+    assert_same(got.values, want.values)
+    assert_same(got.counts, want.counts)
