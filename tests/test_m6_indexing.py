@@ -184,3 +184,70 @@ def test_one_index_mixed_dtype_value_and_threads():
         assert results[0] == results[1] == results[2] == src[idx].tobytes()
     finally:
         sdnp.set_num_threads(before)
+
+
+# M10+: one index array with whole blocks (one loop over the result shape),
+# and boolean masks in fixed chunks. Results must equal numpy exactly.
+
+@pytest.mark.parametrize("layout", ["C", "F", "reversed", "strided"])
+def test_take_along_one_axis_layouts(layout):
+    base = np.arange(6 * 7 * 8, dtype=np.float64).reshape(6, 7, 8) * 0.5
+    a = {"C": base, "F": np.asfortranarray(base), "reversed": base[::-1, :, ::-1],
+         "strided": np.arange(12 * 7 * 16.0).reshape(12, 7, 16)[::2, :, ::2]}[layout]
+    x = sdnp.asarray(a)
+    for key in [(slice(None), [3, -1, 0, 3]), (Ellipsis, np.array([[1, -8], [7, 0]])), ([5, -6, 2],),
+                (slice(None), slice(None), [2]), (slice(None), [6] * 3, slice(1, 5))]:
+        sd_key = tuple(sdnp.asarray(np.asarray(k)) if isinstance(k, (list, np.ndarray)) else k for k in key)
+        assert_same(x[sd_key], a[key])
+    with pytest.raises(IndexError, match="index 7 is out of bounds for axis 1"):
+        x[:, sdnp.asarray([0, 7])]
+    for dt in (np.int64, np.complex128, np.bool_):
+        b = (base * 3).astype(dt)
+        assert_same(sdnp.asarray(b)[:, sdnp.asarray([2, 0, -1])], b[:, [2, 0, -1]])
+
+
+@pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 255, 256, 257, 16_383, 16_384, 16_385, 100_003])
+@pytest.mark.parametrize("density", [0.0, 0.01, 0.5, 1.0])
+def test_mask_chunks_match_numpy(n, density):
+    rng = np.random.default_rng(n)
+    mask = rng.random(n) < density
+    for dt in (np.float64, np.int64, np.bool_, np.complex128):
+        a = (rng.standard_normal(n) * 100).astype(dt)
+        x = sdnp.asarray(a)
+        assert_same(x[sdnp.asarray(mask)], a[mask])
+        assert_same(sdnp.asarray(a[::-1])[sdnp.asarray(mask)], a[::-1][mask])
+        assert_same(x[sdnp.asarray(mask[::-1])], a[mask[::-1]])  # a strided (reversed) mask
+        want = a.copy()
+        fill = (a[:1] if n else np.zeros(1, dt))[0]
+        want[mask] = fill
+        y = sdnp.asarray(a.copy())
+        y[sdnp.asarray(mask)] = fill.item()
+        assert_same(y, want)
+        k = int(mask.sum())
+        want = a.copy()
+        want[mask] = a[:k][::-1]
+        y = sdnp.asarray(a.copy())
+        y[sdnp.asarray(mask)] = sdnp.asarray(a[:k][::-1])
+        assert_same(y, want)
+
+
+def test_mask_chunks_multi_axis_and_blocks():
+    rng = np.random.default_rng(3)
+    a = rng.standard_normal((300, 200))
+    m2 = rng.random((300, 200)) < 0.3
+    assert_same(sdnp.asarray(a)[sdnp.asarray(m2)], a[m2])
+    assert_same(sdnp.asarray(a.T)[sdnp.asarray(m2.T)], a.T[m2.T])
+    rows = rng.random(300) < 0.5
+    assert_same(sdnp.asarray(a)[sdnp.asarray(rows)], a[rows])  # blocks of 200 elements
+    assert_same(sdnp.asarray(a)[:, sdnp.asarray(rows[:200])], a[:, rows[:200]])
+    want = a.copy()
+    want[m2] = -1.0
+    x = sdnp.asarray(a.copy())
+    x[sdnp.asarray(m2)] = -1.0
+    assert_same(x, want)
+    nan = np.array([np.nan, -0.0, 1.0] * 7000)
+    y = sdnp.asarray(nan.copy())
+    y[sdnp.asarray(nan == 1.0)] = 2.0  # untouched elements keep their bits (nan, -0.0)
+    want = nan.copy()
+    want[nan == 1.0] = 2.0
+    assert np.asarray(y).tobytes() == want.tobytes()

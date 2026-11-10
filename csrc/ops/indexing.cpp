@@ -6,12 +6,14 @@
 #include "kernels/cast.hpp"
 #include "kernels/elementwise.hpp"
 #include "ops/creation.hpp"
+#include "parallel/pool.hpp"
 
 #include <array>
 #include <atomic>
 #include <cstring>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace sd {
@@ -566,42 +568,239 @@ void with_block_copy(const NDArray& src_block, const NDArray& dst_block, Visit&&
     });
 }
 
-// Walks the mask in C order and calls on_true(b, offset) for the b-th true
-// element, `offset` being its byte offset in the view (mask axes only).
+// ---- boolean masks in fixed chunks (M10+) ----------------------------------
+// The mask is cut, in C order, into chunks of kMaskChunk elements. Pass 1
+// counts the true elements of every chunk; their running sum says where
+// each chunk's selection starts in the result (or in the assigned value);
+// pass 2 walks each chunk on its own. Both passes run on the pool. The
+// chunks depend on the mask's size only and every element lands at its C
+// order position, so the result is the serial one exactly.
+
+inline constexpr std::int64_t kMaskChunk = 1 << 14;
+
+// Calls on_run(mask, mask_step, view_offset, view_step, n) for the runs (parts
+// of the last mask axis) covering C-order mask elements [begin, end).
+// view_offset is the byte offset in the view, over the mask axes only.
 template <typename F>
-void walk_mask(const Plan& plan, F&& on_true) {
-    const NDArray& m = plan.mask;
-    const std::int64_t* vs = plan.view.strides.data() + plan.first;
+void mask_runs(const NDArray& m, const std::int64_t* vs, std::int64_t begin, std::int64_t end, F&& on_run) {
+    const int last = m.ndim - 1;
     std::array<std::int64_t, kMaxNdim> idx{};
-    std::int64_t offset = 0, b = 0;
-    for_each_element<1>(m.shape_span(), {m.data}, {m.strides.data()}, [&](std::byte* p) {
-        if (*reinterpret_cast<const bool*>(p)) on_true(b++, offset);
-        for (int d = m.ndim - 1; d >= 0; --d) {
-            offset += vs[d];
+    const std::byte* mp = m.data;
+    std::int64_t vo = 0;
+    for (std::int64_t d = last, rem = begin; d >= 0; --d) {  // the multi-index of `begin`
+        idx[d] = rem % m.shape[d];
+        rem /= m.shape[d];
+        mp += idx[d] * m.strides[d];
+        vo += idx[d] * vs[d];
+    }
+    for (std::int64_t pos = begin; pos < end;) {
+        const std::int64_t n = std::min(m.shape[last] - idx[last], end - pos);
+        on_run(mp, m.strides[last], vo, vs[last], n);
+        pos += n;
+        idx[last] += n;
+        mp += n * m.strides[last];
+        vo += n * vs[last];
+        if (idx[last] < m.shape[last]) continue;
+        mp -= m.shape[last] * m.strides[last];
+        vo -= m.shape[last] * vs[last];
+        idx[last] = 0;
+        for (int d = last - 1; d >= 0; --d) {  // C-order odometer over the other mask axes
+            mp += m.strides[d];
+            vo += vs[d];
             if (++idx[d] < m.shape[d]) break;
-            offset -= vs[d] * m.shape[d];
+            mp -= m.shape[d] * m.strides[d];
+            vo -= m.shape[d] * vs[d];
             idx[d] = 0;
         }
+    }
+}
+
+// Calls f(view_offset) for every true element of one run, in order. A
+// contiguous run skips eight false elements at a time (sparse masks: x[m]
+// with 1% true was 3.5x numpy, one branch per element).
+template <typename F>
+void for_true(const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n, F&& f) {
+    std::int64_t t = 0;
+    if (ms == 1) {
+        for (; t + 8 <= n; t += 8) {
+            std::uint64_t word;
+            std::memcpy(&word, mp + t, 8);
+            if (word == 0) continue;
+            for (int k = 0; k < 8; ++k)
+                if (mp[t + k] != std::byte{0}) f(vo + (t + k) * vstep);
+        }
+    }
+    for (; t < n; ++t)
+        if (*reinterpret_cast<const bool*>(mp + t * ms)) f(vo + t * vstep);
+}
+
+struct MaskChunks {
+    std::int64_t size = 0, chunks = 0, total = 0;
+    std::vector<std::int64_t> start;  // where each chunk's selection begins
+};
+
+MaskChunks count_mask(const Plan& plan) {
+    const NDArray& m = plan.mask;
+    MaskChunks mc;
+    mc.size = m.size();
+    mc.chunks = (mc.size + kMaskChunk - 1) / kMaskChunk;
+    mc.start.assign(static_cast<size_t>(mc.chunks) + 1, 0);
+    const std::int64_t* vs = plan.view.strides.data() + plan.first;
+    parallel::parallel_for(mc.chunks, [&](std::int64_t c) {
+        std::int64_t count = 0;
+        mask_runs(m, vs, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
+                  [&](const std::byte* mp, std::int64_t ms, std::int64_t, std::int64_t, std::int64_t n) {
+                      if (ms == 1) {
+                          const std::uint8_t* q = reinterpret_cast<const std::uint8_t*>(mp);
+                          std::uint32_t part = 0;  // a run never exceeds kMaskChunk elements
+                          for (std::int64_t t = 0; t < n; ++t) part += q[t];
+                          count += part;
+                      } else {
+                          for (std::int64_t t = 0; t < n; ++t) count += *reinterpret_cast<const bool*>(mp + t * ms);
+                      }
+                  });
+        mc.start[c + 1] = count;
     });
+    for (std::int64_t c = 0; c < mc.chunks; ++c) mc.start[c + 1] += mc.start[c];
+    mc.total = mc.start[mc.chunks];
+    return mc;
 }
 
-std::int64_t mask_count(const NDArray& m) {
-    std::int64_t count = 0;
-    for_each_element<1>(m.shape_span(), {m.data}, {m.strides.data()},
-                        [&](std::byte* p) { count += *reinterpret_cast<const bool*>(p); });
-    return count;
+// Calls on_true(b, view_offset) for every true element of chunk c, b being
+// its position in the whole selection.
+template <typename F>
+void walk_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, F&& on_true) {
+    std::int64_t b = mc.start[c];
+    mask_runs(plan.mask, plan.view.strides.data() + plan.first, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
+              [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
+                  for_true(mp, ms, vo, vstep, n, [&](std::int64_t off) { on_true(b++, off); });
+              });
 }
 
-// x[mask]: count, allocate, then copy the selected blocks in one walk.
-nb::object gather_mask(const Plan& plan) {
+// x[mask] for single elements of one dtype, chunk c. A run is taken 256
+// elements at a time; the trues of each piece are counted first (a vector
+// sum), then
+//   - few (< 32): only those are visited, skipping eight falses at a time;
+//   - more: every element is copied into a small buffer and the buffer
+//     position moves by the mask byte -- no branch to mispredict (a random
+//     half-true mask cost 2.2 ms per 1M with one branch per element) --
+//     and the buffer goes out with one memcpy.
+// Writing the buffer, not the result, keeps every write inside the chunk's
+// own part of the result.
+template <typename T>
+void compress_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, std::byte* out, std::int64_t step) {
+    constexpr std::int64_t kPiece = 256;
+    const std::byte* src = plan.view.data;
+    std::int64_t b = mc.start[c];
+    auto put = [&](const T* buf, std::int64_t cnt) {
+        if (step == sizeof(T)) std::memcpy(out + b * step, buf, static_cast<size_t>(cnt) * sizeof(T));
+        else for (std::int64_t j = 0; j < cnt; ++j) *reinterpret_cast<T*>(out + (b + j) * step) = buf[j];
+        b += cnt;
+    };
+    mask_runs(plan.mask, plan.view.strides.data() + plan.first, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
+              [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
+                  if (ms != 1) {
+                      for_true(mp, ms, vo, vstep, n, [&](std::int64_t off) {
+                          *reinterpret_cast<T*>(out + b++ * step) = load_as<T>(src + off);
+                      });
+                      return;
+                  }
+                  const std::uint8_t* q = reinterpret_cast<const std::uint8_t*>(mp);
+                  T buf[kPiece];
+                  for (std::int64_t t0 = 0; t0 < n; t0 += kPiece) {
+                      const std::int64_t m = std::min(kPiece, n - t0);
+                      std::uint32_t trues = 0;
+                      for (std::int64_t t = 0; t < m; ++t) trues += q[t0 + t];
+                      if (trues == 0) continue;
+                      std::int64_t cnt = 0;
+                      if (trues < 32) {
+                          for_true(mp + t0, 1, vo + t0 * vstep, vstep, m,
+                                   [&](std::int64_t off) { buf[cnt++] = load_as<T>(src + off); });
+                      } else {
+                          const std::byte* p = src + vo + t0 * vstep;
+                          for (std::int64_t t = 0; t < m; ++t) {
+                              buf[cnt] = load_as<T>(p + t * vstep);
+                              cnt += q[t0 + t];
+                          }
+                      }
+                      put(buf, cnt);
+                  }
+              });
+}
+
+// x[mask] = w for single elements of one dtype, chunk c (w: the value laid
+// over the selection, step bytes apart, 0 for a broadcast scalar). The same
+// pieces as compress_chunk; with many trues every element of the piece is
+// rewritten, with w's next value or its own: x[i] = mask[i] ? w[b] : x[i].
+// Only this chunk's elements are touched, so chunks stay independent.
+template <typename T>
+void expand_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, const std::byte* w, std::int64_t step) {
+    constexpr std::int64_t kPiece = 256;
+    std::byte* dst = plan.view.data;
+    std::int64_t b = mc.start[c];
+    mask_runs(plan.mask, plan.view.strides.data() + plan.first, c * kMaskChunk, std::min(mc.size, (c + 1) * kMaskChunk),
+              [&](const std::byte* mp, std::int64_t ms, std::int64_t vo, std::int64_t vstep, std::int64_t n) {
+                  auto sparse = [&](const std::byte* mq, std::int64_t mstep, std::int64_t off0, std::int64_t m) {
+                      for_true(mq, mstep, off0, vstep, m, [&](std::int64_t off) {
+                          *reinterpret_cast<T*>(dst + off) = load_as<T>(w + b++ * step);
+                      });
+                  };
+                  if (ms != 1) return sparse(mp, ms, vo, n);
+                  const std::uint8_t* q = reinterpret_cast<const std::uint8_t*>(mp);
+                  for (std::int64_t t0 = 0; t0 < n; t0 += kPiece) {
+                      const std::int64_t m = std::min(kPiece, n - t0);
+                      std::uint32_t trues = 0;
+                      for (std::int64_t t = 0; t < m; ++t) trues += q[t0 + t];
+                      if (trues < 32) {
+                          if (trues > 0) sparse(mp + t0, 1, vo + t0 * vstep, m);
+                          continue;
+                      }
+                      std::byte* p = dst + vo + t0 * vstep;
+                      if (step == 0) {
+                          // A broadcast scalar: a select on the raw words with
+                          // a mask made from the mask byte. Written as
+                          // `q ? val : *e` the compiler turned it back into a
+                          // branch around the store (2.2 ms per 1M, measured).
+                          using W = std::conditional_t<sizeof(T) % 8 == 0, std::uint64_t, std::uint8_t>;
+                          constexpr int kWords = sizeof(T) / sizeof(W);
+                          W val[kWords];
+                          std::memcpy(val, w, sizeof(T));
+                          for (std::int64_t t = 0; t < m; ++t) {
+                              W* e = reinterpret_cast<W*>(p + t * vstep);
+                              const W keep = static_cast<W>(q[t0 + t]) - 1;  // all ones where false
+                              for (int j = 0; j < kWords; ++j) e[j] = (e[j] & keep) | (val[j] & ~keep);
+                          }
+                      } else {
+                          for (std::int64_t t = 0; t < m; ++t) {
+                              T* e = reinterpret_cast<T*>(p + t * vstep);
+                              const T val = load_as<T>(w + b * step);  // b stays inside the selection: < total
+                              *e = q[t0 + t] ? val : *e;
+                              b += q[t0 + t];
+                          }
+                      }
+                      if (step == 0) b += trues;
+                  }
+              });
+}
+
+// x[mask]: count, allocate, then copy the selected blocks chunk by chunk.
+nb::object gather_mask(const Plan& plan, const MaskChunks& mc) {
     const NDArray& v = plan.view;
     const int k = plan.mask.ndim;
-    const std::int64_t count[] = {mask_count(plan.mask)};
+    const std::int64_t count[] = {mc.total};
     NDArray out = new_array(v.dtype, result_shape(plan, count));
     const std::int64_t step = out.strides[plan.first];
     const NDArray src = block_of(v, plan.first, k), dst = block_of(out, plan.first, 1);
+    if (src.ndim == 0) {
+        visit_dtype(v.dtype, [&]<typename T>(std::type_identity<T>) {
+            parallel::parallel_for(mc.chunks, [&](std::int64_t c) { compress_chunk<T>(plan, mc, c, out.data, step); });
+        });
+        return wrap(std::move(out));
+    }
     with_block_copy(src, dst, [&](auto copy) {
-        walk_mask(plan, [&](std::int64_t b, std::int64_t offset) { copy(src.data + offset, dst.data + b * step); });
+        parallel::parallel_for(mc.chunks, [&](std::int64_t c) {
+            walk_chunk(plan, mc, c, [&](std::int64_t b, std::int64_t off) { copy(src.data + off, dst.data + b * step); });
+        });
     });
     return wrap(std::move(out));
 }
@@ -647,7 +846,7 @@ nb::object value_array(nb::handle value, DType target) {
 
 nb::object getitem(nb::handle x, nb::handle key) {
     Plan plan = make_plan(x, key);
-    if (plan.mask_only) return gather_mask(plan);  // advanced: always a copy
+    if (plan.mask_only) return gather_mask(plan, count_mask(plan));  // advanced: always a copy
     if (!plan.indices.empty()) return gather(plan);
     if (plan.view.ndim == 0) return load_python(plan.view.dtype, plan.view.data);
     return wrap(std::move(plan.view));
@@ -665,8 +864,10 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
 
     // The value broadcast over the result shape (strict: never more axes).
     std::vector<std::int64_t> shape;
+    MaskChunks mc;
     if (plan.mask_only) {
-        const std::int64_t count[] = {mask_count(plan.mask)};
+        mc = count_mask(plan);
+        const std::int64_t count[] = {mc.total};
         shape = result_shape(plan, count);
     } else {
         shape = result_shape(plan, index_shape(plan));
@@ -706,8 +907,17 @@ void scatter(nb::handle x, const Plan& plan, nb::handle value) {
     if (plan.mask_only) {
         const NDArray from = block_of(w, plan.first, 1), to = block_of(plan.view, plan.first, plan.mask.ndim);
         const std::int64_t step = w.strides[plan.first];
-        with_block_copy(from, to, [&](auto copy) {
-            walk_mask(plan, [&](std::int64_t b, std::int64_t offset) { copy(from.data + b * step, to.data + offset); });
+        if (from.ndim == 0 && from.dtype == to.dtype) {
+            visit_dtype(to.dtype, [&]<typename T>(std::type_identity<T>) {
+                parallel::parallel_for(mc.chunks, [&](std::int64_t c) { expand_chunk<T>(plan, mc, c, from.data, step); });
+            });
+            return;
+        }
+        with_block_copy(from, to, [&](auto copy) {  // every element is written once: chunks are independent
+            parallel::parallel_for(mc.chunks, [&](std::int64_t c) {
+                walk_chunk(plan, mc, c,
+                           [&](std::int64_t b, std::int64_t off) { copy(from.data + b * step, to.data + off); });
+            });
         });
         return;
     }

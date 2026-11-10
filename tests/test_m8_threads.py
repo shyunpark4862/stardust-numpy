@@ -83,8 +83,20 @@ def battery():
                                sdnp.cumulative_sum(F[::-2]), sdnp.cumulative_sum(I.reshape(-1)[:100_003]),
                                sdnp.cumulative_sum(S(m.reshape(-1)[:90_000].reshape(30_000, 3)), axis=0),
                                sdnp.cumulative_prod(P, include_initial=True)),
+        # M10+ tier 2: take along one axis, masks in chunks.
+        "take with blocks": lambda: (M[:, S(idx[:500] % 900)], T3[:, :, S(idx[:40] % 70)], M[S(idx[:300] % 700)]),
+        "mask gather": lambda: (F[S(f > 0.3)], F[S(f > 2.5)], M[S(m > 0)], M[:, S(m[0] > 0)]),
+        "mask scatter": lambda: masked_assign(F, S(f > 0.3)),
     }
     return ops
+
+
+def masked_assign(x, mask):
+    a = x.copy()
+    a[mask] = -1.0
+    b = x.copy()
+    b[mask] = sdnp.arange(float(sdnp.sum(mask)))
+    return a, b
 
 
 def test_results_do_not_depend_on_thread_count():
