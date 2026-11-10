@@ -16,3 +16,10 @@ experiments/**/out/
 
 # macOS
 .DS_Store
+
+# Kept locally, not published
+*.md
+!/README.md
+!/API.md
+bench/
+experiments/
