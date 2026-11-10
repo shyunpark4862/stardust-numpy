@@ -844,7 +844,44 @@ nb::object value_array(nb::handle value, DType target) {
 
 }  // namespace
 
+// x[i], x[i, j, ...]: Python ints on the leading axes only -- the most
+// common tiny calls -- skip the key machinery (Items, Plan): the offset is
+// computed directly and the result is the element itself (one int per axis)
+// or a view of the remaining axes. x[1, 2] took 58 ns, numpy 31 ns, nearly
+// all of it in building and walking the general plan (M10+). Anything
+// unusual -- a bool, an int too large, an index out of range -- returns an
+// invalid object and takes the general path, which raises as usual.
+nb::object leading_ints_fast(nb::handle x, PyObject* key) {
+    const NDArray& a = as_ndarray(x);
+    PyObject* const* items = &key;
+    Py_ssize_t n = 1;
+    if (PyTuple_Check(key)) {
+        items = &PyTuple_GET_ITEM(key, 0);
+        n = PyTuple_GET_SIZE(key);
+    }
+    if (n == 0 || n > a.ndim) return {};
+    std::byte* p = a.data;
+    for (Py_ssize_t d = 0; d < n; ++d) {
+        if (!PyLong_CheckExact(items[d])) return {};
+        int overflow = 0;
+        long long i = PyLong_AsLongLongAndOverflow(items[d], &overflow);
+        if (overflow) return {};
+        if (i < 0) i += a.shape[d];
+        if (i < 0 || i >= a.shape[d]) return {};
+        p += i * a.strides[d];
+    }
+    if (n == a.ndim) return load_python(a.dtype, p);
+    NDArray v = view_of(x);
+    v.data = p;
+    v.ndim = a.ndim - static_cast<int>(n);
+    std::copy(a.shape.begin() + n, a.shape.begin() + a.ndim, v.shape.begin());
+    std::copy(a.strides.begin() + n, a.strides.begin() + a.ndim, v.strides.begin());
+    v.update_flags();
+    return wrap(std::move(v));
+}
+
 nb::object getitem(nb::handle x, nb::handle key) {
+    if (nb::object r = leading_ints_fast(x, key.ptr()); r.is_valid()) return r;
     Plan plan = make_plan(x, key);
     if (plan.mask_only) return gather_mask(plan, count_mask(plan));  // advanced: always a copy
     if (!plan.indices.empty()) return gather(plan);

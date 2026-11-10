@@ -251,3 +251,25 @@ def test_mask_chunks_multi_axis_and_blocks():
     want = nan.copy()
     want[nan == 1.0] = 2.0
     assert np.asarray(y).tobytes() == want.tobytes()
+
+
+def test_leading_int_fast_path_keeps_the_rules():
+    a = np.arange(24.0).reshape(2, 3, 4)
+    x = sdnp.asarray(a)
+    assert x[1, 2, 3] == 23.0 and x[-1, -3, -4] == 12.0 and type(x[0, 0, 0]) is float
+    assert_same(x[1], a[1])
+    assert_same(x[-1, 1], a[-1, 1])
+    assert_same(x[(0,)], a[0])
+    v = x[1]
+    assert v.base is not None
+    v[0, 0] = -5.0
+    assert x[1, 0, 0] == -5.0  # a view, not a copy
+    for bad, exc in [((2, 0, 0), IndexError), ((0, -4), IndexError), ((0, 0, 0, 0), IndexError),
+                     ((2**70,), IndexError), ((0, 0, 1.0), IndexError)]:
+        with pytest.raises(exc):
+            x[bad]
+    b = sdnp.asarray(np.arange(3))
+    assert_same(b[sdnp.asarray([True, False, True])], np.array([0, 2]))
+    assert b[-1] == 2 and type(b[0]) is int
+    with pytest.raises(IndexError, match="index 3 is out of bounds for axis 0 with size 3"):
+        b[3]
