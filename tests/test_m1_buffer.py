@@ -91,6 +91,24 @@ def test_misaligned_buffer_is_copied():
 
 # --------------------------------------------------------- export (sdnp -> numpy)
 
+
+def test_bool_bytes_other_than_0_and_1_are_normalized():
+    # Our bool kernels count trues by adding bytes, so a '?' buffer holding
+    # other bytes is copied as 0/1 instead of shared (review fix, 2026-11-10).
+    raw = np.frombuffer(bytes([2, 0, 255, 1] * 2048), dtype=np.bool_)
+    m = sdnp.asarray(raw)
+    assert m.base is not raw
+    assert set(np.asarray(m).view(np.uint8).tolist()) == {0, 1}
+    assert sdnp.sum(m) == 6144 and not sdnp.all(m)
+    x = sdnp.arange(8192.0)
+    assert_same(x[m], np.arange(8192.0)[raw.view(np.uint8) != 0])
+    strided = np.frombuffer(bytes([2, 1] * 8), dtype=np.bool_)[::2]
+    assert np.asarray(sdnp.asarray(strided)).view(np.uint8).tolist() == [1] * 8
+    with pytest.raises(ValueError, match="bytes other than 0 and 1"):
+        sdnp.asarray(raw, copy=False)
+    ok = np.frombuffer(bytes([1, 0] * 8), dtype=np.bool_)
+    assert sdnp.asarray(ok, copy=False).base is ok
+
 def test_numpy_sees_our_memory():
     a = sdnp.zeros((2, 3), dtype=sdnp.int64)
     view = np.asarray(a)

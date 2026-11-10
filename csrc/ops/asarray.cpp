@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace sd {
@@ -26,6 +27,7 @@ const char* kNoZeroDim =
 
 template <typename T>
 T load(const std::byte* p) {
+    if constexpr (std::is_same_v<T, bool>) return load<std::uint8_t>(p) != 0;  // any nonzero '?' byte is true
     T v;
     std::memcpy(&v, p, sizeof(T));  // memcpy: imported buffers need not be aligned
     return v;
@@ -253,7 +255,24 @@ nb::object from_buffer(nb::handle obj, std::optional<DType> dtype, std::optional
     bool aligned = reinterpret_cast<std::uintptr_t>(view.buf) % align == 0;
     for (int d = 0; d < view.ndim; ++d) aligned = aligned && foreign.strides[d] % static_cast<std::int64_t>(align) == 0;
 
-    if (is_storage_of(src, target) && aligned && copy != true) {
+    // Our bool kernels add the bytes to count trues, so a shared bool buffer
+    // must hold only 0 and 1; any other byte makes it a normalizing copy.
+    // The OR of all bytes is at most 1 exactly then (a branch-free scan).
+    bool valid = true;
+    if (target == DType::Bool && is_storage_of(src, target) && aligned && copy != true) {
+        std::uint8_t any = 0;
+        foreign.update_flags();
+        if (foreign.c_contiguous) {
+            const auto* q = static_cast<const std::uint8_t*>(view.buf);
+            for (std::int64_t i = 0, n = foreign.size(); i < n; ++i) any |= q[i];
+        } else {
+            for_each_element<1>(foreign.shape_span(), {static_cast<std::byte*>(view.buf)}, {foreign.strides.data()},
+                                [&](std::byte* p) { any |= *reinterpret_cast<const std::uint8_t*>(p); });
+        }
+        valid = any <= 1;
+    }
+
+    if (is_storage_of(src, target) && aligned && valid && copy != true) {
         foreign.data = static_cast<std::byte*>(view.buf);
         foreign.writeable = !view.readonly;
         foreign.base = nb::borrow(view.obj ? view.obj : obj.ptr());
@@ -262,7 +281,9 @@ nb::object from_buffer(nb::handle obj, std::optional<DType> dtype, std::optional
         foreign.buffer = Buffer::adopt(view);
         return wrap(std::move(foreign));
     }
-    if (copy == false) throw nb::value_error("copy=False, but this buffer can only be converted by copying");
+    if (copy == false)
+        throw nb::value_error(valid ? "copy=False, but this buffer can only be converted by copying"
+                                    : "copy=False, but this bool buffer holds bytes other than 0 and 1");
 
     NDArray dst = new_array_like(foreign, target);  // keeps the source's memory order
     visit_src(src, [&]<typename S>(std::type_identity<S>) {

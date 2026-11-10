@@ -296,3 +296,56 @@ def test_advanced_results_follow_the_input_layout():
     assert_same(g3, t[:, [[3, 0], [1, 1]]])
     # the B axes sit where axis 1 was (between axes 0 and 2 in memory), C order among themselves
     assert np.asarray(g3).strides == (8, 48, 24, 96)
+
+
+# ------------------------------------------------- review fixes (2026-11-10)
+
+def test_scatter_with_indices_inside_the_target():
+    # The indices are read as they were before the assignment.
+    for n0, key_of in [(np.array([1, 2, 3, 0]), lambda a: a),
+                       (np.array([1, 0]), lambda a: a),
+                       (np.arange(6)[::-1].copy(), lambda a: a[::2])]:
+        for value in (2, 10**12):
+            n, x = n0.copy(), sdnp.asarray(n0.copy())
+            n[key_of(n).copy()] = value
+            x[key_of(x)] = value
+            assert_same(x, n)
+    # two index arrays, one of them a view of x
+    n = np.array([[0, 1], [1, 0]])
+    x = sdnp.asarray(n.copy())
+    want = n.copy()
+    want[n[0].copy(), n[1].copy()] = 7
+    x[x[0], x[1]] = 7
+    assert_same(x, want)
+
+
+def test_mask_assignment_with_mask_inside_the_target():
+    n = np.random.default_rng(1).random(40_000) < 0.5
+    x = sdnp.asarray(n.copy())
+    x[x[::-1]] = False  # the mask is x reversed: writes land where it is still to be read
+    want = n.copy()
+    want[n[::-1].copy()] = False
+    assert_same(x, want)
+
+
+def test_dense_mask_assignment_ending_in_false():
+    # Dense 256-element pieces whose last trues come before falses: the value
+    # array is exactly as long as the selection.
+    n = np.arange(70_000.0)
+    m = np.ones(70_000, dtype=bool)
+    m[-100:] = False
+    m[1000:1100] = False
+    v = -np.arange(float(m.sum()))
+    x = sdnp.asarray(n.copy())
+    x[sdnp.asarray(m)] = sdnp.asarray(v)
+    n[m] = v
+    assert_same(x, n)
+
+
+def test_index_into_an_empty_axis():
+    e = sdnp.zeros(0)
+    with pytest.raises(IndexError, match="index 0 is out of bounds for axis 0 with size 0"):
+        e[sdnp.asarray([0])]
+    with pytest.raises(IndexError):
+        e[sdnp.asarray([-1, 0])]
+    assert_same(e[sdnp.asarray(np.zeros(0, dtype=np.int64))], np.zeros(0))

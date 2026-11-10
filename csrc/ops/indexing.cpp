@@ -497,6 +497,9 @@ nb::object gather_one(const Plan& plan) {
     const NDArray& ix = plan.indices[0];
     NDArray out = new_array(v.dtype, ix.shape_span());  // the result shape is the index shape
     std::atomic<bool> bad{false};
+    // An empty axis has no element 0 to read a bad index as: every index is
+    // bad, so raise before the loop.
+    if (v.shape[0] == 0) check_indices(ix, 0, plan.first);
     OneIndex c{v.data, v.shape[0], v.strides[0], &bad};
     const IterOperand ops[] = {operand(ix), operand(out)};
     visit_dtype(v.dtype, [&]<typename T>(std::type_identity<T>) {
@@ -782,7 +785,10 @@ void expand_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, const 
                       const std::int64_t m = std::min(kPiece, n - t0);
                       std::uint32_t trues = 0;
                       for (std::int64_t t = 0; t < m; ++t) trues += q[t0 + t];
-                      if (trues < 32) {
+                      // The dense loop loads w[b] for false elements too; after the
+                      // selection's last true that is w[total], one past the end,
+                      // so the piece holding it takes the sparse path.
+                      if (trues < 32 || b + trues == mc.total) {
                           if (trues > 0) sparse(mp + t0, 1, vo + t0 * vstep, m);
                           continue;
                       }
@@ -804,7 +810,7 @@ void expand_chunk(const Plan& plan, const MaskChunks& mc, std::int64_t c, const 
                       } else {
                           for (std::int64_t t = 0; t < m; ++t) {
                               T* e = reinterpret_cast<T*>(p + t * vstep);
-                              const T val = load_as<T>(w + b * step);  // b stays inside the selection: < total
+                              const T val = load_as<T>(w + b * step);  // b < total (see above)
                               *e = q[t0 + t] ? val : *e;
                               b += q[t0 + t];
                           }
@@ -924,11 +930,18 @@ namespace {
 
 // x[advanced key] = value: the value is broadcast (strictly) to the result
 // shape, then each index point's block is written into x.
-void scatter(nb::handle x, const Plan& plan, nb::handle value) {
+void scatter(nb::handle x, Plan& plan, nb::handle value) {
     nb::object src_obj = value_array(value, plan.view.dtype);
     NDArray src = as_ndarray(src_obj);
     check_assignable(src.dtype, plan.view.dtype);  // S6
-    if (may_share_memory(src, as_ndarray(x))) src = cast_copy(src, src.dtype);  // e.g. x[i] = x[::-1] (R3)
+    const NDArray& xa = as_ndarray(x);
+    if (may_share_memory(src, xa)) src = cast_copy(src, src.dtype);  // e.g. x[i] = x[::-1] (R3)
+    // Indices that live in x would change under the writes: x[x] = v must
+    // use x's values from before the assignment, and an index rewritten
+    // after its bounds check would write outside x.
+    for (NDArray& ix : plan.indices)
+        if (may_share_memory(ix, xa)) ix = cast_copy(ix, ix.dtype);
+    if (plan.mask_only && may_share_memory(plan.mask, xa)) plan.mask = cast_copy(plan.mask, plan.mask.dtype);
 
     // The value broadcast over the result shape (strict: never more axes).
     std::vector<std::int64_t> shape;
