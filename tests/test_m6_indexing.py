@@ -273,3 +273,26 @@ def test_leading_int_fast_path_keeps_the_rules():
     assert b[-1] == 2 and type(b[0]) is int
     with pytest.raises(IndexError, match="index 3 is out of bounds for axis 0 with size 3"):
         b[3]
+
+
+def test_advanced_results_follow_the_input_layout():
+    a = np.arange(30.0).reshape(5, 6)
+    f = np.asfortranarray(a)
+    rows = sdnp.asarray([4, 0, 2, 2])
+    c_res, f_res = sdnp.asarray(a)[:, rows], sdnp.asarray(f)[:, rows]
+    assert_same(c_res, a[:, [4, 0, 2, 2]])
+    assert_same(f_res, a[:, [4, 0, 2, 2]])
+    assert np.asarray(c_res).flags.c_contiguous and np.asarray(f_res).flags.f_contiguous
+    assert np.asarray(sdnp.asarray(f)[rows % 5]).flags.f_contiguous
+    # two index arrays and masks on an F-ordered input: same values, F layout
+    two = sdnp.asarray(f)[sdnp.asarray([[0, 1], [4, 3]]), sdnp.asarray([5, 0])]
+    assert_same(two, a[[[0, 1], [4, 3]], [5, 0]])
+    t = np.asfortranarray(np.arange(60.0).reshape(3, 4, 5))
+    m = np.array([True, False, True, True])
+    got = sdnp.asarray(t)[:, sdnp.asarray(m)]
+    assert_same(got, t[:, m])
+    assert np.asarray(got).flags.f_contiguous
+    g3 = sdnp.asarray(t)[:, sdnp.asarray([[3, 0], [1, 1]])]
+    assert_same(g3, t[:, [[3, 0], [1, 1]]])
+    # the B axes sit where axis 1 was (between axes 0 and 2 in memory), C order among themselves
+    assert np.asarray(g3).strides == (8, 48, 24, 96)

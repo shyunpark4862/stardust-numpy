@@ -375,6 +375,37 @@ std::vector<std::int64_t> result_shape(const Plan& plan, std::span<const std::in
     return shape;
 }
 
+// The fresh result of an advanced index, laid out like the view (M10+, user
+// decision 2026-11-10), as the result of an elementwise operation is: the
+// view's axes keep their memory order, and the index axes B take the place
+// of the indexed axes (at the outermost of them), in C order among
+// themselves. An F-ordered mT[:, rows] is then an F-ordered result, filled
+// column by column, contiguous on both sides (it was 2.6x numpy into a C
+// result). The gather loops step through B as one block (point b at
+// b * stride of the last B axis); if the layout breaks that (axes of extent
+// 1 or stride 0 can tie), the result falls back to C order.
+NDArray advanced_result(const Plan& plan, std::span<const std::int64_t> bshape) {
+    const NDArray& v = plan.view;
+    const int k = plan.mask_only ? plan.mask.ndim : static_cast<int>(plan.indices.size());
+    const int bd = static_cast<int>(bshape.size());
+    const std::vector<std::int64_t> shape = result_shape(plan, bshape);
+    std::int64_t outer = 0;
+    for (int j = 0; j < k; ++j) outer = std::max(outer, std::abs(v.strides[plan.first + j]));
+    NDArray proto;
+    proto.ndim = static_cast<int>(shape.size());
+    for (int d = 0; d < proto.ndim; ++d) {
+        proto.shape[d] = shape[d];
+        proto.strides[d] = d < plan.first ? v.strides[d] : d < plan.first + bd ? outer : v.strides[d - bd + k];
+    }
+    NDArray out = new_array_like(proto, v.dtype);
+    std::int64_t expect = out.strides[plan.first + bd - 1];
+    for (int j = bd - 1; j >= 0; --j) {
+        if (bshape[j] > 1 && out.strides[plan.first + j] != expect) return new_array(v.dtype, shape);
+        expect *= bshape[j];
+    }
+    return out;
+}
+
 // `a` restricted to the "block" axes (everything but the index axes):
 // shape/strides of a's axes [0, first) and [first + skip, ndim).
 NDArray block_of(const NDArray& a, int first, int skip) {
@@ -518,7 +549,7 @@ nb::object gather_take(const Plan& plan) {
     const NDArray& v = plan.view;
     const NDArray& ix = plan.indices[0];
     check_indices(ix, v.shape[plan.first], plan.first);
-    NDArray out = new_array(v.dtype, result_shape(plan, ix.shape_span()));
+    NDArray out = advanced_result(plan, ix.shape_span());
     // The view and the index array, both stretched to the result shape.
     Dims vs{}, is{};
     for (int d = 0; d < out.ndim; ++d) {
@@ -788,7 +819,7 @@ nb::object gather_mask(const Plan& plan, const MaskChunks& mc) {
     const NDArray& v = plan.view;
     const int k = plan.mask.ndim;
     const std::int64_t count[] = {mc.total};
-    NDArray out = new_array(v.dtype, result_shape(plan, count));
+    NDArray out = advanced_result(plan, count);
     const std::int64_t step = out.strides[plan.first];
     const NDArray src = block_of(v, plan.first, k), dst = block_of(out, plan.first, 1);
     if (src.ndim == 0) {
@@ -811,9 +842,9 @@ nb::object gather(const Plan& plan) {
     const std::vector<std::int64_t> bshape = index_shape(plan);
     const int k = static_cast<int>(plan.indices.size());
     const int bd = static_cast<int>(bshape.size());
-    NDArray out = new_array(plan.view.dtype, result_shape(plan, bshape));
-    // The B axes of the fresh C-order result are contiguous together, so
-    // index point b starts b * (stride of the last B axis) bytes in.
+    NDArray out = advanced_result(plan, bshape);
+    // The B axes of the result form one block (advanced_result), so index
+    // point b starts b * (stride of the last B axis) bytes in.
     const std::int64_t step = out.strides[plan.first + bd - 1];
     const NDArray src = block_of(plan.view, plan.first, k), dst = block_of(out, plan.first, bd);
     with_block_copy(src, dst, [&](auto copy) {
