@@ -43,8 +43,10 @@ struct IterOperand {
 
 inline IterOperand operand(const NDArray& a) { return {a.data, a.shape_span(), a.strides_span()}; }
 
-// Naive and Reorder exist only so the effect of each step can be measured
-// (bench/m2_iterator.py); production code always uses Full.
+// Naive and Reorder exist so the effect of each step can be measured
+// (bench/m2_iterator.py); production code uses Full, except where the index
+// order itself matters: the one-index scatter runs Naive (C order, one
+// thread) so that with repeated indices the last write wins.
 enum class IterMode { Naive, Reorder, Full };
 
 // How run() may split the work across threads (M8). Results never depend on

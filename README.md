@@ -47,9 +47,9 @@ python3.15 -m venv .venv && .venv/bin/pip install nanobind scikit-build-core pyt
 | `sum(f)` | 0.95배 | 0.21배 |
 | `sort(f)` | 0.53배 | 0.53배 |
 | int64 행렬곱 300³ | 0.63배 | 0.095배 |
-| 작은 배열 `x[1, 2]` | 1.8배 | 1.8배 |
+| 작은 배열 `x[1, 2]` | 0.73배 | 0.77배 |
 
-배율은 numpy 시간 대비다. 1보다 작으면 우리가 빠르다.
+배율은 numpy 시간 대비다. 1보다 작으면 우리가 빠르다. `x[1, 2]`는 M10+ 인덱싱 2단계 이후 값이다 (`bench/results/tier2-10-final.md`: 22ns, 10스레드 23ns, numpy 30ns). 나머지는 M10 최종 보고서의 값이다.
 
 ## 문서
 - **처음 본다면**: [안내서](docs/guide/README.md). 구조, 알고리즘, 설계 이유를 주제별로 설명한 13장짜리 교과서다.

@@ -131,6 +131,7 @@ where(condition, x1, x2, /, *, out=None)
 - **피연산자**는 `sdnp.ndarray`와 Python 스칼라(`bool`, `int`, `float`, `complex`)만 받는다 (M4에서 결정).
   - 리스트나 numpy 배열은 `TypeError`다. 필요하면 먼저 `asarray`로 변환한다.
   - 연산자도 같다. numpy 배열과 섞어 쓰면 어느 쪽이 왼쪽이든 `TypeError`다.
+  - 예외: `==`와 `!=`는 에러가 나지 않는다. 양쪽이 모두 `NotImplemented`를 돌려주면 Python이 객체 동일성 비교로 대체하기 때문이다. 그래서 `x == [1, 2]`와 `x == np.array([1, 2])`는 `False`, `!=`는 `True`다 (원소별 비교가 아니다). 원소별로 비교하려면 먼저 `asarray`로 변환한다. `sdnp.equal(x, [1, 2])`는 `TypeError`다.
   - 피연산자가 모두 Python 스칼라이면 결과도 Python 스칼라다 (Z1). 계산은 dtype 의미론을 따른다. 예: `add(2**62, 2**62)`는 wrap된다.
 - **dtype 허용 범위**: numpy는 받지만 Array API는 거부하는 조합은 `TypeError`다 (M4에서 결정).
   - `logical_and`, `logical_or`, `logical_xor`, `logical_not`: bool만 받는다.

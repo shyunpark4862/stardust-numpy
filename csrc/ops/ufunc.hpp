@@ -7,8 +7,8 @@
 //                 above it that the operation has a loop for (numpy's rule).
 //                 C13 and "integers divide in float64" fall out of the tables:
 //                 add has no bool loop, divide has no int64 loop.
-//   3. convert    inputs are cast to the loop dtype (whole arrays for now;
-//                 M7 measures chunked "buffered" casting against this)
+//   3. convert    inputs are cast to the loop dtype chunk by chunk on the way
+//                 (buffered casting, kernels/buffered.hpp; M7.6)
 //   4. run        NdIter over inputs + output; the output is `out=` (S6,
 //                 overlap-safe) or a new array laid out like the inputs
 // With no array operand at all the result is a Python scalar (Z1).

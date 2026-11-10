@@ -40,8 +40,9 @@ bool available();
 // Python threads keep running. An exception from a task is rethrown here.
 void parallel_for(std::int64_t ntasks, const std::function<void(std::int64_t)>& fn);
 
-// Releases the GIL (if this thread holds it) for the lifetime of the object:
-// for long single-threaded work too.
+// Releases the GIL (if this thread holds it) for the lifetime of the object.
+// parallel_for uses it; work that runs on the calling thread alone keeps the
+// GIL.
 class GilRelease {
 public:
     GilRelease();
